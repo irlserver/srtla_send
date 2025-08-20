@@ -35,13 +35,25 @@ cargo build --release
 ## Usage
 
 ```bash
-srtla_send SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
+srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 ```
 
-- SRT_LISTEN_PORT: UDP port on which to receive SRT packets locally
-- SRTLA_HOST: hostname or IP of the SRTLA receiver (e.g., srtla_rec)
-- SRTLA_PORT: UDP port of the SRTLA receiver
-- BIND_IPS_FILE: path to a file with newline-separated local source IPs (uplinks)
+### Required Arguments
+
+- `SRT_LISTEN_PORT`: UDP port on which to receive SRT packets locally
+- `SRTLA_HOST`: hostname or IP of the SRTLA receiver (e.g., srtla_rec)
+- `SRTLA_PORT`: UDP port of the SRTLA receiver
+- `BIND_IPS_FILE`: path to a file with newline-separated local source IPs (uplinks)
+
+### Options
+
+- `--control-socket <PATH>`: Unix domain socket path for remote toggle control (e.g., `/tmp/srtla.sock`)
+- `--classic`: Enable classic mode (disables all enhancements)
+- `--no-stickiness`: Disable connection stickiness
+- `--no-quality`: Disable quality scoring
+- `--priority`: Enable network priority mode
+- `--exploration`: Enable connection exploration
+- `-v, --version`: Print version and exit
 
 ## Example Usage
 
@@ -57,7 +69,23 @@ echo 192.168.1.2 >> /tmp/srtla_ips
 
 With `srtla_send` running on the sender, SRT-enabled applications should stream to port `6000` on the sender and this data will be forwarded through srtla to the receiver.
 
-### Additional Example with Logging
+### Additional Examples
+
+**With logging and Unix socket control:**
+
+```bash
+# Enable info logs and Unix socket control
+RUST_LOG=info ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 rec.example.com 5000 ./uplinks.txt
+```
+
+**With initial toggle states:**
+
+```bash
+# Start with classic mode disabled and priority enabled
+./target/release/srtla_send --no-stickiness --priority 6000 rec.example.com 5000 ./uplinks.txt
+```
+
+**Basic example with logging:**
 
 ```bash
 # Show info logs
@@ -83,15 +111,50 @@ This tool uses `tracing` with `EnvFilter`.
 RUST_LOG=info,hyper=off ./target/release/srtla_send 6000 host 5000 ./uplinks.txt
 ```
 
-## Runtime Toggles (stdin)
+## Runtime Toggles
 
-Type commands into the running process and press Enter:
+The sender supports dynamic runtime configuration changes through two methods:
 
-- `classic on|off`
-- `stick on|off`
-- `quality on|off`
-- `priority on|off`
-- `explore on|off`
+### Method 1: Standard Input (stdin)
+
+Type commands directly into the running process and press Enter:
+
+### Method 2: Unix Domain Socket (Unix only)
+
+Use the `--control-socket` option to enable remote control via Unix socket:
+
+```bash
+# Start with Unix socket control
+./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 10.0.0.1 5000 /tmp/srtla_ips
+
+# Send commands remotely
+echo 'classic on' | socat - UNIX-CONNECT:/tmp/srtla.sock
+echo 'status' | socat - UNIX-CONNECT:/tmp/srtla.sock
+```
+
+### Available Commands
+
+Both methods support the same commands in two formats:
+
+**Traditional format:**
+
+- `classic on|off` - Enable/disable classic mode (disables all enhancements)
+- `stick on|off` - Enable/disable connection stickiness
+- `quality on|off` - Enable/disable quality scoring
+- `priority on|off` - Enable/disable network priority mode
+- `explore on|off` - Enable/disable connection exploration
+
+**Alternative format:**
+
+- `classic=true|false`
+- `stickiness=true|false`
+- `quality=true|false`
+- `priority=true|false`
+- `exploration=true|false`
+
+**Status command:**
+
+- `status` - Display current state of all toggles
 
 These affect selection behavior (stickiness, quality scoring, exploration) in real time. By default, stickiness is enabled.
 
