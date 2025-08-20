@@ -333,6 +333,11 @@ fn select_connection_idx(
                 } else if c.total_nak_count() == 0 {
                     quality_mult = 1.2;
                 }
+
+                // Extra penalty for burst NAKs (multiple NAKs in short time)
+                if c.nak_burst_count() > 1 && tsn < 5000 {
+                    quality_mult *= 0.5; // Halve score for connections with NAK bursts
+                }
             }
             (base * quality_mult).max(0.0)
         };

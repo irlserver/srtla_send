@@ -43,6 +43,9 @@ pub struct SrtlaConnection {
     consecutive_acks_without_nak: i32,
     fast_recovery_mode: bool,
     fast_recovery_start_ms: u64,
+    // Burst NAK tracking (matches Java implementation)
+    nak_burst_count: i32,
+    nak_burst_start_time_ms: u64,
     last_reconnect_attempt_ms: u64,
     reconnect_failure_count: u32,
 }
@@ -78,6 +81,8 @@ impl SrtlaConnection {
             consecutive_acks_without_nak: 0,
             fast_recovery_mode: false,
             fast_recovery_start_ms: 0,
+            nak_burst_count: 0,
+            nak_burst_start_time_ms: 0,
             last_reconnect_attempt_ms: 0,
             reconnect_failure_count: 0,
         })
@@ -283,17 +288,51 @@ impl SrtlaConnection {
                 break;
             }
         }
+
+        // Track NAK statistics and bursts (matches Java implementation)
+        self.nak_count += 1;
+        let current_time = now_ms();
+
+        // Detect NAK bursts (multiple NAKs within 1 second)
+        if current_time.saturating_sub(self.last_nak_time_ms) < 1000 {
+            if self.nak_burst_count == 0 {
+                self.nak_burst_start_time_ms = self.last_nak_time_ms; // Start of burst
+            }
+            self.nak_burst_count += 1;
+        } else {
+            // End of burst - log if it was significant
+            if self.nak_burst_count >= 3 {
+                warn!(
+                    "{}: NAK burst ended - {} NAKs in {}ms",
+                    self.label,
+                    self.nak_burst_count,
+                    self.last_nak_time_ms
+                        .saturating_sub(self.nak_burst_start_time_ms)
+                );
+            }
+            self.nak_burst_count = 1; // Start new burst count
+        }
+
+        self.last_nak_time_ms = current_time;
+        self.consecutive_acks_without_nak = 0;
+
+        // Decrease window (congestion response)
         let old = self.window;
         self.window = (self.window - WINDOW_DECR).max(WINDOW_MIN * WINDOW_MULT);
-        self.nak_count += 1;
-        self.last_nak_time_ms = now_ms();
-        self.consecutive_acks_without_nak = 0;
+
+        // Log window reduction for diagnosis (include burst info)
         if self.window <= 3000 {
+            let burst_info = if self.nak_burst_count > 1 {
+                format!(" [BURST: {} NAKs]", self.nak_burst_count)
+            } else {
+                String::new()
+            };
             warn!(
-                "{}: NAK reduced window {} → {} (seq={})",
-                self.label, old, self.window, seq
+                "{}: NAK reduced window {} → {} (seq={}, total_naks={}{})",
+                self.label, old, self.window, seq, self.nak_count, burst_info
             );
         }
+
         if self.window <= 2000 && !self.fast_recovery_mode {
             self.fast_recovery_mode = true;
             self.fast_recovery_start_ms = self.last_nak_time_ms;
@@ -422,6 +461,10 @@ impl SrtlaConnection {
 
     pub fn total_nak_count(&self) -> i32 {
         self.nak_count
+    }
+
+    pub fn nak_burst_count(&self) -> i32 {
+        self.nak_burst_count
     }
 
     pub fn should_attempt_reconnect(&self) -> bool {

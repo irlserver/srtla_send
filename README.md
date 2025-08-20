@@ -9,6 +9,7 @@ This application is experimental. Be prepared to troubleshoot it and experiment 
 - Multi-uplink bonding using a list of local source IPs
 - Registration flow (REG1/REG2/REG3) with ID propagation
 - SRT ACK and NAK handling (with correct NAK attribution to sending uplink)
+- Burst NAK penalty: Extra quality penalty for connections experiencing packet loss bursts
 - Keepalives with RTT measurement and time-based window recovery
 - Stickiness-aware path selection: score = window / (in_flight + 1)
 - Live IP list reload on Unix via SIGHUP
@@ -188,6 +189,7 @@ Normal registration:
 - For each IP in `BIND_IPS_FILE`, the sender binds a UDP socket and connects to `SRTLA_HOST:SRTLA_PORT`.
 - Incoming SRT UDP packets are read on `SRT_LISTEN_PORT` and forwarded over the currently selected uplink based on the score `window / (in_flight + 1)`, with a minimum switch interval for stickiness.
 - ACKs are applied to all uplinks to reduce in-flight counts; NAKs are attributed to the uplink that originally sent the sequence (tracked), falling back to the receiver uplink if unknown.
+- **Burst NAK Detection**: The system tracks NAK bursts (multiple NAKs within 1 second) per connection. When quality scoring is enabled, connections with recent NAK bursts (>1 NAK in burst, within last 5 seconds) receive an additional 0.5x penalty multiplier to their quality score, helping avoid connections experiencing packet loss issues.
 - Keepalives are sent when idle, and periodically for RTT measurement; the RTT is smoothed. Window recovery is conservative and time-based when there are no recent NAKs.
 
 ## Notes
