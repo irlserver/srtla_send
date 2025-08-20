@@ -17,6 +17,7 @@ pub struct SrtlaRegistrationManager {
 }
 
 impl SrtlaRegistrationManager {
+    #[allow(deprecated)]
     pub fn new() -> Self {
         let mut id = [0u8; SRTLA_ID_LEN];
         rand::thread_rng().fill_bytes(&mut id);
