@@ -19,12 +19,25 @@ jobs:
           target: aarch64-unknown-linux-gnu
 
       # Install cross-compilation dependencies
-      - run: sudo apt update && sudo apt install -y gcc-aarch64-linux-gnu
+      - run: |
+          sudo apt update
+          sudo apt install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          sudo apt install -y libc6-dev-arm64-cross binutils-aarch64-linux-gnu
+          sudo apt install -y pkg-config
+
+      # Verify cross-compiler setup
+      - name: Verify cross-compiler
+        run: |
+          aarch64-linux-gnu-gcc --version
+          rustup target list | grep aarch64-unknown-linux-gnu
 
       # Compile Rust project for ARM64
       - name: Build for ARM64
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
         run: |
-          cargo build --release --target aarch64-unknown-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu --verbose
           mkdir -p build/usr/bin
           cp target/aarch64-unknown-linux-gnu/release/srtla_send build/usr/bin/
 
