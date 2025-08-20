@@ -51,7 +51,6 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 - `--classic`: Enable classic mode (disables all enhancements)
 - `--no-stickiness`: Disable connection stickiness
 - `--no-quality`: Disable quality scoring
-- `--priority`: Enable network priority mode
 - `--exploration`: Enable connection exploration
 - `-v, --version`: Print version and exit
 
@@ -81,8 +80,8 @@ RUST_LOG=info ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 
 **With initial toggle states:**
 
 ```bash
-# Start with classic mode disabled and priority enabled
-./target/release/srtla_send --no-stickiness --priority 6000 rec.example.com 5000 ./uplinks.txt
+# Start with classic mode disabled
+./target/release/srtla_send --no-stickiness 6000 rec.example.com 5000 ./uplinks.txt
 ```
 
 **Basic example with logging:**
@@ -141,7 +140,6 @@ Both methods support the same commands in two formats:
 - `classic on|off` - Enable/disable classic mode (disables all enhancements)
 - `stick on|off` - Enable/disable connection stickiness
 - `quality on|off` - Enable/disable quality scoring
-- `priority on|off` - Enable/disable network priority mode
 - `explore on|off` - Enable/disable connection exploration
 
 **Alternative format:**
@@ -149,7 +147,6 @@ Both methods support the same commands in two formats:
 - `classic=true|false`
 - `stickiness=true|false`
 - `quality=true|false`
-- `priority=true|false`
 - `exploration=true|false`
 
 **Status command:**

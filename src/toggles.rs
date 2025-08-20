@@ -15,7 +15,6 @@ pub struct DynamicToggles {
     pub classic_mode: Arc<AtomicBool>,
     pub stickiness_enabled: Arc<AtomicBool>,
     pub quality_scoring_enabled: Arc<AtomicBool>,
-    pub network_priority_enabled: Arc<AtomicBool>,
     pub exploration_enabled: Arc<AtomicBool>,
 }
 
@@ -26,7 +25,6 @@ impl DynamicToggles {
             classic_mode: Arc::new(AtomicBool::new(false)),
             stickiness_enabled: Arc::new(AtomicBool::new(true)),
             quality_scoring_enabled: Arc::new(AtomicBool::new(true)),
-            network_priority_enabled: Arc::new(AtomicBool::new(false)),
             exploration_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -35,14 +33,12 @@ impl DynamicToggles {
         classic: bool,
         no_stickiness: bool,
         no_quality: bool,
-        priority: bool,
         exploration: bool,
     ) -> Self {
         Self {
             classic_mode: Arc::new(AtomicBool::new(classic)),
             stickiness_enabled: Arc::new(AtomicBool::new(!no_stickiness)),
             quality_scoring_enabled: Arc::new(AtomicBool::new(!no_quality)),
-            network_priority_enabled: Arc::new(AtomicBool::new(priority)),
             exploration_enabled: Arc::new(AtomicBool::new(exploration)),
         }
     }
@@ -104,18 +100,6 @@ fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
                 .store(false, Ordering::Relaxed);
             info!("🔧 Quality scoring: OFF");
         }
-        "priority on" | "priority=true" => {
-            toggles
-                .network_priority_enabled
-                .store(true, Ordering::Relaxed);
-            info!("🔧 Network priority: ON");
-        }
-        "priority off" | "priority=false" => {
-            toggles
-                .network_priority_enabled
-                .store(false, Ordering::Relaxed);
-            info!("🔧 Network priority: OFF");
-        }
         "explore on" | "exploration=true" => {
             toggles.exploration_enabled.store(true, Ordering::Relaxed);
             info!("🔧 Exploration: ON");
@@ -137,10 +121,6 @@ fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
             info!(
                 "  Quality scoring: {}",
                 toggles.quality_scoring_enabled.load(Ordering::Relaxed)
-            );
-            info!(
-                "  Network priority: {}",
-                toggles.network_priority_enabled.load(Ordering::Relaxed)
             );
             info!(
                 "  Exploration: {}",

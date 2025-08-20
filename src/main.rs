@@ -51,9 +51,6 @@ struct Cli {
     /// Disable quality scoring
     #[arg(long = "no-quality")]
     no_quality: bool,
-    /// Enable network priority mode
-    #[arg(long = "priority")]
-    priority: bool,
     /// Enable connection exploration
     #[arg(long = "exploration")]
     exploration: bool,
@@ -82,7 +79,6 @@ async fn main() -> Result<()> {
         args.classic,
         args.no_stickiness,
         args.no_quality,
-        args.priority,
         args.exploration,
     );
 
