@@ -4,6 +4,16 @@ A Rust implementation of the SRTLA bonding sender. SRTLA is a SRT transport prox
 
 This application is experimental. Be prepared to troubleshoot it and experiment with various settings for your needs.
 
+## Credits & Acknowledgments
+
+This Rust implementation builds upon several open source projects and ideas:
+
+- **[Bond Bunny](https://github.com/dimadesu/bond-bunny)** - Android SRTLA bonding app that inspired many of the enhanced connection selection algorithms
+- **[Moblin](https://github.com/eerimoq/moblin)** and **[Moblink](https://github.com/eerimoq/moblink)** - Inspired by ideas and algorithms
+- **[Original SRTLA](https://github.com/BELABOX/srtla)** - The foundational SRTLA protocol and reference implementation by Belabox
+
+The burst NAK penalty logic, quality scoring, and connection exploration features were directly inspired by the Bond Bunny Android implementation.
+
 ## Features
 
 - Multi-uplink bonding using a list of local source IPs
@@ -154,7 +164,19 @@ Both methods support the same commands in two formats:
 
 - `status` - Display current state of all toggles
 
-These affect selection behavior (stickiness, quality scoring, exploration) in real time. By default, stickiness is enabled.
+### Connection Selection Algorithm Details
+
+These toggles affect how the system selects the best connection for sending data:
+
+**Classic SRTLA Algorithm** (`classic`): Matches the original srtla_send logic without any enhancements.
+
+**Quality-Based Scoring** (`quality`): Punishes connections with recent NAKs. More recent NAKs = more punishment. **Double punishment for NAK bursts** (multiple NAKs in short time).
+
+**Connection Exploration** (`explore`): 10% of the time picks the 2nd best network. Every ~5 seconds explores for ~500ms to discover better alternatives.
+
+**Connection Stickiness** (`stick`): Prevents frequent network switches. Uses selected network for at least 500ms to maintain stability.
+
+These affect selection behavior in real time. By default, stickiness is enabled.
 
 ## IP List Reload (Unix only)
 
@@ -201,4 +223,4 @@ Normal registration:
 
 ## License
 
-This component follows the repository's license.
+This Rust implementation is licensed under the MIT License. See the [LICENSE](./LICENSE) file for full details.
