@@ -1,0 +1,128 @@
+name: Build and Upload Debian Package
+
+on:
+  push:
+    branches:
+      - master
+  release:
+    types: [released]
+
+jobs:
+  deb-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install Rust and cross-compilation tools
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: aarch64-unknown-linux-gnu
+
+      # Install cross-compilation dependencies
+      - run: sudo apt update && sudo apt install -y gcc-aarch64-linux-gnu
+
+      # Compile Rust project for ARM64
+      - name: Build for ARM64
+        run: |
+          cargo build --release --target aarch64-unknown-linux-gnu
+          mkdir -p build/usr/bin
+          cp target/aarch64-unknown-linux-gnu/release/srtla_send build/usr/bin/
+
+      - uses: paulhatch/semantic-version@v5.4.0
+        id: semantic
+        with:
+          tag_prefix: ""
+          version_format: ${{ github.event_name == 'release' && '${major}.${minor}.${patch}' || '${major}.${minor}.${patch}-prerelease${increment}' }}
+
+      # Set up package structure
+      - name: Create package directories
+        run: |
+          mkdir -p build/DEBIAN
+          cat > build/DEBIAN/control << EOF
+          Package: srtla
+          Version: ${{ steps.semantic.outputs.version }}
+          Architecture: arm64
+          Maintainer: Thomas Lekanger <mail@datagutt.no>
+          Description: SRT transport proxy with link aggregation for connection bonding
+          Depends: libc6
+          Homepage: https://irlserver.com
+          Section: unknown
+          EOF
+
+      # Build the Debian package
+      - name: Build Debian package
+        run: |
+          dpkg-deb --build build
+          mv build.deb srtla_${{ steps.semantic.outputs.version }}_arm64.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: srtla-arm64.deb
+          path: srtla_${{ steps.semantic.outputs.version }}_arm64.deb
+
+  deb-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install Rust toolchain
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      # Compile Rust project for AMD64
+      - name: Build for AMD64
+        run: |
+          cargo build --release --target x86_64-unknown-linux-gnu
+          mkdir -p build/usr/bin
+          cp target/x86_64-unknown-linux-gnu/release/srtla_send build/usr/bin/
+
+      - uses: paulhatch/semantic-version@v5.4.0
+        id: semantic
+        with:
+          tag_prefix: ""
+          version_format: ${{ github.event_name == 'release' && '${major}.${minor}.${patch}' || '${major}.${minor}.${patch}-prerelease${increment}' }}
+
+      # Set up package structure
+      - name: Create package directories
+        run: |
+          mkdir -p build/DEBIAN
+          cat > build/DEBIAN/control << EOF
+          Package: srtla
+          Version: ${{ steps.semantic.outputs.version }}
+          Architecture: amd64
+          Maintainer: Thomas Lekanger <mail@datagutt.no>
+          Description: SRT transport proxy with link aggregation for connection bonding
+          Depends: libc6
+          Homepage: https://irlserver.com
+          Section: unknown
+          EOF
+
+      # Build the Debian package
+      - name: Build Debian package
+        run: |
+          dpkg-deb --build build
+          mv build.deb srtla_${{ steps.semantic.outputs.version }}_amd64.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: srtla-amd64.deb
+          path: srtla_${{ steps.semantic.outputs.version }}_amd64.deb
+
+  release:
+    needs: [deb-arm64, deb-amd64]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./artifacts/srtla-arm64.deb/srtla_*_arm64.deb
+            ./artifacts/srtla-amd64.deb/srtla_*_amd64.deb
+          token: ${{ secrets.GITHUB_TOKEN }}
