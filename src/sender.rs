@@ -82,11 +82,11 @@ pub async fn run_sender_with_toggles(
                 match instant_rx.recv() {
                     Ok(ack_packet) => {
                         let client_addr = {
-                            if let Ok(addr_guard) = shared_client_addr_clone.lock() {
+                            match shared_client_addr_clone.lock() { Ok(addr_guard) => {
                                 *addr_guard
-                            } else {
+                            } _ => {
                                 None
-                            }
+                            }}
                         };
                         if let Some(client) = client_addr {
                             let _ = local_listener_clone.send_to(&ack_packet, client).await;
