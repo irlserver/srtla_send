@@ -1,6 +1,7 @@
+use std::net::{IpAddr, SocketAddr};
+
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::net::{IpAddr, SocketAddr};
 use tokio::net::UdpSocket;
 // mpsc channel for instant forwarding
 use tokio::time::Instant;

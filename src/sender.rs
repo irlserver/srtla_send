@@ -1,12 +1,13 @@
-use anyhow::{anyhow, Context, Result};
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result, anyhow};
 use tokio::net::UdpSocket;
 #[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 // mpsc is available in tokio::sync
 use tokio::time::{self, Duration, Instant};
 use tracing::{debug, info, warn};

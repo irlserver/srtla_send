@@ -1,14 +1,12 @@
 use std::io::{BufRead, BufReader};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use tracing::{info, warn};
-
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 #[cfg(unix)]
 use tracing::debug;
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct DynamicToggles {

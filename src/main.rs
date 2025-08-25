@@ -23,7 +23,8 @@ struct Cli {
     #[arg(short = 'v', long = "version", action = clap::ArgAction::SetTrue)]
     print_version: bool,
 
-    /// Local UDP port to listen for SRT packets (from srt-live-transmit or SRT app)
+    /// Local UDP port to listen for SRT packets (from srt-live-transmit or SRT
+    /// app)
     #[arg(required_unless_present = "print_version")]
     local_srt_port: Option<u16>,
     /// Receiver host (srtla_rec or SRT listener)
@@ -32,12 +33,14 @@ struct Cli {
     /// Receiver UDP port to send SRTLA packets to
     #[arg(required_unless_present = "print_version")]
     receiver_port: Option<u16>,
-    /// Path to file containing newline-separated local source IPs to use for uplinks
+    /// Path to file containing newline-separated local source IPs to use for
+    /// uplinks
     #[arg(required_unless_present = "print_version")]
     ips_file: Option<String>,
 
     // Toggle control options
-    /// Unix domain socket path for remote toggle control (e.g., /tmp/srtla.sock)
+    /// Unix domain socket path for remote toggle control (e.g.,
+    /// /tmp/srtla.sock)
     #[arg(long = "control-socket")]
     control_socket: Option<String>,
 

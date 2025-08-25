@@ -77,7 +77,7 @@ pub fn create_keepalive_packet() -> Vec<u8> {
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
     let ts = chrono::Utc::now().timestamp_millis() as i64 as u64;
     for i in 0..8 {
-        pkt[2 + i] = ((ts >> (56 - i * 8)) & 0xFF) as u8;
+        pkt[2 + i] = ((ts >> (56 - i * 8)) & 0xff) as u8;
     }
     pkt
 }
@@ -129,7 +129,7 @@ pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
         let mut id = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
         i += 4;
         if (id & 0x8000_0000) != 0 {
-            id &= 0x7FFF_FFFF;
+            id &= 0x7fff_ffff;
             if i + 3 >= buf.len() {
                 break;
             }

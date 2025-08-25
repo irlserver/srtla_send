@@ -73,7 +73,8 @@ impl SrtlaRegistrationManager {
     }
 
     pub async fn reg_driver_send_if_needed(&mut self, connections: &mut [SrtlaConnection]) {
-        // If nothing connected yet, send REG1. Prefer target from REG_NGP; otherwise, pick the first uplink.
+        // If nothing connected yet, send REG1. Prefer target from REG_NGP; otherwise,
+        // pick the first uplink.
         if self.active_connections == 0 {
             let target_idx = if let Some(idx) = self.reg1_target_idx {
                 Some(idx)
