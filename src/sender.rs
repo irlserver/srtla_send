@@ -10,7 +10,7 @@ use tokio::net::UdpSocket;
 use tokio::signal::unix::{SignalKind, signal};
 // mpsc is available in tokio::sync
 use tokio::time::{self, Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::connection::SrtlaConnection;
 use crate::protocol::{self, MTU};
@@ -19,6 +19,7 @@ use crate::toggles::DynamicToggles;
 
 const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 const MAX_SEQUENCE_TRACKING: usize = 10_000;
+const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
 pub async fn run_sender_with_toggles(
     local_srt_port: u16,
@@ -106,6 +107,9 @@ pub async fn run_sender_with_toggles(
     let mut last_switch_time: Option<Instant> = None;
     // stickiness interval defined at module level
 
+    // Connection failure tracking
+    let mut all_failed_at: Option<Instant> = None;
+
     // Prepare SIGHUP stream (Unix only)
     #[cfg(unix)]
     let mut sighup = signal(SignalKind::hangup())?;
@@ -119,7 +123,7 @@ pub async fn run_sender_with_toggles(
             }
             _ = interval.tick() => {
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
-                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic).await?;
+                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
             _ = sighup.recv() => {
                 info!("received SIGHUP - reloading uplink IPs from {}", ips_file);
@@ -138,7 +142,7 @@ pub async fn run_sender_with_toggles(
             }
             _ = interval.tick() => {
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
-                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic).await?;
+                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
         }
     }
@@ -176,12 +180,12 @@ async fn handle_srt_packet(
             let classic = toggles
                 .classic_mode
                 .load(std::sync::atomic::Ordering::Relaxed);
-            
+
             // Classic mode overrides all other toggles
             let effective_enable_stick = enable_stick && !classic;
             let effective_enable_quality = enable_quality && !classic;
             let effective_enable_explore = enable_explore && !classic;
-            
+
             let sel_idx = select_connection_idx(
                 connections,
                 if effective_enable_stick {
@@ -238,6 +242,7 @@ async fn handle_housekeeping(
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, usize>,
     classic: bool,
+    all_failed_at: &mut Option<Instant>,
 ) -> Result<()> {
     // housekeeping: receive responses, drive registration, send keepalives
     for i in 0..connections.len() {
@@ -302,6 +307,36 @@ async fn handle_housekeeping(
     }
     // drive registration (send REG1/REG2 as needed)
     reg.reg_driver_send_if_needed(connections).await;
+
+    // Check for connection failures and output appropriate error messages
+    // This matches the C implementation's connection_housekeeping logic
+    let active_connections = connections.iter().filter(|c| !c.is_timed_out()).count();
+
+    if active_connections == 0 {
+        if all_failed_at.is_none() {
+            *all_failed_at = Some(Instant::now());
+        }
+
+        if reg.has_connected {
+            error!("warning: no available connections");
+        }
+
+        // Timeout when all connections have failed
+        if let Some(failed_at) = all_failed_at {
+            if failed_at.elapsed().as_millis() > GLOBAL_TIMEOUT_MS as u128 {
+                if reg.has_connected {
+                    error!("Failed to re-establish any connections");
+                    return Err(anyhow!("Failed to re-establish any connections"));
+                } else {
+                    error!("Failed to establish any initial connections");
+                    return Err(anyhow!("Failed to establish any initial connections"));
+                }
+            }
+        }
+    } else {
+        *all_failed_at = None;
+    }
+
     Ok(())
 }
 
@@ -317,7 +352,7 @@ fn select_connection_idx(
     if classic {
         let mut best_idx: Option<usize> = None;
         let mut best_score: i32 = -1;
-        
+
         for (i, c) in conns.iter().enumerate() {
             let score = c.get_score();
             if score > best_score {
@@ -327,7 +362,7 @@ fn select_connection_idx(
         }
         return best_idx;
     }
-    
+
     // Enhanced mode: stickiness, quality scoring, exploration
     // Base: stickiness window
     if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
