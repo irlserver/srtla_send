@@ -67,7 +67,17 @@ async fn main() -> Result<()> {
 
     let args = Cli::parse();
     if args.print_version {
-        println!("{}", env!("CARGO_PKG_VERSION"));
+        let version = env!("CARGO_PKG_VERSION");
+        let git_hash = env!("GIT_HASH");
+        let git_branch = env!("GIT_BRANCH");
+        let git_dirty = env!("GIT_DIRTY");
+        
+        println!("{} ({}@{}{}) [{}]", 
+                 version, 
+                 git_branch, 
+                 git_hash, 
+                 git_dirty,
+                 env!("CARGO_PKG_NAME"));
         return Ok(());
     }
 
