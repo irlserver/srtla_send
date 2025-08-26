@@ -13,6 +13,7 @@ mod toggles;
     name = "srtla_send",
     author,
     version,
+    disable_version_flag = true,
     about = "SRTLA sender CLI",
     override_usage = "srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE"
 )]
