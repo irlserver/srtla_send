@@ -27,7 +27,7 @@ The burst NAK penalty logic, quality scoring, and connection exploration feature
 
 ## Assumptions and Prerequisites
 
-This tool assumes that data is streamed from a SRT *sender* in *caller* mode to a SRT *receiver* in *listener* mode. To get any benefit over using SRT directly, the *sender* should have 2 or more network links to the SRT listener (in the typical application, these would be internet-connected 4G modems). The sender needs to have [source routing](https://tldp.org/HOWTO/Adv-Routing-HOWTO/lartc.rpdb.simple.html) configured, as srtla uses `bind()` to map UDP sockets to a given connection.
+This tool assumes that data is streamed from a SRT _sender_ in _caller_ mode to a SRT _receiver_ in _listener_ mode. To get any benefit over using SRT directly, the _sender_ should have 2 or more network links to the SRT listener (in the typical application, these would be internet-connected 4G modems). The sender needs to have [source routing](https://tldp.org/HOWTO/Adv-Routing-HOWTO/lartc.rpdb.simple.html) configured, as srtla uses `bind()` to map UDP sockets to a given connection.
 
 ## Requirements
 
@@ -176,7 +176,7 @@ These toggles affect how the system selects the best connection for sending data
 
 **Connection Stickiness** (`stick`): Prevents frequent network switches. Uses selected network for at least 500ms to maintain stability.
 
-These affect selection behavior in real time. By default, stickiness is enabled.
+These affect selection behavior in real time. By default, quality-based scoring and connection stickiness is enabled.
 
 ## IP List Reload (Unix only)
 
@@ -194,7 +194,7 @@ The core idea is that srtla keeps track of the number of packets in flight (sent
 
 ### srtla v2 Improvements
 
-The main improvement in srtla v2 is that it supports multiple *srtla senders* connecting to a single *srtla receiver* by establishing *connection groups*. To support this feature, a 2-phase connection registration process is used:
+The main improvement in srtla v2 is that it supports multiple _srtla senders_ connecting to a single _srtla receiver_ by establishing _connection groups_. To support this feature, a 2-phase connection registration process is used:
 
 Normal registration:
 
