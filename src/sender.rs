@@ -21,6 +21,12 @@ const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 const MAX_SEQUENCE_TRACKING: usize = 10_000;
 const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
+struct PendingConnectionChanges {
+    new_ips: Option<Vec<IpAddr>>,
+    receiver_host: String,
+    receiver_port: u16,
+}
+
 pub async fn run_sender_with_toggles(
     local_srt_port: u16,
     receiver_host: &str,
@@ -49,16 +55,7 @@ pub async fn run_sender_with_toggles(
         .context("bind local SRT UDP listener")?;
     info!("listening for SRT on 0.0.0.0:{}", local_srt_port);
 
-    let mut connections = Vec::new();
-    for ip in ips {
-        match SrtlaConnection::connect_from_ip(ip, receiver_host, receiver_port).await {
-            Ok(conn) => {
-                info!("added uplink {} -> {}:{}", ip, receiver_host, receiver_port);
-                connections.push(conn);
-            }
-            Err(e) => warn!("failed to add uplink {}: {}", ip, e),
-        }
-    }
+    let mut connections = create_connections_from_ips(&ips, receiver_host, receiver_port).await;
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
@@ -110,6 +107,9 @@ pub async fn run_sender_with_toggles(
     // Connection failure tracking
     let mut all_failed_at: Option<Instant> = None;
 
+    // Pending connection changes (applied safely between processing cycles)
+    let mut pending_changes: Option<PendingConnectionChanges> = None;
+
     // Prepare SIGHUP stream (Unix only)
     #[cfg(unix)]
     let mut sighup = signal(SignalKind::hangup())?;
@@ -122,13 +122,27 @@ pub async fn run_sender_with_toggles(
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
             _ = interval.tick() => {
+                // Apply any pending connection changes at a safe point
+                if let Some(changes) = pending_changes.take() {
+                    if let Some(new_ips) = changes.new_ips {
+                        info!("applying queued connection changes: {} IPs", new_ips.len());
+                        apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
+                        info!("connection changes applied successfully");
+                    }
+                }
+                
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
                 handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
             _ = sighup.recv() => {
-                info!("received SIGHUP - reloading uplink IPs from {}", ips_file);
+                info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
                 if let Ok(new_ips) = read_ip_list(ips_file).await {
-                    reconcile_connections(&mut connections, &new_ips, receiver_host, receiver_port).await;
+                    pending_changes = Some(PendingConnectionChanges {
+                        new_ips: Some(new_ips),
+                        receiver_host: receiver_host.to_string(),
+                        receiver_port,
+                    });
+                    info!("uplink IP changes queued for next processing cycle");
                 }
             }
         }
@@ -141,6 +155,15 @@ pub async fn run_sender_with_toggles(
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
             _ = interval.tick() => {
+                // Apply any pending connection changes at a safe point
+                if let Some(changes) = pending_changes.take() {
+                    if let Some(new_ips) = changes.new_ips {
+                        info!("applying queued connection changes: {} IPs", new_ips.len());
+                        apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
+                        info!("connection changes applied successfully");
+                    }
+                }
+                
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
                 handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
@@ -203,23 +226,26 @@ async fn handle_srt_packet(
                 classic,
             );
             if let Some(sel_idx) = sel_idx {
-                // record stickiness
-                if *last_selected_idx != Some(sel_idx) {
-                    *last_selected_idx = Some(sel_idx);
-                    *last_switch_time = Some(Instant::now());
-                }
-                let conn = &mut connections[sel_idx];
-                debug!("forward {} bytes (seq={:?}) via {}", n, seq, conn.label);
-                let _ = conn.send_data_with_tracking(pkt, seq).await;
-                if let Some(s) = seq {
-                    // track mapping
-                    if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING {
-                        if let Some(old) = seq_order.pop_front() {
-                            seq_to_conn.remove(&old);
-                        }
+                // Safe access - connection changes only happen between processing cycles
+                if sel_idx < connections.len() {
+                    // record stickiness
+                    if *last_selected_idx != Some(sel_idx) {
+                        *last_selected_idx = Some(sel_idx);
+                        *last_switch_time = Some(Instant::now());
                     }
-                    seq_to_conn.insert(s, sel_idx);
-                    seq_order.push_back(s);
+                    let conn = &mut connections[sel_idx];
+                    debug!("forward {} bytes (seq={:?}) via {}", n, seq, conn.label);
+                    let _ = conn.send_data_with_tracking(pkt, seq).await;
+                    if let Some(s) = seq {
+                        // track mapping
+                        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING {
+                            if let Some(old) = seq_order.pop_front() {
+                                seq_to_conn.remove(&old);
+                            }
+                        }
+                        seq_to_conn.insert(s, sel_idx);
+                        seq_order.push_back(s);
+                    }
                 }
             } else {
                 warn!("no available connection to forward packet from {}", src);
@@ -453,34 +479,80 @@ async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     Ok(out)
 }
 
-#[cfg(unix)]
-async fn reconcile_connections(
-    conns: &mut Vec<SrtlaConnection>,
+
+
+async fn apply_connection_changes(
+    connections: &mut Vec<SrtlaConnection>,
     new_ips: &[IpAddr],
-    host: &str,
-    port: u16,
+    receiver_host: &str,
+    receiver_port: u16,
+    last_selected_idx: &mut Option<usize>,
+    seq_to_conn: &mut HashMap<u32, usize>,
 ) {
     use std::collections::HashSet;
-    let current_labels: HashSet<String> = conns.iter().map(|c| c.label.clone()).collect();
+    
+    let current_labels: HashSet<String> = connections.iter().map(|c| c.label.clone()).collect();
     let desired_labels: HashSet<String> = new_ips
         .iter()
-        .map(|ip| format!("{}:{} via {}", host, port, ip))
+        .map(|ip| format!("{}:{} via {}", receiver_host, receiver_port, ip))
         .collect();
 
-    // Remove stale
-    conns.retain(|c| desired_labels.contains(&c.label));
-
-    // Add new
-    for ip in new_ips {
-        let label = format!("{}:{} via {}", host, port, ip);
-        if !current_labels.contains(&label) {
-            match SrtlaConnection::connect_from_ip(*ip, host, port).await {
-                Ok(conn) => {
-                    info!("added uplink {}", conn.label);
-                    conns.push(conn);
-                }
-                Err(e) => warn!("failed to add uplink {}: {}", label, e),
+    // Remove stale connections
+    let old_len = connections.len();
+    connections.retain(|c| desired_labels.contains(&c.label));
+    
+    // If connections were removed, reset selection state and clean up sequence tracking
+    if connections.len() != old_len {
+        info!("removed {} stale connections", old_len - connections.len());
+        *last_selected_idx = None; // Reset selection to prevent index issues
+        
+        // Clean up sequence tracking for removed connections
+        seq_to_conn.retain(|_, &mut conn_idx| conn_idx < connections.len());
+        
+        // Rebuild sequence tracking with correct indices
+        let mut new_seq_to_conn = HashMap::with_capacity(seq_to_conn.len());
+        for (seq, &old_idx) in seq_to_conn.iter() {
+            if old_idx < connections.len() {
+                new_seq_to_conn.insert(*seq, old_idx);
             }
         }
+        *seq_to_conn = new_seq_to_conn;
     }
+
+    // Add new connections
+    let new_ips_needed: Vec<IpAddr> = new_ips.iter()
+        .filter(|ip| {
+            let label = format!("{}:{} via {}", receiver_host, receiver_port, ip);
+            !current_labels.contains(&label)
+        })
+        .copied()
+        .collect();
+    
+    if !new_ips_needed.is_empty() {
+        let mut new_connections = create_connections_from_ips(&new_ips_needed, receiver_host, receiver_port).await;
+        let added_count = new_connections.len();
+        connections.append(&mut new_connections);
+        
+        if added_count > 0 {
+            info!("added {} new connections", added_count);
+        }
+    }
+}
+
+async fn create_connections_from_ips(
+    ips: &[IpAddr],
+    receiver_host: &str,
+    receiver_port: u16,
+) -> Vec<SrtlaConnection> {
+    let mut connections = Vec::new();
+    for ip in ips {
+        match SrtlaConnection::connect_from_ip(*ip, receiver_host, receiver_port).await {
+            Ok(conn) => {
+                info!("added uplink {}", conn.label);
+                connections.push(conn);
+            }
+            Err(e) => warn!("failed to add uplink {} -> {}:{}: {}", ip, receiver_host, receiver_port, e),
+        }
+    }
+    connections
 }
