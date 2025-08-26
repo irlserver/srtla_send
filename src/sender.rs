@@ -313,7 +313,7 @@ fn select_connection_idx(
     enable_explore: bool,
     classic: bool,
 ) -> Option<usize> {
-    // Classic mode: simple algorithm matching C version
+    // Classic mode: simple algorithm matching original implementation
     if classic {
         let mut best_idx: Option<usize> = None;
         let mut best_score: i32 = -1;
