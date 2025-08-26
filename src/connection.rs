@@ -174,6 +174,21 @@ impl SrtlaConnection {
                                     naks.push(seq);
                                 }
                             }
+                        } else if pt == SRTLA_TYPE_ACK {
+                            // Handle SRTLA ACK packets - critical for window recovery
+                            let ack_list = parse_srtla_ack(&buf[..n]);
+                            if !ack_list.is_empty() {
+                                debug!(
+                                    "🎯 SRTLA ACK received from {}: {} sequences",
+                                    self.label,
+                                    ack_list.len()
+                                );
+                                for seq in ack_list {
+                                    let found = self.handle_srtla_ack(seq as i32);
+                                    debug!("SRTLA ACK {:?} from {} (found={})", seq, self.label, found);
+                                }
+                            }
+                            // Don't forward SRTLA ACKs to SRT client
                         } else if pt == SRTLA_TYPE_KEEPALIVE {
                             // handle keepalive as RTT response
                             self.handle_keepalive_response(&buf[..n]);
@@ -342,6 +357,55 @@ impl SrtlaConnection {
                 self.label, self.window
             );
         }
+    }
+
+    pub fn handle_srtla_ack(&mut self, seq: i32) -> bool {
+        // Find the specific packet in the log and handle it
+        // This mimics the original implementation's register_srtla_ack logic
+        let mut found = false;
+        
+        // Search backwards through the packet log (most recent first)
+        for i in 0..PKT_LOG_SIZE {
+            let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
+            if self.packet_log[idx] == seq {
+                found = true;
+                if self.in_flight_packets > 0 {
+                    self.in_flight_packets -= 1;
+                }
+                self.packet_log[idx] = -1;
+                
+                // Window increase logic from original implementation
+                if self.in_flight_packets * WINDOW_MULT > self.window {
+                    let old = self.window;
+                    self.window += WINDOW_INCR - 1;
+                    if self.window > WINDOW_MAX * WINDOW_MULT {
+                        self.window = WINDOW_MAX * WINDOW_MULT;
+                    }
+                    debug!(
+                        "{}: SRTLA ACK increased window {} → {} (seq={}, in_flight={})",
+                        self.label, old, self.window, seq, self.in_flight_packets
+                    );
+                }
+                break;
+            }
+        }
+
+        // Additional +1 window increase for active connections (from original implementation)
+        if self.connected {
+            let old = self.window;
+            self.window += 1;
+            if self.window > WINDOW_MAX * WINDOW_MULT {
+                self.window = WINDOW_MAX * WINDOW_MULT;
+            }
+            if old < self.window {
+                debug!(
+                    "{}: SRTLA ACK baseline increase {} → {} (seq={})",
+                    self.label, old, self.window, seq
+                );
+            }
+        }
+
+        found
     }
 
     pub fn needs_rtt_measurement(&self) -> bool {

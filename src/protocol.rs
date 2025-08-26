@@ -147,6 +147,23 @@ pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
     out
 }
 
+pub fn parse_srtla_ack(buf: &[u8]) -> Vec<u32> {
+    if buf.len() < 6 {
+        return vec![];
+    }
+    if get_packet_type(buf) != Some(SRTLA_TYPE_ACK) {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    let mut i = 2usize; // Skip packet type (2 bytes)
+    while i + 3 < buf.len() {
+        let ack = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+        out.push(ack);
+        i += 4;
+    }
+    out
+}
+
 pub fn is_srtla_reg1(buf: &[u8]) -> bool {
     buf.len() == SRTLA_TYPE_REG1_LEN && get_packet_type(buf) == Some(SRTLA_TYPE_REG1)
 }
