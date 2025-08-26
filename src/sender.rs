@@ -118,7 +118,8 @@ pub async fn run_sender_with_toggles(
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
             _ = interval.tick() => {
-                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn).await?;
+                let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
+                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic).await?;
             }
             _ = sighup.recv() => {
                 info!("received SIGHUP - reloading uplink IPs from {}", ips_file);
@@ -136,7 +137,8 @@ pub async fn run_sender_with_toggles(
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
             _ = interval.tick() => {
-                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn).await?;
+                let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
+                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic).await?;
             }
         }
     }
@@ -174,20 +176,26 @@ async fn handle_srt_packet(
             let classic = toggles
                 .classic_mode
                 .load(std::sync::atomic::Ordering::Relaxed);
+            
+            // Classic mode overrides all other toggles
+            let effective_enable_stick = enable_stick && !classic;
+            let effective_enable_quality = enable_quality && !classic;
+            let effective_enable_explore = enable_explore && !classic;
+            
             let sel_idx = select_connection_idx(
                 connections,
-                if enable_stick {
+                if effective_enable_stick {
                     *last_selected_idx
                 } else {
                     None
                 },
-                if enable_stick {
+                if effective_enable_stick {
                     *last_switch_time
                 } else {
                     None
                 },
-                enable_quality,
-                enable_explore,
+                effective_enable_quality,
+                effective_enable_explore,
                 classic,
             );
             if let Some(sel_idx) = sel_idx {
@@ -229,6 +237,7 @@ async fn handle_housekeeping(
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, usize>,
+    classic: bool,
 ) -> Result<()> {
     // housekeeping: receive responses, drive registration, send keepalives
     for i in 0..connections.len() {
@@ -267,7 +276,9 @@ async fn handle_housekeeping(
         if connections[i].needs_rtt_measurement() {
             let _ = connections[i].send_keepalive().await;
         }
-        connections[i].perform_window_recovery();
+        if !classic {
+            connections[i].perform_window_recovery();
+        }
         // Simple reconnect-on-timeout, then allow reg driver to proceed
         if connections[i].is_timed_out() {
             if connections[i].should_attempt_reconnect() {
@@ -302,6 +313,22 @@ fn select_connection_idx(
     enable_explore: bool,
     classic: bool,
 ) -> Option<usize> {
+    // Classic mode: simple algorithm matching C version
+    if classic {
+        let mut best_idx: Option<usize> = None;
+        let mut best_score: i32 = -1;
+        
+        for (i, c) in conns.iter().enumerate() {
+            let score = c.get_score();
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(i);
+            }
+        }
+        return best_idx;
+    }
+    
+    // Enhanced mode: stickiness, quality scoring, exploration
     // Base: stickiness window
     if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
         if ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128) {
@@ -317,7 +344,7 @@ fn select_connection_idx(
     let mut second_score: f64 = -1.0;
     for (i, c) in conns.iter().enumerate() {
         let base = c.get_score() as f64;
-        let score = if classic || !enable_quality {
+        let score = if !enable_quality {
             base
         } else {
             let mut quality_mult = 1.0f64;
