@@ -256,6 +256,25 @@ async fn handle_housekeeping(
             }
         }
 
+        // Process SRTLA ACKs: first find specific packet, then apply global +1 to all connections
+        // This matches the original implementation's register_srtla_ack behavior
+        for srtla_ack in incoming.srtla_ack_numbers.iter() {
+            // Phase 1: Find the connection that sent this specific packet
+            let mut found = false;
+            for c in connections.iter_mut() {
+                if c.handle_srtla_ack_specific(*srtla_ack as i32) {
+                    found = true;
+                    break;
+                }
+            }
+            debug!("SRTLA ACK {} processed (found={})", srtla_ack, found);
+
+            // Phase 2: Apply +1 window increase to ALL active connections
+            for c in connections.iter_mut() {
+                c.handle_srtla_ack_global();
+            }
+        }
+
         // NAK attribution to the connection that originally sent the packet
         for nak in incoming.nak_numbers.iter() {
             if let Some(&idx) = seq_to_conn.get(nak) {

@@ -14,6 +14,7 @@ pub struct SrtlaIncoming {
     pub forward_to_client: Vec<Vec<u8>>,
     pub ack_numbers: Vec<u32>,
     pub nak_numbers: Vec<u32>,
+    pub srtla_ack_numbers: Vec<u32>,
     pub read_any: bool,
 }
 
@@ -136,6 +137,7 @@ impl SrtlaConnection {
         let mut forward: Vec<Vec<u8>> = Vec::new();
         let mut acks: Vec<u32> = Vec::new();
         let mut naks: Vec<u32> = Vec::new();
+        let mut srtla_acks: Vec<u32> = Vec::new();
         loop {
             match self.socket.try_recv(&mut buf) {
                 Ok(n) => {
@@ -175,7 +177,7 @@ impl SrtlaConnection {
                                 }
                             }
                         } else if pt == SRTLA_TYPE_ACK {
-                            // Handle SRTLA ACK packets - critical for window recovery
+                            // Collect SRTLA ACK packets for global processing
                             let ack_list = parse_srtla_ack(&buf[..n]);
                             if !ack_list.is_empty() {
                                 debug!(
@@ -184,8 +186,8 @@ impl SrtlaConnection {
                                     ack_list.len()
                                 );
                                 for seq in ack_list {
-                                    let found = self.handle_srtla_ack(seq as i32);
-                                    debug!("SRTLA ACK {:?} from {} (found={})", seq, self.label, found);
+                                    srtla_acks.push(seq);
+                                    debug!("SRTLA ACK {:?} from {}", seq, self.label);
                                 }
                             }
                             // Don't forward SRTLA ACKs to SRT client
@@ -210,6 +212,7 @@ impl SrtlaConnection {
             forward_to_client: forward,
             ack_numbers: acks,
             nak_numbers: naks,
+            srtla_ack_numbers: srtla_acks,
             read_any,
         })
     }
@@ -359,9 +362,9 @@ impl SrtlaConnection {
         }
     }
 
-    pub fn handle_srtla_ack(&mut self, seq: i32) -> bool {
-        // Find the specific packet in the log and handle it
-        // This mimics the original implementation's register_srtla_ack logic
+    pub fn handle_srtla_ack_specific(&mut self, seq: i32) -> bool {
+        // Find the specific packet in the log and handle targeted logic
+        // This mimics the first phase of the original implementation's register_srtla_ack
         let mut found = false;
         
         // Search backwards through the packet log (most recent first)
@@ -382,7 +385,7 @@ impl SrtlaConnection {
                         self.window = WINDOW_MAX * WINDOW_MULT;
                     }
                     debug!(
-                        "{}: SRTLA ACK increased window {} → {} (seq={}, in_flight={})",
+                        "{}: SRTLA ACK specific increased window {} → {} (seq={}, in_flight={})",
                         self.label, old, self.window, seq, self.in_flight_packets
                     );
                 }
@@ -390,7 +393,12 @@ impl SrtlaConnection {
             }
         }
 
-        // Additional +1 window increase for active connections (from original implementation)
+        found
+    }
+
+    pub fn handle_srtla_ack_global(&mut self) {
+        // Global +1 window increase for active connections (from original implementation)
+        // This is the second phase applied to ALL connections for each SRTLA ACK
         if self.connected {
             let old = self.window;
             self.window += 1;
@@ -399,13 +407,11 @@ impl SrtlaConnection {
             }
             if old < self.window {
                 debug!(
-                    "{}: SRTLA ACK baseline increase {} → {} (seq={})",
-                    self.label, old, self.window, seq
+                    "{}: SRTLA ACK global recovery {} → {}",
+                    self.label, old, self.window
                 );
             }
         }
-
-        found
     }
 
     pub fn needs_rtt_measurement(&self) -> bool {
