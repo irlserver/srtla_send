@@ -8,8 +8,6 @@ mod registration;
 mod sender;
 mod toggles;
 
-// removed duplicate DynamicToggles - using the one from toggles module
-
 #[derive(Parser, Debug)]
 #[command(
     name = "srtla_send",

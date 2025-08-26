@@ -20,8 +20,6 @@ use crate::toggles::DynamicToggles;
 const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 const MAX_SEQUENCE_TRACKING: usize = 10_000;
 
-// removed unused run_sender wrapper; use run_sender_with_toggles directly
-
 pub async fn run_sender_with_toggles(
     local_srt_port: u16,
     receiver_host: &str,
@@ -82,11 +80,10 @@ pub async fn run_sender_with_toggles(
                 match instant_rx.recv() {
                     Ok(ack_packet) => {
                         let client_addr = {
-                            match shared_client_addr_clone.lock() { Ok(addr_guard) => {
-                                *addr_guard
-                            } _ => {
-                                None
-                            }}
+                            match shared_client_addr_clone.lock() {
+                                Ok(addr_guard) => *addr_guard,
+                                _ => None,
+                            }
                         };
                         if let Some(client) = client_addr {
                             let _ = local_listener_clone.send_to(&ack_packet, client).await;
