@@ -1,0 +1,14 @@
+# Cargo configuration for srtla_send testing
+
+[build]
+# Enable all features during testing
+rustflags = ["-D", "warnings"]  # Treat warnings as errors during CI
+
+[test]
+# Run tests with full backtrace on failure
+env = { RUST_BACKTRACE = "full", RUST_LOG = "debug" }
+
+[profile.test]
+# Optimize tests for debugging
+debug = true
+overflow-checks = true

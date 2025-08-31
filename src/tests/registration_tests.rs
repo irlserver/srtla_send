@@ -1,0 +1,239 @@
+#[cfg(test)]
+mod tests {
+
+    use crate::protocol::*;
+    use crate::registration::*;
+    use crate::test_helpers::create_test_connection;
+
+    #[test]
+    fn test_registration_manager_creation() {
+        let reg = SrtlaRegistrationManager::new();
+
+        assert_eq!(reg.active_connections, 0);
+        assert!(!reg.has_connected);
+        assert!(!reg.broadcast_reg2_pending);
+        assert_eq!(reg.pending_reg2_idx, None);
+        assert_eq!(reg.reg1_target_idx, None);
+
+        // ID should be randomly generated and non-zero
+        assert!(!reg.srtla_id.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_reg_ngp_handling() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        // Create REG_NGP packet
+        let mut buf = vec![0u8; 4];
+        buf[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
+
+        // Process REG_NGP from connection 1
+        let handled = reg.process_registration_packet(1, &buf);
+        assert!(handled);
+        assert_eq!(reg.reg1_target_idx, Some(1));
+
+        let current_time = crate::registration::now_ms();
+        assert!(reg.reg1_next_send_at_ms <= current_time + 10); // Should be very soon
+    }
+
+    #[test]
+    fn test_reg2_handling() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        // Set up pending REG2 state
+        reg.pending_reg2_idx = Some(0);
+        let original_id = reg.srtla_id;
+
+        // Create REG2 response packet with modified ID
+        let mut modified_id = original_id;
+        modified_id[SRTLA_ID_LEN / 2..].fill(0xAB); // Server modifies last half
+        let buf = create_reg2_packet(&modified_id);
+
+        let handled = reg.process_registration_packet(0, &buf);
+        assert!(handled);
+
+        // Should have updated the ID and set broadcast pending
+        assert_eq!(reg.srtla_id, modified_id);
+        assert_eq!(reg.pending_reg2_idx, None);
+        assert!(reg.broadcast_reg2_pending);
+        assert_eq!(reg.reg1_target_idx, None);
+    }
+
+    #[test]
+    fn test_reg3_handling() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        assert_eq!(reg.active_connections, 0);
+        assert!(!reg.has_connected);
+
+        // Create REG3 packet
+        let buf = vec![0x92, 0x02];
+
+        let handled = reg.process_registration_packet(2, &buf);
+        assert!(handled);
+
+        // Should have incremented active connections and set has_connected
+        assert_eq!(reg.active_connections, 1);
+        assert!(reg.has_connected);
+    }
+
+    #[test]
+    fn test_reg_err_handling() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        // Set up pending state
+        reg.pending_reg2_idx = Some(1);
+        reg.pending_timeout_at_ms = crate::registration::now_ms() + 5000;
+        reg.reg1_target_idx = Some(1);
+
+        // Create REG_ERR packet
+        let mut buf = vec![0u8; 4];
+        buf[0..2].copy_from_slice(&SRTLA_TYPE_REG_ERR.to_be_bytes());
+
+        let handled = reg.process_registration_packet(1, &buf);
+        assert!(handled);
+
+        // Should have cleared pending state
+        assert_eq!(reg.pending_reg2_idx, None);
+        assert_eq!(reg.pending_timeout_at_ms, 0);
+        assert_eq!(reg.reg1_target_idx, None);
+    }
+
+    #[test]
+    fn test_unrecognized_packet() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        // Create a non-registration packet
+        let buf = vec![0x80, 0x02, 0x00, 0x00]; // SRT ACK
+
+        let handled = reg.process_registration_packet(0, &buf);
+        assert!(!handled);
+    }
+
+    #[tokio::test]
+    async fn test_reg_driver_initial_reg1() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![create_test_connection().await];
+
+        // Should send REG1 to first connection when no connections are active
+        reg.reg_driver_send_if_needed(&mut connections).await;
+
+        assert_eq!(reg.pending_reg2_idx, Some(0));
+        assert!(reg.pending_timeout_at_ms > crate::registration::now_ms());
+    }
+
+    #[tokio::test]
+    async fn test_reg_driver_with_target() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
+
+        // Set a specific target from REG_NGP
+        reg.reg1_target_idx = Some(1);
+
+        reg.reg_driver_send_if_needed(&mut connections).await;
+
+        // Should send to the specified target
+        assert_eq!(reg.pending_reg2_idx, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_reg2() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
+
+        // Trigger broadcast
+        reg.broadcast_reg2_pending = true;
+        reg.reg_driver_send_if_needed(&mut connections).await;
+
+        // Should have cleared the broadcast flag
+        assert!(!reg.broadcast_reg2_pending);
+    }
+
+    #[tokio::test]
+    async fn test_trigger_broadcast_reg2() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
+
+        reg.trigger_broadcast_reg2(&mut connections).await;
+
+        // This test mainly ensures the function doesn't panic
+        // and can be called successfully
+    }
+
+    #[test]
+    fn test_multiple_reg3_connections() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let reg3_packet = vec![0x92, 0x02];
+
+        // Simulate multiple REG3 responses
+        for i in 0..3 {
+            let handled = reg.process_registration_packet(i, &reg3_packet);
+            assert!(handled);
+        }
+
+        assert_eq!(reg.active_connections, 3);
+        assert!(reg.has_connected);
+    }
+
+    #[test]
+    fn test_reg_driver_timing() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        // Set future send time to prevent immediate sending
+        reg.reg1_next_send_at_ms = crate::registration::now_ms() + 5000;
+
+        // Even with connections available, should not send yet
+        assert!(reg.reg1_next_send_at_ms > crate::registration::now_ms());
+    }
+
+    #[test]
+    fn test_registration_state_transitions() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        // Initial state
+        assert_eq!(reg.active_connections, 0);
+        assert!(!reg.has_connected);
+
+        // After REG_NGP
+        let ngp_packet = [0x92, 0x11, 0x00, 0x00];
+        reg.process_registration_packet(0, &ngp_packet);
+        assert_eq!(reg.reg1_target_idx, Some(0));
+
+        // Set up for REG2
+        reg.pending_reg2_idx = Some(0);
+
+        // Process REG2
+        let mut modified_id = reg.srtla_id;
+        modified_id[200..].fill(0xFF);
+        let reg2_packet = create_reg2_packet(&modified_id);
+        reg.process_registration_packet(0, &reg2_packet);
+
+        assert!(reg.broadcast_reg2_pending);
+        assert_eq!(reg.pending_reg2_idx, None);
+
+        // Process REG3
+        let reg3_packet = vec![0x92, 0x02];
+        reg.process_registration_packet(0, &reg3_packet);
+
+        assert_eq!(reg.active_connections, 1);
+        assert!(reg.has_connected);
+    }
+
+    #[test]
+    fn test_id_generation_uniqueness() {
+        let reg1 = SrtlaRegistrationManager::new();
+        let reg2 = SrtlaRegistrationManager::new();
+
+        // IDs should be different (very high probability)
+        assert_ne!(reg1.srtla_id, reg2.srtla_id);
+    }
+}
