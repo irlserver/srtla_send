@@ -15,7 +15,7 @@ async fn test_ip_file_parsing_and_validation() {
     writeln!(temp_file, "192.168.1.100").unwrap();
     writeln!(temp_file, "192.168.1.101").unwrap();
     writeln!(temp_file, "# This is a comment").unwrap();
-    writeln!(temp_file, "").unwrap(); // Empty line
+    writeln!(temp_file).unwrap(); // Empty line
     writeln!(temp_file, "192.168.1.102").unwrap();
     writeln!(temp_file, "invalid-ip-address").unwrap(); // Should be ignored
     writeln!(temp_file, "10.0.0.1").unwrap();

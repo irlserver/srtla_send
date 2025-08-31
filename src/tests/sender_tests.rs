@@ -107,7 +107,7 @@ mod tests {
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(temp_file, "192.168.1.1").unwrap();
         writeln!(temp_file, "192.168.1.2").unwrap();
-        writeln!(temp_file, "").unwrap(); // Empty line
+        writeln!(temp_file).unwrap(); // Empty line
         writeln!(temp_file, "192.168.1.3").unwrap();
         writeln!(temp_file, "invalid-ip").unwrap(); // Invalid IP
 

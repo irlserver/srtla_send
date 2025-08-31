@@ -10,7 +10,7 @@ mod tests {
 
         // Test basic score calculation
         let initial_score = conn.get_score();
-        let expected_score = (WINDOW_DEF * WINDOW_MULT) / (0 + 1);
+        let expected_score = WINDOW_DEF * WINDOW_MULT;
         assert_eq!(initial_score, expected_score);
 
         // Test with in-flight packets
@@ -41,7 +41,7 @@ mod tests {
 
         // Test multiple packets
         for i in 1..=5 {
-            conn.register_packet(100 + i as i32);
+            conn.register_packet(100 + i);
         }
         assert_eq!(conn.in_flight_packets, initial_in_flight + 6);
     }

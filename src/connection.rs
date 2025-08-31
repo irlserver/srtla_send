@@ -188,7 +188,7 @@ impl SrtlaConnection {
         let now = now_ms();
         self.last_keepalive_ms = now;
         // Only set waiting flag and timestamp when we intend to measure RTT
-        if self.waiting_for_keepalive_response == false
+        if !self.waiting_for_keepalive_response
             && (self.last_rtt_measurement_ms == 0
                 || now.saturating_sub(self.last_rtt_measurement_ms) > 3000)
         {
@@ -554,9 +554,9 @@ impl SrtlaConnection {
                 if tsn > 10_000 {
                     self.window += WINDOW_INCR * 2 * fast_mode_bonus;
                 } else if tsn > 7_000 {
-                    self.window += WINDOW_INCR * 1 * fast_mode_bonus;
+                    self.window += WINDOW_INCR * fast_mode_bonus;
                 } else if tsn > 5_000 {
-                    self.window += WINDOW_INCR * 1 * fast_mode_bonus;
+                    self.window += WINDOW_INCR * fast_mode_bonus;
                 } else {
                     self.window += WINDOW_INCR * fast_mode_bonus;
                 }

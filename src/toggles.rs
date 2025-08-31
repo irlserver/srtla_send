@@ -16,6 +16,12 @@ pub struct DynamicToggles {
     pub exploration_enabled: Arc<AtomicBool>,
 }
 
+impl Default for DynamicToggles {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DynamicToggles {
     #[allow(dead_code)]
     pub fn new() -> Self {

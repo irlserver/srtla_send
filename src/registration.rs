@@ -17,6 +17,12 @@ pub struct SrtlaRegistrationManager {
     reg1_next_send_at_ms: u64,
 }
 
+impl Default for SrtlaRegistrationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SrtlaRegistrationManager {
     #[allow(deprecated)]
     pub fn new() -> Self {
@@ -79,12 +85,10 @@ impl SrtlaRegistrationManager {
         if self.active_connections == 0 {
             let target_idx = if let Some(idx) = self.reg1_target_idx {
                 Some(idx)
+            } else if !connections.is_empty() {
+                Some(0)
             } else {
-                if !connections.is_empty() {
-                    Some(0)
-                } else {
-                    None
-                }
+                None
             };
             if let Some(idx) = target_idx {
                 let now = now_ms();
