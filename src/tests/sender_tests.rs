@@ -281,4 +281,40 @@ mod tests {
         assert!(quality);
         assert!(!explore);
     }
+
+    #[test]
+    fn test_calculate_quality_multiplier() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connections(1)).into_iter().next().unwrap();
+
+        // Test connection with no NAKs - should get bonus
+        assert_eq!(calculate_quality_multiplier(&conn), 1.2);
+
+        // Test connection with recent NAK (< 2 seconds ago) - heavy penalty
+        conn.nak_count = 1;
+        conn.last_nak_time_ms = now_ms() - 1000;
+        assert_eq!(calculate_quality_multiplier(&conn), 0.1);
+
+        // Test connection with NAK 3-5 seconds ago - moderate penalty
+        conn.last_nak_time_ms = now_ms() - 3000;
+        assert_eq!(calculate_quality_multiplier(&conn), 0.5);
+
+        // Test connection with NAK 5-10 seconds ago - light penalty
+        conn.last_nak_time_ms = now_ms() - 7000;
+        assert_eq!(calculate_quality_multiplier(&conn), 0.8);
+
+        // Test connection with NAK > 10 seconds ago and no total NAKs - bonus
+        conn.last_nak_time_ms = now_ms() - 15000;
+        conn.nak_count = 0;
+        assert_eq!(calculate_quality_multiplier(&conn), 1.2);
+
+        // Test connection with NAK > 10 seconds ago and some NAKs - no penalty/bonus
+        conn.nak_count = 5;
+        assert_eq!(calculate_quality_multiplier(&conn), 1.0);
+
+        // Test burst NAK penalty
+        conn.last_nak_time_ms = now_ms() - 3000;
+        conn.nak_burst_count = 3;
+        assert_eq!(calculate_quality_multiplier(&conn), 0.5 * 0.5); // 0.5 * 0.5 = 0.25
+    }
 }
