@@ -123,13 +123,12 @@ pub async fn run_sender_with_toggles(
             }
             _ = interval.tick() => {
                 // Apply any pending connection changes at a safe point
-                if let Some(changes) = pending_changes.take() {
-                    if let Some(new_ips) = changes.new_ips {
+                if let Some(changes) = pending_changes.take()
+                    && let Some(new_ips) = changes.new_ips {
                         info!("applying queued connection changes: {} IPs", new_ips.len());
                         apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
                         info!("connection changes applied successfully");
                     }
-                }
 
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
                 handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
@@ -238,11 +237,10 @@ async fn handle_srt_packet(
                     let _ = conn.send_data_with_tracking(pkt, seq).await;
                     if let Some(s) = seq {
                         // track mapping
-                        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING {
-                            if let Some(old) = seq_order.pop_front() {
+                        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
+                            && let Some(old) = seq_order.pop_front() {
                                 seq_to_conn.remove(&old);
                             }
-                        }
                         seq_to_conn.insert(s, sel_idx);
                         seq_order.push_back(s);
                     }
@@ -368,8 +366,8 @@ async fn handle_housekeeping(
         }
 
         // Timeout when all connections have failed
-        if let Some(failed_at) = all_failed_at {
-            if failed_at.elapsed().as_millis() > GLOBAL_TIMEOUT_MS as u128 {
+        if let Some(failed_at) = all_failed_at
+            && failed_at.elapsed().as_millis() > GLOBAL_TIMEOUT_MS as u128 {
                 if reg.has_connected {
                     error!("Failed to re-establish any connections");
                     return Err(anyhow!("Failed to re-establish any connections"));
@@ -378,7 +376,6 @@ async fn handle_housekeeping(
                     return Err(anyhow!("Failed to establish any initial connections"));
                 }
             }
-        }
     } else {
         *all_failed_at = None;
     }
@@ -440,11 +437,10 @@ pub fn select_connection_idx(
 
     // Enhanced mode: stickiness, quality scoring, exploration
     // Base: stickiness window
-    if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
-        if ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128) {
+    if let (Some(idx), Some(ts)) = (last_idx, last_switch)
+        && ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128) {
             return Some(idx);
         }
-    }
     // Exploration window: simple periodic exploration of second-best
     let explore_now = enable_explore && (Instant::now().elapsed().as_millis() % 5000) < 300;
     // Score connections by base score; apply quality multiplier unless classic
