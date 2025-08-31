@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 

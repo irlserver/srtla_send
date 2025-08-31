@@ -204,10 +204,7 @@ mod tests {
         assert!(is_srtla_reg2(&reg2_pkt));
         assert!(!is_srtla_reg3(&reg2_pkt));
 
-        let reg3_pkt = vec![
-            (SRTLA_TYPE_REG3 >> 8) as u8,
-            (SRTLA_TYPE_REG3 & 0xFF) as u8,
-        ];
+        let reg3_pkt = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
         assert!(!is_srtla_reg1(&reg3_pkt));
         assert!(!is_srtla_reg2(&reg3_pkt));
         assert!(is_srtla_reg3(&reg3_pkt));

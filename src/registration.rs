@@ -218,5 +218,3 @@ impl SrtlaRegistrationManager {
         self.broadcast_reg2_pending = value;
     }
 }
-
-

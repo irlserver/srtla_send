@@ -78,24 +78,24 @@ async fn test_sequence_number_parsing() {
     assert_eq!(get_srt_sequence_number(&control_packet), None);
 
     // Maximum valid sequence number
-    let max_seq_packet = [0x7F, 0xFF, 0xFF, 0xFF];
-    assert_eq!(get_srt_sequence_number(&max_seq_packet), Some(0x7FFFFFFF));
+    let max_seq_packet = [0x7f, 0xff, 0xff, 0xff];
+    assert_eq!(get_srt_sequence_number(&max_seq_packet), Some(0x7fffffff));
 }
 
 #[test]
 fn test_packet_type_constants() {
     // Ensure SRTLA types are in the correct range
-    assert!((SRTLA_TYPE_KEEPALIVE & 0xF000) == 0x9000);
-    assert!((SRTLA_TYPE_ACK & 0xF000) == 0x9000);
-    assert!((SRTLA_TYPE_REG1 & 0xF000) == 0x9000);
-    assert!((SRTLA_TYPE_REG2 & 0xF000) == 0x9000);
-    assert!((SRTLA_TYPE_REG3 & 0xF000) == 0x9000);
+    assert!((SRTLA_TYPE_KEEPALIVE & 0xf000) == 0x9000);
+    assert!((SRTLA_TYPE_ACK & 0xf000) == 0x9000);
+    assert!((SRTLA_TYPE_REG1 & 0xf000) == 0x9000);
+    assert!((SRTLA_TYPE_REG2 & 0xf000) == 0x9000);
+    assert!((SRTLA_TYPE_REG3 & 0xf000) == 0x9000);
 
     // Ensure SRT types are in the correct range
-    assert!((SRT_TYPE_HANDSHAKE & 0xF000) == 0x8000);
-    assert!((SRT_TYPE_ACK & 0xF000) == 0x8000);
-    assert!((SRT_TYPE_NAK & 0xF000) == 0x8000);
-    assert!((SRT_TYPE_SHUTDOWN & 0xF000) == 0x8000);
+    assert!((SRT_TYPE_HANDSHAKE & 0xf000) == 0x8000);
+    assert!((SRT_TYPE_ACK & 0xf000) == 0x8000);
+    assert!((SRT_TYPE_NAK & 0xf000) == 0x8000);
+    assert!((SRT_TYPE_SHUTDOWN & 0xf000) == 0x8000);
 
     // Data packets should have no control bits
     assert_eq!(SRT_TYPE_DATA, 0x0000);
@@ -173,7 +173,7 @@ fn test_keepalive_timestamp_edge_cases() {
     let mut max_keepalive = vec![0u8; 10];
     max_keepalive[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
     for i in 2..10 {
-        max_keepalive[i] = 0xFF;
+        max_keepalive[i] = 0xff;
     }
 
     assert_eq!(extract_keepalive_timestamp(&max_keepalive), Some(u64::MAX));
@@ -205,10 +205,7 @@ fn test_packet_validators_comprehensive() {
     let reg2_id = [0x22; SRTLA_ID_LEN];
     let reg2_packet = create_reg2_packet(&reg2_id);
 
-    let reg3_packet = vec![
-        (SRTLA_TYPE_REG3 >> 8) as u8,
-        (SRTLA_TYPE_REG3 & 0xFF) as u8,
-    ];
+    let reg3_packet = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
     let keepalive_packet = create_keepalive_packet();
 
     let mut ack_packet = vec![0u8; 20];

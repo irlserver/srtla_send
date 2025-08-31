@@ -1,16 +1,18 @@
 #[cfg(test)]
 mod tests {
 
-    use crate::utils::now_ms;
-    use crate::sender::*;
-    use crate::test_helpers::create_test_connections;
-    use crate::toggles::DynamicToggles;
     use std::collections::HashMap;
     use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::Ordering;
+
     use tempfile::NamedTempFile;
     use tokio::time::{Duration, Instant};
+
+    use crate::sender::*;
+    use crate::test_helpers::create_test_connections;
+    use crate::toggles::DynamicToggles;
+    use crate::utils::now_ms;
 
     #[test]
     fn test_select_connection_idx_classic() {
@@ -252,7 +254,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let connections = rt.block_on(create_test_connections(3));
 
-        // Test exploration - this is time-dependent so we just test that it doesn't panic
+        // Test exploration - this is time-dependent so we just test that it doesn't
+        // panic
         let _selected = select_connection_idx(
             &connections,
             None,
@@ -285,7 +288,11 @@ mod tests {
     #[test]
     fn test_calculate_quality_multiplier() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut conn = rt.block_on(create_test_connections(1)).into_iter().next().unwrap();
+        let mut conn = rt
+            .block_on(create_test_connections(1))
+            .into_iter()
+            .next()
+            .unwrap();
 
         // Test connection with no NAKs - should get bonus
         assert_eq!(calculate_quality_multiplier(&conn), 1.2);

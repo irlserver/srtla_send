@@ -47,7 +47,7 @@ mod tests {
 
         // Create REG2 response packet with modified ID
         let mut modified_id = original_id;
-        modified_id[SRTLA_ID_LEN / 2..].fill(0xAB); // Server modifies last half
+        modified_id[SRTLA_ID_LEN / 2..].fill(0xab); // Server modifies last half
         let buf = create_reg2_packet(&modified_id);
 
         let handled = reg.process_registration_packet(0, &buf);
@@ -68,10 +68,7 @@ mod tests {
         assert!(!reg.has_connected);
 
         // Create REG3 packet
-        let buf = vec![
-            (SRTLA_TYPE_REG3 >> 8) as u8,
-            (SRTLA_TYPE_REG3 & 0xFF) as u8,
-        ];
+        let buf = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
 
         let handled = reg.process_registration_packet(2, &buf);
         assert!(handled);
@@ -199,7 +196,11 @@ mod tests {
         // Even with connections available, should not send yet
         let mut connections = vec![create_test_connection().await];
         reg.reg_driver_send_if_needed(&mut connections).await;
-        assert_eq!(reg.pending_reg2_idx(), None, "Should not send before next-send time");
+        assert_eq!(
+            reg.pending_reg2_idx(),
+            None,
+            "Should not send before next-send time"
+        );
     }
 
     #[test]
@@ -220,7 +221,7 @@ mod tests {
 
         // Process REG2
         let mut modified_id = reg.srtla_id;
-        modified_id[200..].fill(0xFF);
+        modified_id[200..].fill(0xff);
         let reg2_packet = create_reg2_packet(&modified_id);
         reg.process_registration_packet(0, &reg2_packet);
 
@@ -237,7 +238,9 @@ mod tests {
 
     #[test]
     fn test_id_generation_uniqueness() {
-        let ids: Vec<_> = (0..8).map(|_| SrtlaRegistrationManager::new().srtla_id).collect();
+        let ids: Vec<_> = (0..8)
+            .map(|_| SrtlaRegistrationManager::new().srtla_id)
+            .collect();
         let all_same = ids.windows(2).all(|w| w[0] == w[1]);
         assert!(!all_same, "All generated IDs were identical unexpectedly");
     }

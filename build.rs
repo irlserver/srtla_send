@@ -41,7 +41,7 @@ fn main() {
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=GIT_BRANCH={}", git_branch);
     println!("cargo:rustc-env=GIT_DIRTY={}", git_dirty_suffix);
-    
+
     // Tell Cargo to re-run this build script if git files change
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/heads");

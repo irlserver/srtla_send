@@ -1,8 +1,8 @@
 //! SRTLA Sender Library
 //!
-//! This library provides functionality for SRTLA (SRT transport proxy with link aggregation)
-//! sender implementation. It includes protocol handling, connection management, and
-//! dynamic configuration toggles.
+//! This library provides functionality for SRTLA (SRT transport proxy with link
+//! aggregation) sender implementation. It includes protocol handling,
+//! connection management, and dynamic configuration toggles.
 
 pub mod connection;
 pub mod protocol;

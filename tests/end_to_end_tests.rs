@@ -1,11 +1,12 @@
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
+
 use tempfile::NamedTempFile;
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, timeout};
 
-// Note: These tests require the modules to be public or have test-specific visibility
-// They test the integration between different components
+// Note: These tests require the modules to be public or have test-specific
+// visibility They test the integration between different components
 
 #[tokio::test]
 async fn test_ip_file_parsing_and_validation() {
@@ -21,8 +22,8 @@ async fn test_ip_file_parsing_and_validation() {
 
     temp_file.flush().unwrap();
 
-    // Test that we can read the file (this would require making the function public)
-    // For now, we just test that the file exists and is readable
+    // Test that we can read the file (this would require making the function
+    // public) For now, we just test that the file exists and is readable
     let content = std::fs::read_to_string(temp_file.path()).unwrap();
     assert!(content.contains("192.168.1.100"));
     assert!(content.contains("192.168.1.101"));
@@ -122,7 +123,7 @@ async fn test_protocol_message_flow() {
     assert_ne!(sender_id, server_id);
 
     // Step 4: Create REG3 confirmation
-    let reg3_packet = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xFF) as u8];
+    let reg3_packet = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
     assert!(is_srtla_reg3(&reg3_packet));
     assert_eq!(reg3_packet.len(), SRTLA_TYPE_REG3_LEN);
 }
@@ -155,9 +156,12 @@ async fn test_keepalive_timing() {
 
     // Verify timestamps are reasonable (within expected time range)
     let timestamp_range = timestamps[2] - timestamps[0];
-    
+
     assert!(timestamp_range >= 80, "Expected >= ~2*50ms with margin");
-    assert!(timestamp_range <= elapsed_ms + 150, "Allow scheduler jitter");
+    assert!(
+        timestamp_range <= elapsed_ms + 150,
+        "Allow scheduler jitter"
+    );
 }
 
 #[tokio::test]
@@ -203,7 +207,11 @@ async fn test_packet_size_limits() {
 
     let packet = create_ack_packet(&large_ack_list);
     assert!(packet.len() <= MTU, "ACK packet should not exceed MTU");
-    assert_eq!(packet.len(), 2 + 4 * max_acks, "Expected full MTU utilization");
+    assert_eq!(
+        packet.len(),
+        2 + 4 * max_acks,
+        "Expected full MTU utilization"
+    );
 
     // Test that parsing works correctly for large packets
     let parsed = parse_srtla_ack(&packet);
@@ -220,7 +228,7 @@ async fn test_error_resilience() {
         vec![],           // Empty
         vec![0x90],       // Too short
         vec![0x90, 0x00], // Minimum valid header
-        vec![0xFF; 1000], // Large invalid packet
+        vec![0xff; 1000], // Large invalid packet
     ];
 
     for case in test_cases {
@@ -241,8 +249,9 @@ async fn test_error_resilience() {
 
 #[tokio::test]
 async fn test_concurrent_packet_processing() {
-    use srtla_send::protocol::*;
     use std::sync::Arc;
+
+    use srtla_send::protocol::*;
     use tokio::sync::Mutex;
 
     let results = Arc::new(Mutex::new(Vec::new()));

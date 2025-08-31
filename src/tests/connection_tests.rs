@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::utils::now_ms;
     use crate::protocol::*;
     use crate::test_helpers::create_test_connection;
+    use crate::utils::now_ms;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_connection_score() {

@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod tests {
 
-    use crate::toggles::*;
     use std::sync::atomic::Ordering;
+
+    use crate::toggles::*;
 
     #[test]
     fn test_dynamic_toggles_new() {

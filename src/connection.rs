@@ -440,7 +440,8 @@ impl SrtlaConnection {
 
     pub fn handle_srtla_ack_specific(&mut self, seq: i32) -> bool {
         // Find the specific packet in the log and handle targeted logic
-        // This mimics the first phase of the original implementation's register_srtla_ack
+        // This mimics the first phase of the original implementation's
+        // register_srtla_ack
         let mut found = false;
 
         // Search backwards through the packet log (most recent first)
@@ -473,8 +474,9 @@ impl SrtlaConnection {
     }
 
     pub fn handle_srtla_ack_global(&mut self) {
-        // Global +1 window increase for active connections (from original implementation)
-        // This is the second phase applied to ALL connections for each SRTLA ACK
+        // Global +1 window increase for active connections (from original
+        // implementation) This is the second phase applied to ALL connections
+        // for each SRTLA ACK
         if self.connected {
             let old = self.window;
             self.window += 1;
@@ -707,5 +709,3 @@ async fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr> {
         .next()
         .ok_or_else(|| anyhow::anyhow!("no DNS result for {}", host))
 }
-
-

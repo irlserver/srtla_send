@@ -282,8 +282,9 @@ async fn handle_housekeeping(
             }
         }
 
-        // Process SRTLA ACKs: first find specific packet, then apply global +1 to all connections
-        // This matches the original implementation's register_srtla_ack behavior
+        // Process SRTLA ACKs: first find specific packet, then apply global +1 to all
+        // connections This matches the original implementation's
+        // register_srtla_ack behavior
         for srtla_ack in incoming.srtla_ack_numbers.iter() {
             // Phase 1: Find the connection that sent this specific packet
             let mut found = false;
@@ -462,7 +463,8 @@ pub fn select_connection_idx(
             // Log quality analysis for debugging (only for low scores to avoid spam)
             if quality_mult < 1.0 {
                 debug!(
-                    "{} quality penalty: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → final: {}",
+                    "{} quality penalty: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → \
+                     final: {}",
                     c.label,
                     quality_mult,
                     c.total_nak_count(),
@@ -528,7 +530,8 @@ pub async fn apply_connection_changes(
     let old_len = connections.len();
     connections.retain(|c| desired_labels.contains(&c.label));
 
-    // If connections were removed, reset selection state and clean up sequence tracking
+    // If connections were removed, reset selection state and clean up sequence
+    // tracking
     if connections.len() != old_len {
         info!("removed {} stale connections", old_len - connections.len());
         *last_selected_idx = None; // Reset selection to prevent index issues
