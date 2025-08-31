@@ -238,9 +238,10 @@ async fn handle_srt_packet(
                     if let Some(s) = seq {
                         // track mapping
                         if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
-                            && let Some(old) = seq_order.pop_front() {
-                                seq_to_conn.remove(&old);
-                            }
+                            && let Some(old) = seq_order.pop_front()
+                        {
+                            seq_to_conn.remove(&old);
+                        }
                         seq_to_conn.insert(s, sel_idx);
                         seq_order.push_back(s);
                     }
@@ -367,15 +368,16 @@ async fn handle_housekeeping(
 
         // Timeout when all connections have failed
         if let Some(failed_at) = all_failed_at
-            && failed_at.elapsed().as_millis() > GLOBAL_TIMEOUT_MS as u128 {
-                if reg.has_connected {
-                    error!("Failed to re-establish any connections");
-                    return Err(anyhow!("Failed to re-establish any connections"));
-                } else {
-                    error!("Failed to establish any initial connections");
-                    return Err(anyhow!("Failed to establish any initial connections"));
-                }
+            && failed_at.elapsed().as_millis() > GLOBAL_TIMEOUT_MS as u128
+        {
+            if reg.has_connected {
+                error!("Failed to re-establish any connections");
+                return Err(anyhow!("Failed to re-establish any connections"));
+            } else {
+                error!("Failed to establish any initial connections");
+                return Err(anyhow!("Failed to establish any initial connections"));
             }
+        }
     } else {
         *all_failed_at = None;
     }
@@ -438,9 +440,10 @@ pub fn select_connection_idx(
     // Enhanced mode: stickiness, quality scoring, exploration
     // Base: stickiness window
     if let (Some(idx), Some(ts)) = (last_idx, last_switch)
-        && ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128) {
-            return Some(idx);
-        }
+        && ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
+    {
+        return Some(idx);
+    }
     // Exploration window: simple periodic exploration of second-best
     let explore_now = enable_explore && (Instant::now().elapsed().as_millis() % 5000) < 300;
     // Score connections by base score; apply quality multiplier unless classic

@@ -219,10 +219,10 @@ mod tests {
 
         // Fill beyond capacity
         for i in 0..(MAX_SEQUENCE_TRACKING + 100) {
-            if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING {
-                if let Some(old) = seq_order.pop_front() {
-                    seq_to_conn.remove(&old);
-                }
+            if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
+                && let Some(old) = seq_order.pop_front()
+            {
+                seq_to_conn.remove(&old);
             }
             seq_to_conn.insert(i as u32, 0);
             seq_order.push_back(i as u32);
