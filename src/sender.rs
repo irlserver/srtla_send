@@ -385,6 +385,35 @@ async fn handle_housekeeping(
     Ok(())
 }
 
+/// Calculate quality multiplier for a connection based on NAK history
+/// Returns a multiplier between 0.05 and 1.2
+pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
+    if let Some(tsn) = conn.time_since_last_nak_ms() {
+        let mut quality_mult = if tsn < 2000 {
+            0.1
+        } else if tsn < 5000 {
+            0.5
+        } else if tsn < 10_000 {
+            0.8
+        } else if conn.total_nak_count() == 0 {
+            1.2
+        } else {
+            1.0
+        };
+
+        // Extra penalty for burst NAKs (multiple NAKs in short time)
+        if conn.nak_burst_count() > 1 && tsn < 5000 {
+            quality_mult *= 0.5; // Halve score for connections with NAK bursts
+        }
+        quality_mult
+    } else if conn.total_nak_count() == 0 {
+        // Bonus for connections that have never had NAKs
+        1.2
+    } else {
+        1.0
+    }
+}
+
 pub fn select_connection_idx(
     conns: &[SrtlaConnection],
     last_idx: Option<usize>,
@@ -427,39 +456,21 @@ pub fn select_connection_idx(
         let score = if !enable_quality {
             base
         } else {
-            let mut quality_mult = 1.0f64;
-            if let Some(tsn) = c.time_since_last_nak_ms() {
-                if tsn < 2000 {
-                    quality_mult = 0.1;
-                } else if tsn < 5000 {
-                    quality_mult = 0.5;
-                } else if tsn < 10_000 {
-                    quality_mult = 0.8;
-                } else if c.total_nak_count() == 0 {
-                    quality_mult = 1.2;
-                }
-
-                // Extra penalty for burst NAKs (multiple NAKs in short time)
-                if c.nak_burst_count() > 1 && tsn < 5000 {
-                    quality_mult *= 0.5; // Halve score for connections with NAK bursts
-                }
-            } else if c.total_nak_count() == 0 {
-                // Bonus for connections that have never had NAKs
-                quality_mult = 1.2;
-            }
-
+            let quality_mult = calculate_quality_multiplier(c);
             let final_score = (base * quality_mult).max(1.0);
 
             // Log quality analysis for debugging (only for low scores to avoid spam)
             if quality_mult < 1.0 {
-                debug!("{} quality penalty: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → final: {}",
+                debug!(
+                    "{} quality penalty: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → final: {}",
                     c.label,
                     quality_mult,
                     c.total_nak_count(),
                     c.time_since_last_nak_ms().unwrap_or(0),
                     c.nak_burst_count(),
                     base as i32,
-                    final_score as i32);
+                    final_score as i32
+                );
             }
 
             final_score
@@ -538,11 +549,11 @@ pub async fn apply_connection_changes(
     // Add new connections
     let new_ips_needed: Vec<IpAddr> = new_ips
         .iter()
+        .copied()
         .filter(|ip| {
             let label = format!("{}:{} via {}", receiver_host, receiver_port, ip);
             !current_labels.contains(&label)
         })
-        .copied()
         .collect();
 
     if !new_ips_needed.is_empty() {
