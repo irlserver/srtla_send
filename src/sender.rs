@@ -447,7 +447,22 @@ pub fn select_connection_idx(
                 // Bonus for connections that have never had NAKs
                 quality_mult = 1.2;
             }
-            (base * quality_mult).max(0.0)
+
+            let final_score = (base * quality_mult).max(1.0);
+
+            // Log quality analysis for debugging (only for low scores to avoid spam)
+            if quality_mult < 1.0 {
+                debug!("{} quality penalty: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → final: {}",
+                    c.label,
+                    quality_mult,
+                    c.total_nak_count(),
+                    c.time_since_last_nak_ms().unwrap_or(0),
+                    c.nak_burst_count(),
+                    base as i32,
+                    final_score as i32);
+            }
+
+            final_score
         };
         if score > best_score {
             second_score = best_score;
