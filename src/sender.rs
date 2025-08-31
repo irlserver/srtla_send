@@ -443,6 +443,9 @@ pub fn select_connection_idx(
                 if c.nak_burst_count() > 1 && tsn < 5000 {
                     quality_mult *= 0.5; // Halve score for connections with NAK bursts
                 }
+            } else if c.total_nak_count() == 0 {
+                // Bonus for connections that have never had NAKs
+                quality_mult = 1.2;
             }
             (base * quality_mult).max(0.0)
         };
