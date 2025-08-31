@@ -9,6 +9,7 @@ pub mod protocol;
 pub mod registration;
 pub mod sender;
 pub mod toggles;
+pub mod utils;
 
 #[cfg(test)]
 pub mod test_helpers;
@@ -21,3 +22,4 @@ pub use connection::SrtlaConnection;
 pub use protocol::*;
 pub use registration::SrtlaRegistrationManager;
 pub use toggles::DynamicToggles;
+pub use utils::now_ms;

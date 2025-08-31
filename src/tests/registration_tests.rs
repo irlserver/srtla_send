@@ -4,6 +4,7 @@ mod tests {
     use crate::protocol::*;
     use crate::registration::*;
     use crate::test_helpers::create_test_connection;
+    use crate::utils::now_ms;
 
     #[test]
     fn test_registration_manager_creation() {
@@ -32,7 +33,7 @@ mod tests {
         assert!(handled);
         assert_eq!(reg.reg1_target_idx, Some(1));
 
-        let current_time = crate::registration::now_ms();
+        let current_time = now_ms();
         assert!(reg.reg1_next_send_at_ms <= current_time + 10); // Should be very soon
     }
 
@@ -83,7 +84,7 @@ mod tests {
 
         // Set up pending state
         reg.pending_reg2_idx = Some(1);
-        reg.pending_timeout_at_ms = crate::registration::now_ms() + 5000;
+        reg.pending_timeout_at_ms = now_ms() + 5000;
         reg.reg1_target_idx = Some(1);
 
         // Create REG_ERR packet
@@ -119,7 +120,7 @@ mod tests {
         reg.reg_driver_send_if_needed(&mut connections).await;
 
         assert_eq!(reg.pending_reg2_idx, Some(0));
-        assert!(reg.pending_timeout_at_ms > crate::registration::now_ms());
+        assert!(reg.pending_timeout_at_ms > now_ms());
     }
 
     #[tokio::test]
@@ -189,10 +190,10 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
 
         // Set future send time to prevent immediate sending
-        reg.reg1_next_send_at_ms = crate::registration::now_ms() + 5000;
+        reg.reg1_next_send_at_ms = now_ms() + 5000;
 
         // Even with connections available, should not send yet
-        assert!(reg.reg1_next_send_at_ms > crate::registration::now_ms());
+        assert!(reg.reg1_next_send_at_ms > now_ms());
     }
 
     #[test]

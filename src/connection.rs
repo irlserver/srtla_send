@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::protocol::*;
 use crate::registration::SrtlaRegistrationManager;
+use crate::utils::now_ms;
 
 pub struct SrtlaIncoming {
     pub forward_to_client: Vec<Vec<u8>>,
@@ -19,37 +20,112 @@ pub struct SrtlaIncoming {
 }
 
 pub struct SrtlaConnection {
+    #[cfg(feature = "test-internals")]
     pub socket: UdpSocket,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) socket: UdpSocket,
     #[allow(dead_code)]
+    #[cfg(feature = "test-internals")]
     pub remote: SocketAddr,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) remote: SocketAddr,
     #[allow(dead_code)]
+    #[cfg(feature = "test-internals")]
     pub local_ip: IpAddr,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) local_ip: IpAddr,
     pub label: String,
+    #[cfg(feature = "test-internals")]
     pub connected: bool,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) connected: bool,
+    #[cfg(feature = "test-internals")]
     pub window: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) window: i32,
+    #[cfg(feature = "test-internals")]
     pub in_flight_packets: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) in_flight_packets: i32,
+    #[cfg(feature = "test-internals")]
     pub packet_log: [i32; PKT_LOG_SIZE],
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) packet_log: [i32; PKT_LOG_SIZE],
+    #[cfg(feature = "test-internals")]
     pub packet_send_times_ms: [u64; PKT_LOG_SIZE],
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) packet_send_times_ms: [u64; PKT_LOG_SIZE],
+    #[cfg(feature = "test-internals")]
     pub packet_idx: usize,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) packet_idx: usize,
+    #[cfg(feature = "test-internals")]
     pub last_received: Instant,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_received: Instant,
+    #[cfg(feature = "test-internals")]
     pub last_keepalive_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_keepalive_ms: u64,
     // RTT measurement via keepalive
+    #[cfg(feature = "test-internals")]
     pub last_keepalive_sent_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_keepalive_sent_ms: u64,
+    #[cfg(feature = "test-internals")]
     pub waiting_for_keepalive_response: bool,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) waiting_for_keepalive_response: bool,
+    #[cfg(feature = "test-internals")]
     pub last_rtt_measurement_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_rtt_measurement_ms: u64,
+    #[cfg(feature = "test-internals")]
     pub estimated_rtt_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) estimated_rtt_ms: f64,
     // Congestion control state
+    #[cfg(feature = "test-internals")]
     pub nak_count: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) nak_count: i32,
+    #[cfg(feature = "test-internals")]
     pub last_nak_time_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_nak_time_ms: u64,
+    #[cfg(feature = "test-internals")]
     pub last_window_increase_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_window_increase_ms: u64,
+    #[cfg(feature = "test-internals")]
     pub consecutive_acks_without_nak: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) consecutive_acks_without_nak: i32,
+    #[cfg(feature = "test-internals")]
     pub fast_recovery_mode: bool,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) fast_recovery_mode: bool,
+    #[cfg(feature = "test-internals")]
     pub fast_recovery_start_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) fast_recovery_start_ms: u64,
     // Burst NAK tracking (matches Java implementation)
+    #[cfg(feature = "test-internals")]
     pub nak_burst_count: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) nak_burst_count: i32,
+    #[cfg(feature = "test-internals")]
     pub nak_burst_start_time_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) nak_burst_start_time_ms: u64,
+    #[cfg(feature = "test-internals")]
     pub last_reconnect_attempt_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_reconnect_attempt_ms: u64,
+    #[cfg(feature = "test-internals")]
     pub reconnect_failure_count: u32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) reconnect_failure_count: u32,
 }
 
 impl SrtlaConnection {
@@ -632,10 +708,4 @@ async fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow::anyhow!("no DNS result for {}", host))
 }
 
-pub fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
+

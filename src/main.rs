@@ -7,6 +7,7 @@ mod protocol;
 mod registration;
 mod sender;
 mod toggles;
+mod utils;
 
 #[derive(Parser, Debug)]
 #[command(

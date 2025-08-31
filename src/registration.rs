@@ -3,6 +3,7 @@ use tracing::{debug, info, warn};
 
 use crate::connection::SrtlaConnection;
 use crate::protocol::*;
+use crate::utils::now_ms;
 
 pub struct SrtlaRegistrationManager {
     pub srtla_id: [u8; SRTLA_ID_LEN],
@@ -160,10 +161,4 @@ impl SrtlaRegistrationManager {
 
 // no extra trait needed; driver directly awaits on `send_srtla_packet`
 
-pub fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
+

@@ -40,14 +40,20 @@ jobs:
       - name: Check compilation
         run: cargo check
 
+      - name: Check compilation without test features
+        run: cargo check --release
+
       - name: Run unit tests
         run: cargo test --lib --verbose
 
+      - name: Run unit tests without test features (verify encapsulation)
+        run: cargo test --lib
+
       - name: Run integration tests
-        run: cargo test --test '*' --verbose
+        run: cargo test --test '*' --features test-internals --verbose
 
       - name: Run all tests
-        run: cargo test --verbose
+        run: cargo test --features test-internals --verbose
 
       - name: Run tests with all features
         run: cargo test --all-features --verbose
@@ -71,7 +77,7 @@ jobs:
           toolchain: stable
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --features test-internals
 
   test-beta:
     name: Test (Rust beta)
@@ -99,7 +105,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --features test-internals --verbose
 
   test-macos:
     name: Test (macOS)
