@@ -7,14 +7,14 @@ use crate::utils::now_ms;
 
 pub struct SrtlaRegistrationManager {
     pub srtla_id: [u8; SRTLA_ID_LEN],
-    pub pending_reg2_idx: Option<usize>,
-    pub pending_timeout_at_ms: u64,
-    pub active_connections: usize,
+    pending_reg2_idx: Option<usize>,
+    pending_timeout_at_ms: u64,
+    active_connections: usize,
     pub has_connected: bool,
-    pub broadcast_reg2_pending: bool,
+    broadcast_reg2_pending: bool,
     // New: drive REG1 only after REG_NGP, and avoid spamming
-    pub reg1_target_idx: Option<usize>,
-    pub reg1_next_send_at_ms: u64,
+    reg1_target_idx: Option<usize>,
+    reg1_next_send_at_ms: u64,
 }
 
 impl SrtlaRegistrationManager {
@@ -160,5 +160,62 @@ impl SrtlaRegistrationManager {
 }
 
 // no extra trait needed; driver directly awaits on `send_srtla_packet`
+
+// Test-only accessor methods for controlled field access
+#[cfg(test)]
+impl SrtlaRegistrationManager {
+    pub(crate) fn srtla_id(&self) -> &[u8; SRTLA_ID_LEN] {
+        &self.srtla_id
+    }
+
+    pub(crate) fn pending_reg2_idx(&self) -> Option<usize> {
+        self.pending_reg2_idx
+    }
+
+    pub(crate) fn pending_timeout_at_ms(&self) -> u64 {
+        self.pending_timeout_at_ms
+    }
+
+    pub(crate) fn active_connections(&self) -> usize {
+        self.active_connections
+    }
+
+    pub(crate) fn has_connected(&self) -> bool {
+        self.has_connected
+    }
+
+    pub(crate) fn broadcast_reg2_pending(&self) -> bool {
+        self.broadcast_reg2_pending
+    }
+
+    pub(crate) fn reg1_target_idx(&self) -> Option<usize> {
+        self.reg1_target_idx
+    }
+
+    pub(crate) fn reg1_next_send_at_ms(&self) -> u64 {
+        self.reg1_next_send_at_ms
+    }
+
+    // Mutable accessors for tests that need to modify state
+    pub(crate) fn set_pending_reg2_idx(&mut self, value: Option<usize>) {
+        self.pending_reg2_idx = value;
+    }
+
+    pub(crate) fn set_pending_timeout_at_ms(&mut self, value: u64) {
+        self.pending_timeout_at_ms = value;
+    }
+
+    pub(crate) fn set_reg1_target_idx(&mut self, value: Option<usize>) {
+        self.reg1_target_idx = value;
+    }
+
+    pub(crate) fn set_reg1_next_send_at_ms(&mut self, value: u64) {
+        self.reg1_next_send_at_ms = value;
+    }
+
+    pub(crate) fn set_broadcast_reg2_pending(&mut self, value: bool) {
+        self.broadcast_reg2_pending = value;
+    }
+}
 
 
