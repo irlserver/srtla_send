@@ -17,14 +17,14 @@ use crate::protocol::{self, MTU};
 use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
 
-const MIN_SWITCH_INTERVAL_MS: u64 = 500;
-const MAX_SEQUENCE_TRACKING: usize = 10_000;
-const GLOBAL_TIMEOUT_MS: u64 = 10_000;
+pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
+pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
+pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
-struct PendingConnectionChanges {
-    new_ips: Option<Vec<IpAddr>>,
-    receiver_host: String,
-    receiver_port: u16,
+pub struct PendingConnectionChanges {
+    pub new_ips: Option<Vec<IpAddr>>,
+    pub receiver_host: String,
+    pub receiver_port: u16,
 }
 
 pub async fn run_sender_with_toggles(
@@ -74,20 +74,15 @@ pub async fn run_sender_with_toggles(
         let local_listener_clone = local_listener.clone();
         let shared_client_addr_clone = shared_client_addr.clone();
         tokio::spawn(async move {
-            loop {
-                match instant_rx.recv() {
-                    Ok(ack_packet) => {
-                        let client_addr = {
-                            match shared_client_addr_clone.lock() {
-                                Ok(addr_guard) => *addr_guard,
-                                _ => None,
-                            }
-                        };
-                        if let Some(client) = client_addr {
-                            let _ = local_listener_clone.send_to(&ack_packet, client).await;
-                        }
+            while let Ok(ack_packet) = instant_rx.recv() {
+                let client_addr = {
+                    match shared_client_addr_clone.lock() {
+                        Ok(addr_guard) => *addr_guard,
+                        _ => None,
                     }
-                    Err(_) => break, // Channel closed
+                };
+                if let Some(client) = client_addr {
+                    let _ = local_listener_clone.send_to(&ack_packet, client).await;
                 }
             }
         });
@@ -123,14 +118,13 @@ pub async fn run_sender_with_toggles(
             }
             _ = interval.tick() => {
                 // Apply any pending connection changes at a safe point
-                if let Some(changes) = pending_changes.take() {
-                    if let Some(new_ips) = changes.new_ips {
+                if let Some(changes) = pending_changes.take()
+                    && let Some(new_ips) = changes.new_ips {
                         info!("applying queued connection changes: {} IPs", new_ips.len());
                         apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
                         info!("connection changes applied successfully");
                     }
-                }
-                
+
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
                 handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
@@ -163,7 +157,7 @@ pub async fn run_sender_with_toggles(
                         info!("connection changes applied successfully");
                     }
                 }
-                
+
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
                 handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
@@ -171,6 +165,7 @@ pub async fn run_sender_with_toggles(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
     recv_buf: &mut [u8],
@@ -238,10 +233,10 @@ async fn handle_srt_packet(
                     let _ = conn.send_data_with_tracking(pkt, seq).await;
                     if let Some(s) = seq {
                         // track mapping
-                        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING {
-                            if let Some(old) = seq_order.pop_front() {
-                                seq_to_conn.remove(&old);
-                            }
+                        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
+                            && let Some(old) = seq_order.pop_front()
+                        {
+                            seq_to_conn.remove(&old);
                         }
                         seq_to_conn.insert(s, sel_idx);
                         seq_order.push_back(s);
@@ -260,6 +255,7 @@ async fn handle_srt_packet(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
@@ -282,8 +278,9 @@ async fn handle_housekeeping(
             }
         }
 
-        // Process SRTLA ACKs: first find specific packet, then apply global +1 to all connections
-        // This matches the original implementation's register_srtla_ack behavior
+        // Process SRTLA ACKs: first find specific packet, then apply global +1 to all
+        // connections This matches the original implementation's
+        // register_srtla_ack behavior
         for srtla_ack in incoming.srtla_ack_numbers.iter() {
             // Phase 1: Find the connection that sent this specific packet
             let mut found = false;
@@ -367,15 +364,15 @@ async fn handle_housekeeping(
         }
 
         // Timeout when all connections have failed
-        if let Some(failed_at) = all_failed_at {
-            if failed_at.elapsed().as_millis() > GLOBAL_TIMEOUT_MS as u128 {
-                if reg.has_connected {
-                    error!("Failed to re-establish any connections");
-                    return Err(anyhow!("Failed to re-establish any connections"));
-                } else {
-                    error!("Failed to establish any initial connections");
-                    return Err(anyhow!("Failed to establish any initial connections"));
-                }
+        if let Some(failed_at) = all_failed_at
+            && failed_at.elapsed().as_millis() > GLOBAL_TIMEOUT_MS as u128
+        {
+            if reg.has_connected {
+                error!("Failed to re-establish any connections");
+                return Err(anyhow!("Failed to re-establish any connections"));
+            } else {
+                error!("Failed to establish any initial connections");
+                return Err(anyhow!("Failed to establish any initial connections"));
             }
         }
     } else {
@@ -385,7 +382,36 @@ async fn handle_housekeeping(
     Ok(())
 }
 
-fn select_connection_idx(
+/// Calculate quality multiplier for a connection based on NAK history
+/// Returns a multiplier between 0.05 and 1.2
+pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
+    if let Some(tsn) = conn.time_since_last_nak_ms() {
+        let mut quality_mult = if tsn < 2000 {
+            0.1
+        } else if tsn < 5000 {
+            0.5
+        } else if tsn < 10_000 {
+            0.8
+        } else if conn.total_nak_count() == 0 {
+            1.2
+        } else {
+            1.0
+        };
+
+        // Extra penalty for burst NAKs (multiple NAKs in short time)
+        if conn.nak_burst_count() > 1 && tsn < 5000 {
+            quality_mult *= 0.5; // Halve score for connections with NAK bursts
+        }
+        quality_mult
+    } else if conn.total_nak_count() == 0 {
+        // Bonus for connections that have never had NAKs
+        1.2
+    } else {
+        1.0
+    }
+}
+
+pub fn select_connection_idx(
     conns: &[SrtlaConnection],
     last_idx: Option<usize>,
     last_switch: Option<Instant>,
@@ -410,10 +436,10 @@ fn select_connection_idx(
 
     // Enhanced mode: stickiness, quality scoring, exploration
     // Base: stickiness window
-    if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
-        if ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128) {
-            return Some(idx);
-        }
+    if let (Some(idx), Some(ts)) = (last_idx, last_switch)
+        && ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
+    {
+        return Some(idx);
     }
     // Exploration window: simple periodic exploration of second-best
     let explore_now = enable_explore && (Instant::now().elapsed().as_millis() % 5000) < 300;
@@ -427,24 +453,25 @@ fn select_connection_idx(
         let score = if !enable_quality {
             base
         } else {
-            let mut quality_mult = 1.0f64;
-            if let Some(tsn) = c.time_since_last_nak_ms() {
-                if tsn < 2000 {
-                    quality_mult = 0.1;
-                } else if tsn < 5000 {
-                    quality_mult = 0.5;
-                } else if tsn < 10_000 {
-                    quality_mult = 0.8;
-                } else if c.total_nak_count() == 0 {
-                    quality_mult = 1.2;
-                }
+            let quality_mult = calculate_quality_multiplier(c);
+            let final_score = (base * quality_mult).max(1.0);
 
-                // Extra penalty for burst NAKs (multiple NAKs in short time)
-                if c.nak_burst_count() > 1 && tsn < 5000 {
-                    quality_mult *= 0.5; // Halve score for connections with NAK bursts
-                }
+            // Log quality analysis for debugging (only for low scores to avoid spam)
+            if quality_mult < 1.0 {
+                debug!(
+                    "{} quality penalty: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → \
+                     final: {}",
+                    c.label,
+                    quality_mult,
+                    c.total_nak_count(),
+                    c.time_since_last_nak_ms().unwrap_or(0),
+                    c.nak_burst_count(),
+                    base as i32,
+                    final_score as i32
+                );
             }
-            (base * quality_mult).max(0.0)
+
+            final_score
         };
         if score > best_score {
             second_score = best_score;
@@ -463,7 +490,7 @@ fn select_connection_idx(
     }
 }
 
-async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
+pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     let text = std::fs::read_to_string(Path::new(path)).context("read IPs file")?;
     let mut out = Vec::new();
     for line in text.lines() {
@@ -479,9 +506,7 @@ async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     Ok(out)
 }
 
-
-
-async fn apply_connection_changes(
+pub async fn apply_connection_changes(
     connections: &mut Vec<SrtlaConnection>,
     new_ips: &[IpAddr],
     receiver_host: &str,
@@ -490,7 +515,7 @@ async fn apply_connection_changes(
     seq_to_conn: &mut HashMap<u32, usize>,
 ) {
     use std::collections::HashSet;
-    
+
     let current_labels: HashSet<String> = connections.iter().map(|c| c.label.clone()).collect();
     let desired_labels: HashSet<String> = new_ips
         .iter()
@@ -500,15 +525,16 @@ async fn apply_connection_changes(
     // Remove stale connections
     let old_len = connections.len();
     connections.retain(|c| desired_labels.contains(&c.label));
-    
-    // If connections were removed, reset selection state and clean up sequence tracking
+
+    // If connections were removed, reset selection state and clean up sequence
+    // tracking
     if connections.len() != old_len {
         info!("removed {} stale connections", old_len - connections.len());
         *last_selected_idx = None; // Reset selection to prevent index issues
-        
+
         // Clean up sequence tracking for removed connections
         seq_to_conn.retain(|_, &mut conn_idx| conn_idx < connections.len());
-        
+
         // Rebuild sequence tracking with correct indices
         let mut new_seq_to_conn = HashMap::with_capacity(seq_to_conn.len());
         for (seq, &old_idx) in seq_to_conn.iter() {
@@ -520,26 +546,28 @@ async fn apply_connection_changes(
     }
 
     // Add new connections
-    let new_ips_needed: Vec<IpAddr> = new_ips.iter()
+    let new_ips_needed: Vec<IpAddr> = new_ips
+        .iter()
+        .copied()
         .filter(|ip| {
             let label = format!("{}:{} via {}", receiver_host, receiver_port, ip);
             !current_labels.contains(&label)
         })
-        .copied()
         .collect();
-    
+
     if !new_ips_needed.is_empty() {
-        let mut new_connections = create_connections_from_ips(&new_ips_needed, receiver_host, receiver_port).await;
+        let mut new_connections =
+            create_connections_from_ips(&new_ips_needed, receiver_host, receiver_port).await;
         let added_count = new_connections.len();
         connections.append(&mut new_connections);
-        
+
         if added_count > 0 {
             info!("added {} new connections", added_count);
         }
     }
 }
 
-async fn create_connections_from_ips(
+pub async fn create_connections_from_ips(
     ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
@@ -551,7 +579,10 @@ async fn create_connections_from_ips(
                 info!("added uplink {}", conn.label);
                 connections.push(conn);
             }
-            Err(e) => warn!("failed to add uplink {} -> {}:{}: {}", ip, receiver_host, receiver_port, e),
+            Err(e) => warn!(
+                "failed to add uplink {} -> {}:{}: {}",
+                ip, receiver_host, receiver_port, e
+            ),
         }
     }
     connections

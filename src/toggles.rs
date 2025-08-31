@@ -16,6 +16,12 @@ pub struct DynamicToggles {
     pub exploration_enabled: Arc<AtomicBool>,
 }
 
+impl Default for DynamicToggles {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DynamicToggles {
     #[allow(dead_code)]
     pub fn new() -> Self {
@@ -49,10 +55,8 @@ pub fn spawn_toggle_listener(toggles: DynamicToggles, socket_path: Option<String
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
             let reader = BufReader::new(stdin);
-            for line in reader.lines() {
-                if let Ok(cmd) = line {
-                    apply_cmd(&toggles_clone, cmd.trim());
-                }
+            for cmd in reader.lines().map_while(Result::ok) {
+                apply_cmd(&toggles_clone, cmd.trim());
             }
         });
     }
@@ -67,7 +71,7 @@ pub fn spawn_toggle_listener(toggles: DynamicToggles, socket_path: Option<String
     }
 }
 
-fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
+pub fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
     let cmd = cmd.trim();
     match cmd {
         "classic on" | "classic=true" => {

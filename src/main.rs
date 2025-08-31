@@ -7,6 +7,7 @@ mod protocol;
 mod registration;
 mod sender;
 mod toggles;
+mod utils;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -71,13 +72,15 @@ async fn main() -> Result<()> {
         let git_hash = env!("GIT_HASH");
         let git_branch = env!("GIT_BRANCH");
         let git_dirty = env!("GIT_DIRTY");
-        
-        println!("{} ({}@{}{}) [{}]", 
-                 version, 
-                 git_branch, 
-                 git_hash, 
-                 git_dirty,
-                 env!("CARGO_PKG_NAME"));
+
+        println!(
+            "{} ({}@{}{}) [{}]",
+            version,
+            git_branch,
+            git_hash,
+            git_dirty,
+            env!("CARGO_PKG_NAME")
+        );
         return Ok(());
     }
 

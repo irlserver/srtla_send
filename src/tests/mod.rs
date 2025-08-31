@@ -1,0 +1,14 @@
+#[cfg(test)]
+pub mod connection_tests;
+
+#[cfg(test)]
+pub mod registration_tests;
+
+#[cfg(test)]
+pub mod toggles_tests;
+
+#[cfg(test)]
+pub mod sender_tests;
+
+#[cfg(test)]
+pub mod protocol_tests;

@@ -1,5 +1,8 @@
 # SRTLA Sender (Rust)
 
+[![CI](https://github.com/irlserver/srtla_send/actions/workflows/ci.yml/badge.svg)](https://github.com/irlserver/srtla_send/actions/workflows/ci.yml)
+[![Build Debian Packages](https://github.com/irlserver/srtla_send/actions/workflows/build-debian.yml/badge.svg)](https://github.com/irlserver/srtla_send/actions/workflows/build-debian.yml)
+
 A Rust implementation of the SRTLA bonding sender. SRTLA is a SRT transport proxy with link aggregation for connection bonding that can transport [SRT](https://github.com/Haivision/srt/) traffic over multiple network links for capacity aggregation and redundancy. Traffic is balanced dynamically, depending on the network conditions. The intended application is bonding mobile modems for live streaming.
 
 This application is experimental. Be prepared to troubleshoot it and experiment with various settings for your needs.
@@ -42,6 +45,32 @@ cd srtla_send
 cargo build --release
 # binary at target/release/srtla_send
 ```
+
+## Testing
+
+The project includes comprehensive test suites covering unit tests, integration tests, and end-to-end tests.
+
+### Run Tests Locally
+
+```bash
+# Run all tests
+cargo test
+
+# Run with verbose output
+cargo test --verbose
+
+# Run specific test
+cargo test test_connection_score
+```
+
+### CI/CD
+
+The project uses GitHub Actions for continuous integration with automated testing on every push and pull request, including:
+
+- Multi-platform testing (Linux, Windows, macOS)
+- Code formatting and linting checks
+- Security vulnerability scanning
+- Build verification across multiple Rust versions
 
 ## Usage
 

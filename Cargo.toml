@@ -28,3 +28,27 @@ tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
 socket2 = { version = "0.6", features = ["all"] }
 bytes = "1.10.1"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
+
+[features]
+test-internals = []
+
+[lib]
+name = "srtla_send"
+path = "src/lib.rs"
+
+[[bin]]
+name = "srtla_send"
+path = "src/main.rs"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.0"
+assert_matches = "1.5"
+
+[[test]]
+name = "integration_tests"
+required-features = ["test-internals"]
+
+[[test]]
+name = "end_to_end_tests"
+required-features = ["test-internals"]

@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::protocol::*;
 use crate::registration::SrtlaRegistrationManager;
+use crate::utils::now_ms;
 
 pub struct SrtlaIncoming {
     pub forward_to_client: Vec<Vec<u8>>,
@@ -19,37 +20,112 @@ pub struct SrtlaIncoming {
 }
 
 pub struct SrtlaConnection {
-    socket: UdpSocket,
+    #[cfg(feature = "test-internals")]
+    pub socket: UdpSocket,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) socket: UdpSocket,
     #[allow(dead_code)]
-    remote: SocketAddr,
+    #[cfg(feature = "test-internals")]
+    pub remote: SocketAddr,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) remote: SocketAddr,
     #[allow(dead_code)]
+    #[cfg(feature = "test-internals")]
     pub local_ip: IpAddr,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) local_ip: IpAddr,
     pub label: String,
-    connected: bool,
-    window: i32,
-    in_flight_packets: i32,
-    packet_log: [i32; PKT_LOG_SIZE],
-    packet_send_times_ms: [u64; PKT_LOG_SIZE],
-    packet_idx: usize,
-    last_received: Instant,
-    last_keepalive_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub connected: bool,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) connected: bool,
+    #[cfg(feature = "test-internals")]
+    pub window: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) window: i32,
+    #[cfg(feature = "test-internals")]
+    pub in_flight_packets: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) in_flight_packets: i32,
+    #[cfg(feature = "test-internals")]
+    pub packet_log: [i32; PKT_LOG_SIZE],
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) packet_log: [i32; PKT_LOG_SIZE],
+    #[cfg(feature = "test-internals")]
+    pub packet_send_times_ms: [u64; PKT_LOG_SIZE],
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) packet_send_times_ms: [u64; PKT_LOG_SIZE],
+    #[cfg(feature = "test-internals")]
+    pub packet_idx: usize,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) packet_idx: usize,
+    #[cfg(feature = "test-internals")]
+    pub last_received: Instant,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_received: Instant,
+    #[cfg(feature = "test-internals")]
+    pub last_keepalive_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_keepalive_ms: u64,
     // RTT measurement via keepalive
-    last_keepalive_sent_ms: u64,
-    waiting_for_keepalive_response: bool,
-    last_rtt_measurement_ms: u64,
-    estimated_rtt_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub last_keepalive_sent_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_keepalive_sent_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub waiting_for_keepalive_response: bool,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) waiting_for_keepalive_response: bool,
+    #[cfg(feature = "test-internals")]
+    pub last_rtt_measurement_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_rtt_measurement_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub estimated_rtt_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) estimated_rtt_ms: f64,
     // Congestion control state
-    nak_count: i32,
-    last_nak_time_ms: u64,
-    last_window_increase_ms: u64,
-    consecutive_acks_without_nak: i32,
-    fast_recovery_mode: bool,
-    fast_recovery_start_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub nak_count: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) nak_count: i32,
+    #[cfg(feature = "test-internals")]
+    pub last_nak_time_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_nak_time_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub last_window_increase_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_window_increase_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub consecutive_acks_without_nak: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) consecutive_acks_without_nak: i32,
+    #[cfg(feature = "test-internals")]
+    pub fast_recovery_mode: bool,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) fast_recovery_mode: bool,
+    #[cfg(feature = "test-internals")]
+    pub fast_recovery_start_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) fast_recovery_start_ms: u64,
     // Burst NAK tracking (matches Java implementation)
-    nak_burst_count: i32,
-    nak_burst_start_time_ms: u64,
-    last_reconnect_attempt_ms: u64,
-    reconnect_failure_count: u32,
+    #[cfg(feature = "test-internals")]
+    pub nak_burst_count: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) nak_burst_count: i32,
+    #[cfg(feature = "test-internals")]
+    pub nak_burst_start_time_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) nak_burst_start_time_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub last_reconnect_attempt_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_reconnect_attempt_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub reconnect_failure_count: u32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) reconnect_failure_count: u32,
 }
 
 impl SrtlaConnection {
@@ -112,7 +188,7 @@ impl SrtlaConnection {
         let now = now_ms();
         self.last_keepalive_ms = now;
         // Only set waiting flag and timestamp when we intend to measure RTT
-        if self.waiting_for_keepalive_response == false
+        if !self.waiting_for_keepalive_response
             && (self.last_rtt_measurement_ms == 0
                 || now.saturating_sub(self.last_rtt_measurement_ms) > 3000)
         {
@@ -217,7 +293,7 @@ impl SrtlaConnection {
         })
     }
 
-    fn register_packet(&mut self, seq: i32) {
+    pub fn register_packet(&mut self, seq: i32) {
         let idx = self.packet_idx % PKT_LOG_SIZE;
         self.packet_log[idx] = seq;
         self.packet_send_times_ms[idx] = now_ms();
@@ -364,9 +440,10 @@ impl SrtlaConnection {
 
     pub fn handle_srtla_ack_specific(&mut self, seq: i32) -> bool {
         // Find the specific packet in the log and handle targeted logic
-        // This mimics the first phase of the original implementation's register_srtla_ack
+        // This mimics the first phase of the original implementation's
+        // register_srtla_ack
         let mut found = false;
-        
+
         // Search backwards through the packet log (most recent first)
         for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
@@ -376,7 +453,7 @@ impl SrtlaConnection {
                     self.in_flight_packets -= 1;
                 }
                 self.packet_log[idx] = -1;
-                
+
                 // Window increase logic from original implementation
                 if self.in_flight_packets * WINDOW_MULT > self.window {
                     let old = self.window;
@@ -397,8 +474,9 @@ impl SrtlaConnection {
     }
 
     pub fn handle_srtla_ack_global(&mut self) {
-        // Global +1 window increase for active connections (from original implementation)
-        // This is the second phase applied to ALL connections for each SRTLA ACK
+        // Global +1 window increase for active connections (from original
+        // implementation) This is the second phase applied to ALL connections
+        // for each SRTLA ACK
         if self.connected {
             let old = self.window;
             self.window += 1;
@@ -472,14 +550,19 @@ impl SrtlaConnection {
             let old = self.window;
             let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
 
+            #[allow(clippy::if_same_then_else)]
             if let Some(tsn) = time_since_last_nak {
                 if tsn > 10_000 {
+                    // No NAKs for 10+ seconds: moderate recovery
                     self.window += WINDOW_INCR * 2 * fast_mode_bonus;
                 } else if tsn > 7_000 {
-                    self.window += WINDOW_INCR * 1 * fast_mode_bonus;
+                    // No NAKs for 7+ seconds: slow recovery
+                    self.window += WINDOW_INCR * fast_mode_bonus;
                 } else if tsn > 5_000 {
-                    self.window += WINDOW_INCR * 1 * fast_mode_bonus;
+                    // No NAKs for 5+ seconds: very slow recovery
+                    self.window += WINDOW_INCR * fast_mode_bonus;
                 } else {
+                    // Recent NAKs: minimal recovery
                     self.window += WINDOW_INCR * fast_mode_bonus;
                 }
             } else {
@@ -630,12 +713,4 @@ async fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr> {
     addrs
         .next()
         .ok_or_else(|| anyhow::anyhow!("no DNS result for {}", host))
-}
-
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
 }

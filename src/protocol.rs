@@ -75,7 +75,7 @@ pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> Vec<u8> {
 pub fn create_keepalive_packet() -> Vec<u8> {
     let mut pkt = vec![0u8; 10];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
-    let ts = chrono::Utc::now().timestamp_millis() as i64 as u64;
+    let ts = chrono::Utc::now().timestamp_millis() as u64;
     for i in 0..8 {
         pkt[2 + i] = ((ts >> (56 - i * 8)) & 0xff) as u8;
     }
