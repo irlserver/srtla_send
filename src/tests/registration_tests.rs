@@ -221,7 +221,7 @@ mod tests {
 
         // Process REG2
         let mut modified_id = reg.srtla_id;
-        modified_id[200..].fill(0xff);
+        modified_id[SRTLA_ID_LEN / 2..].fill(0xff);
         let reg2_packet = create_reg2_packet(&modified_id);
         reg.process_registration_packet(0, &reg2_packet);
 

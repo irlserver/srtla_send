@@ -46,8 +46,8 @@ jobs:
       - name: Run unit tests
         run: cargo test --lib --verbose
 
-      - name: Run unit tests without test features (verify encapsulation)
-        run: cargo test --lib
+      - name: Run unit tests with test-internals (verify encapsulation)
+        run: cargo test --lib --features test-internals --verbose
 
       - name: Run integration tests
         run: cargo test --test '*' --features test-internals --verbose
