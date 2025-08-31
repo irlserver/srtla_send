@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(extract_keepalive_timestamp(&pkt), Some(test_ts));
 
         // Test with invalid packet type
-        pkt[0] = 0x80;
+        pkt[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
         assert_eq!(extract_keepalive_timestamp(&pkt), None);
 
         // Test with buffer too short
@@ -204,7 +204,10 @@ mod tests {
         assert!(is_srtla_reg2(&reg2_pkt));
         assert!(!is_srtla_reg3(&reg2_pkt));
 
-        let reg3_pkt = vec![0x92, 0x02];
+        let reg3_pkt = vec![
+            (SRTLA_TYPE_REG3 >> 8) as u8,
+            (SRTLA_TYPE_REG3 & 0xFF) as u8,
+        ];
         assert!(!is_srtla_reg1(&reg3_pkt));
         assert!(!is_srtla_reg2(&reg3_pkt));
         assert!(is_srtla_reg3(&reg3_pkt));

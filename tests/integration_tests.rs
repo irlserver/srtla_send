@@ -180,7 +180,7 @@ fn test_keepalive_timestamp_edge_cases() {
 
     // Test with wrong packet type
     let mut wrong_type = min_keepalive.clone();
-    wrong_type[0] = 0x80;
+    wrong_type[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
     assert_eq!(extract_keepalive_timestamp(&wrong_type), None);
 }
 
@@ -205,7 +205,10 @@ fn test_packet_validators_comprehensive() {
     let reg2_id = [0x22; SRTLA_ID_LEN];
     let reg2_packet = create_reg2_packet(&reg2_id);
 
-    let reg3_packet = vec![0x92, 0x02];
+    let reg3_packet = vec![
+        (SRTLA_TYPE_REG3 >> 8) as u8,
+        (SRTLA_TYPE_REG3 & 0xFF) as u8,
+    ];
     let keepalive_packet = create_keepalive_packet();
 
     let mut ack_packet = vec![0u8; 20];

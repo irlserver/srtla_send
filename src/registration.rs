@@ -163,6 +163,7 @@ impl SrtlaRegistrationManager {
 
 // Test-only accessor methods for controlled field access
 #[cfg(test)]
+#[allow(dead_code)]
 impl SrtlaRegistrationManager {
     pub(crate) fn srtla_id(&self) -> &[u8; SRTLA_ID_LEN] {
         &self.srtla_id

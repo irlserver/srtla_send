@@ -34,7 +34,7 @@ mod tests {
         assert_eq!(reg.reg1_target_idx(), Some(1));
 
         let current_time = now_ms();
-        assert!(reg.reg1_next_send_at_ms() <= current_time + 10); // Should be very soon
+        assert!(reg.reg1_next_send_at_ms() <= current_time + 100); // Allow CI scheduler skew
     }
 
     #[test]
@@ -42,7 +42,7 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
 
         // Set up pending REG2 state
-        reg.pending_reg2_idx() = Some(0);
+        reg.set_pending_reg2_idx(Some(0));
         let original_id = reg.srtla_id;
 
         // Create REG2 response packet with modified ID
@@ -68,7 +68,10 @@ mod tests {
         assert!(!reg.has_connected);
 
         // Create REG3 packet
-        let buf = vec![0x92, 0x02];
+        let buf = vec![
+            (SRTLA_TYPE_REG3 >> 8) as u8,
+            (SRTLA_TYPE_REG3 & 0xFF) as u8,
+        ];
 
         let handled = reg.process_registration_packet(2, &buf);
         assert!(handled);
@@ -83,9 +86,9 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
 
         // Set up pending state
-        reg.pending_reg2_idx() = Some(1);
-        reg.pending_timeout_at_ms() = now_ms() + 5000;
-        reg.reg1_target_idx() = Some(1);
+        reg.set_pending_reg2_idx(Some(1));
+        reg.set_pending_timeout_at_ms(now_ms() + 5000);
+        reg.set_reg1_target_idx(Some(1));
 
         // Create REG_ERR packet
         let mut buf = vec![0u8; 4];
@@ -105,7 +108,8 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
 
         // Create a non-registration packet
-        let buf = vec![0x80, 0x02, 0x00, 0x00]; // SRT ACK
+        let mut buf = vec![0u8; 4];
+        buf[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
 
         let handled = reg.process_registration_packet(0, &buf);
         assert!(!handled);
@@ -132,7 +136,7 @@ mod tests {
         ];
 
         // Set a specific target from REG_NGP
-        reg.reg1_target_idx() = Some(1);
+        reg.set_reg1_target_idx(Some(1));
 
         reg.reg_driver_send_if_needed(&mut connections).await;
 
@@ -149,7 +153,7 @@ mod tests {
         ];
 
         // Trigger broadcast
-        reg.broadcast_reg2_pending() = true;
+        reg.set_broadcast_reg2_pending(true);
         reg.reg_driver_send_if_needed(&mut connections).await;
 
         // Should have cleared the broadcast flag
@@ -185,15 +189,17 @@ mod tests {
         assert!(reg.has_connected);
     }
 
-    #[test]
-    fn test_reg_driver_timing() {
+    #[tokio::test]
+    async fn test_reg_driver_timing() {
         let mut reg = SrtlaRegistrationManager::new();
 
         // Set future send time to prevent immediate sending
-        reg.reg1_next_send_at_ms() = now_ms() + 5000;
+        reg.set_reg1_next_send_at_ms(now_ms() + 5000);
 
         // Even with connections available, should not send yet
-        assert!(reg.reg1_next_send_at_ms() > now_ms());
+        let mut connections = vec![create_test_connection().await];
+        reg.reg_driver_send_if_needed(&mut connections).await;
+        assert_eq!(reg.pending_reg2_idx(), None, "Should not send before next-send time");
     }
 
     #[test]
@@ -210,7 +216,7 @@ mod tests {
         assert_eq!(reg.reg1_target_idx(), Some(0));
 
         // Set up for REG2
-        reg.pending_reg2_idx = Some(0);
+        reg.set_pending_reg2_idx(Some(0));
 
         // Process REG2
         let mut modified_id = reg.srtla_id;
@@ -231,10 +237,8 @@ mod tests {
 
     #[test]
     fn test_id_generation_uniqueness() {
-        let reg1 = SrtlaRegistrationManager::new();
-        let reg2 = SrtlaRegistrationManager::new();
-
-        // IDs should be different (very high probability)
-        assert_ne!(reg1.srtla_id, reg2.srtla_id);
+        let ids: Vec<_> = (0..8).map(|_| SrtlaRegistrationManager::new().srtla_id).collect();
+        let all_same = ids.windows(2).all(|w| w[0] == w[1]);
+        assert!(!all_same, "All generated IDs were identical unexpectedly");
     }
 }

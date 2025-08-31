@@ -4,10 +4,9 @@ mod tests {
     use crate::protocol::*;
     use crate::test_helpers::create_test_connection;
 
-    #[test]
-    fn test_connection_score() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut conn = rt.block_on(create_test_connection());
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_connection_score() {
+        let mut conn = create_test_connection().await;
 
         // Test basic score calculation
         let initial_score = conn.get_score();
