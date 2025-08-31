@@ -67,7 +67,7 @@ pub fn spawn_toggle_listener(toggles: DynamicToggles, socket_path: Option<String
     }
 }
 
-fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
+pub fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
     let cmd = cmd.trim();
     match cmd {
         "classic on" | "classic=true" => {

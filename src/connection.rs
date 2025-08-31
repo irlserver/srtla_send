@@ -19,37 +19,37 @@ pub struct SrtlaIncoming {
 }
 
 pub struct SrtlaConnection {
-    socket: UdpSocket,
+    pub socket: UdpSocket,
     #[allow(dead_code)]
-    remote: SocketAddr,
+    pub remote: SocketAddr,
     #[allow(dead_code)]
     pub local_ip: IpAddr,
     pub label: String,
-    connected: bool,
-    window: i32,
-    in_flight_packets: i32,
-    packet_log: [i32; PKT_LOG_SIZE],
-    packet_send_times_ms: [u64; PKT_LOG_SIZE],
-    packet_idx: usize,
-    last_received: Instant,
-    last_keepalive_ms: u64,
+    pub connected: bool,
+    pub window: i32,
+    pub in_flight_packets: i32,
+    pub packet_log: [i32; PKT_LOG_SIZE],
+    pub packet_send_times_ms: [u64; PKT_LOG_SIZE],
+    pub packet_idx: usize,
+    pub last_received: Instant,
+    pub last_keepalive_ms: u64,
     // RTT measurement via keepalive
-    last_keepalive_sent_ms: u64,
-    waiting_for_keepalive_response: bool,
-    last_rtt_measurement_ms: u64,
-    estimated_rtt_ms: f64,
+    pub last_keepalive_sent_ms: u64,
+    pub waiting_for_keepalive_response: bool,
+    pub last_rtt_measurement_ms: u64,
+    pub estimated_rtt_ms: f64,
     // Congestion control state
-    nak_count: i32,
-    last_nak_time_ms: u64,
-    last_window_increase_ms: u64,
-    consecutive_acks_without_nak: i32,
-    fast_recovery_mode: bool,
-    fast_recovery_start_ms: u64,
+    pub nak_count: i32,
+    pub last_nak_time_ms: u64,
+    pub last_window_increase_ms: u64,
+    pub consecutive_acks_without_nak: i32,
+    pub fast_recovery_mode: bool,
+    pub fast_recovery_start_ms: u64,
     // Burst NAK tracking (matches Java implementation)
-    nak_burst_count: i32,
-    nak_burst_start_time_ms: u64,
-    last_reconnect_attempt_ms: u64,
-    reconnect_failure_count: u32,
+    pub nak_burst_count: i32,
+    pub nak_burst_start_time_ms: u64,
+    pub last_reconnect_attempt_ms: u64,
+    pub reconnect_failure_count: u32,
 }
 
 impl SrtlaConnection {
@@ -217,7 +217,7 @@ impl SrtlaConnection {
         })
     }
 
-    fn register_packet(&mut self, seq: i32) {
+    pub fn register_packet(&mut self, seq: i32) {
         let idx = self.packet_idx % PKT_LOG_SIZE;
         self.packet_log[idx] = seq;
         self.packet_send_times_ms[idx] = now_ms();
@@ -366,7 +366,7 @@ impl SrtlaConnection {
         // Find the specific packet in the log and handle targeted logic
         // This mimics the first phase of the original implementation's register_srtla_ack
         let mut found = false;
-        
+
         // Search backwards through the packet log (most recent first)
         for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
@@ -376,7 +376,7 @@ impl SrtlaConnection {
                     self.in_flight_packets -= 1;
                 }
                 self.packet_log[idx] = -1;
-                
+
                 // Window increase logic from original implementation
                 if self.in_flight_packets * WINDOW_MULT > self.window {
                     let old = self.window;
@@ -632,7 +632,7 @@ async fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow::anyhow!("no DNS result for {}", host))
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

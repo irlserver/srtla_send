@@ -17,14 +17,14 @@ use crate::protocol::{self, MTU};
 use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
 
-const MIN_SWITCH_INTERVAL_MS: u64 = 500;
-const MAX_SEQUENCE_TRACKING: usize = 10_000;
-const GLOBAL_TIMEOUT_MS: u64 = 10_000;
+pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
+pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
+pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
-struct PendingConnectionChanges {
-    new_ips: Option<Vec<IpAddr>>,
-    receiver_host: String,
-    receiver_port: u16,
+pub struct PendingConnectionChanges {
+    pub new_ips: Option<Vec<IpAddr>>,
+    pub receiver_host: String,
+    pub receiver_port: u16,
 }
 
 pub async fn run_sender_with_toggles(
@@ -130,7 +130,7 @@ pub async fn run_sender_with_toggles(
                         info!("connection changes applied successfully");
                     }
                 }
-                
+
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
                 handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
@@ -163,7 +163,7 @@ pub async fn run_sender_with_toggles(
                         info!("connection changes applied successfully");
                     }
                 }
-                
+
                 let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
                 handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
@@ -385,7 +385,7 @@ async fn handle_housekeeping(
     Ok(())
 }
 
-fn select_connection_idx(
+pub fn select_connection_idx(
     conns: &[SrtlaConnection],
     last_idx: Option<usize>,
     last_switch: Option<Instant>,
@@ -463,7 +463,7 @@ fn select_connection_idx(
     }
 }
 
-async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
+pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     let text = std::fs::read_to_string(Path::new(path)).context("read IPs file")?;
     let mut out = Vec::new();
     for line in text.lines() {
@@ -479,9 +479,7 @@ async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     Ok(out)
 }
 
-
-
-async fn apply_connection_changes(
+pub async fn apply_connection_changes(
     connections: &mut Vec<SrtlaConnection>,
     new_ips: &[IpAddr],
     receiver_host: &str,
@@ -490,7 +488,7 @@ async fn apply_connection_changes(
     seq_to_conn: &mut HashMap<u32, usize>,
 ) {
     use std::collections::HashSet;
-    
+
     let current_labels: HashSet<String> = connections.iter().map(|c| c.label.clone()).collect();
     let desired_labels: HashSet<String> = new_ips
         .iter()
@@ -500,15 +498,15 @@ async fn apply_connection_changes(
     // Remove stale connections
     let old_len = connections.len();
     connections.retain(|c| desired_labels.contains(&c.label));
-    
+
     // If connections were removed, reset selection state and clean up sequence tracking
     if connections.len() != old_len {
         info!("removed {} stale connections", old_len - connections.len());
         *last_selected_idx = None; // Reset selection to prevent index issues
-        
+
         // Clean up sequence tracking for removed connections
         seq_to_conn.retain(|_, &mut conn_idx| conn_idx < connections.len());
-        
+
         // Rebuild sequence tracking with correct indices
         let mut new_seq_to_conn = HashMap::with_capacity(seq_to_conn.len());
         for (seq, &old_idx) in seq_to_conn.iter() {
@@ -520,26 +518,28 @@ async fn apply_connection_changes(
     }
 
     // Add new connections
-    let new_ips_needed: Vec<IpAddr> = new_ips.iter()
+    let new_ips_needed: Vec<IpAddr> = new_ips
+        .iter()
         .filter(|ip| {
             let label = format!("{}:{} via {}", receiver_host, receiver_port, ip);
             !current_labels.contains(&label)
         })
         .copied()
         .collect();
-    
+
     if !new_ips_needed.is_empty() {
-        let mut new_connections = create_connections_from_ips(&new_ips_needed, receiver_host, receiver_port).await;
+        let mut new_connections =
+            create_connections_from_ips(&new_ips_needed, receiver_host, receiver_port).await;
         let added_count = new_connections.len();
         connections.append(&mut new_connections);
-        
+
         if added_count > 0 {
             info!("added {} new connections", added_count);
         }
     }
 }
 
-async fn create_connections_from_ips(
+pub async fn create_connections_from_ips(
     ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
@@ -551,7 +551,10 @@ async fn create_connections_from_ips(
                 info!("added uplink {}", conn.label);
                 connections.push(conn);
             }
-            Err(e) => warn!("failed to add uplink {} -> {}:{}: {}", ip, receiver_host, receiver_port, e),
+            Err(e) => warn!(
+                "failed to add uplink {} -> {}:{}: {}",
+                ip, receiver_host, receiver_port, e
+            ),
         }
     }
     connections

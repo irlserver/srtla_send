@@ -6,14 +6,14 @@ use crate::protocol::*;
 
 pub struct SrtlaRegistrationManager {
     pub srtla_id: [u8; SRTLA_ID_LEN],
-    pending_reg2_idx: Option<usize>,
-    pending_timeout_at_ms: u64,
-    active_connections: usize,
+    pub pending_reg2_idx: Option<usize>,
+    pub pending_timeout_at_ms: u64,
+    pub active_connections: usize,
     pub has_connected: bool,
-    broadcast_reg2_pending: bool,
+    pub broadcast_reg2_pending: bool,
     // New: drive REG1 only after REG_NGP, and avoid spamming
-    reg1_target_idx: Option<usize>,
-    reg1_next_send_at_ms: u64,
+    pub reg1_target_idx: Option<usize>,
+    pub reg1_next_send_at_ms: u64,
 }
 
 impl SrtlaRegistrationManager {
@@ -160,7 +160,7 @@ impl SrtlaRegistrationManager {
 
 // no extra trait needed; driver directly awaits on `send_srtla_packet`
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
