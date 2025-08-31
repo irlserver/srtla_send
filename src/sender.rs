@@ -74,20 +74,15 @@ pub async fn run_sender_with_toggles(
         let local_listener_clone = local_listener.clone();
         let shared_client_addr_clone = shared_client_addr.clone();
         tokio::spawn(async move {
-            loop {
-                match instant_rx.recv() {
-                    Ok(ack_packet) => {
-                        let client_addr = {
-                            match shared_client_addr_clone.lock() {
-                                Ok(addr_guard) => *addr_guard,
-                                _ => None,
-                            }
-                        };
-                        if let Some(client) = client_addr {
-                            let _ = local_listener_clone.send_to(&ack_packet, client).await;
-                        }
+            while let Ok(ack_packet) = instant_rx.recv() {
+                let client_addr = {
+                    match shared_client_addr_clone.lock() {
+                        Ok(addr_guard) => *addr_guard,
+                        _ => None,
                     }
-                    Err(_) => break, // Channel closed
+                };
+                if let Some(client) = client_addr {
+                    let _ = local_listener_clone.send_to(&ack_packet, client).await;
                 }
             }
         });
@@ -170,6 +165,7 @@ pub async fn run_sender_with_toggles(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
     recv_buf: &mut [u8],
@@ -259,6 +255,7 @@ async fn handle_srt_packet(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,

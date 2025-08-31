@@ -550,14 +550,19 @@ impl SrtlaConnection {
             let old = self.window;
             let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
 
+            #[allow(clippy::if_same_then_else)]
             if let Some(tsn) = time_since_last_nak {
                 if tsn > 10_000 {
+                    // No NAKs for 10+ seconds: moderate recovery
                     self.window += WINDOW_INCR * 2 * fast_mode_bonus;
                 } else if tsn > 7_000 {
+                    // No NAKs for 7+ seconds: slow recovery
                     self.window += WINDOW_INCR * fast_mode_bonus;
                 } else if tsn > 5_000 {
+                    // No NAKs for 5+ seconds: very slow recovery
                     self.window += WINDOW_INCR * fast_mode_bonus;
                 } else {
+                    // Recent NAKs: minimal recovery
                     self.window += WINDOW_INCR * fast_mode_bonus;
                 }
             } else {

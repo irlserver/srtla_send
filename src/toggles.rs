@@ -55,7 +55,7 @@ pub fn spawn_toggle_listener(toggles: DynamicToggles, socket_path: Option<String
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
             let reader = BufReader::new(stdin);
-            for cmd in reader.lines().flatten() {
+            for cmd in reader.lines().map_while(Result::ok) {
                 apply_cmd(&toggles_clone, cmd.trim());
             }
         });
