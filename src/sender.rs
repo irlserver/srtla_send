@@ -525,15 +525,15 @@ pub fn select_connection_idx(
         return best_idx;
     }
 
-    // Enhanced mode: stickiness, quality scoring, exploration
-    // Base: stickiness window
-    if let (Some(idx), Some(ts)) = (last_idx, last_switch)
-        && ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
-        && idx < conns.len()
-        && conns[idx].connected
-    {
-        return Some(idx);
-    }
+    // Enhanced mode: Bond Bunny approach - calculate scores first, then apply stickiness
+    // Check if we're in stickiness window
+    let in_stickiness_window = if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
+        ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128) 
+            && idx < conns.len() 
+            && conns[idx].connected
+    } else {
+        false
+    };
     // Exploration window: simple periodic exploration of second-best
     let explore_now = enable_explore && (Instant::now().elapsed().as_millis() % 5000) < 300;
     // Score connections by base score; apply quality multiplier unless classic
@@ -583,6 +583,13 @@ pub fn select_connection_idx(
             second_idx = Some(i);
         }
     }
+    
+    // Bond Bunny approach: if in stickiness window and last connection is still good, keep it
+    if in_stickiness_window && best_idx == last_idx {
+        return best_idx; // Sticky to the best connection
+    }
+    
+    // Allow switching if better connection found (prevents getting stuck on degraded connections)
     if explore_now {
         second_idx.or(best_idx)
     } else {
