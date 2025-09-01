@@ -16,6 +16,7 @@ jobs:
       # Install Rust and cross-compilation tools
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: nightly
           target: aarch64-unknown-linux-gnu
 
       # Install cross-compilation dependencies
@@ -81,6 +82,7 @@ jobs:
       # Install Rust toolchain
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: nightly
           target: x86_64-unknown-linux-gnu
 
       # Compile Rust project for AMD64
