@@ -617,16 +617,17 @@ impl SrtlaConnection {
             self.last_window_increase_ms = now;
 
             if self.window > old
-                && let Some(tsn) = time_since_last_nak {
-                    debug!(
-                        "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
-                        self.label,
-                        old,
-                        self.window,
-                        (tsn as f64) / 1000.0,
-                        self.fast_recovery_mode
-                    );
-                }
+                && let Some(tsn) = time_since_last_nak
+            {
+                debug!(
+                    "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
+                    self.label,
+                    old,
+                    self.window,
+                    (tsn as f64) / 1000.0,
+                    self.fast_recovery_mode
+                );
+            }
         }
     }
 
