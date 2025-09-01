@@ -24,7 +24,7 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&connections, None, None, false, false, true);
+        let selected = select_connection_idx(&connections, None, None, false, false, true, Instant::now());
         assert_eq!(selected, Some(1));
     }
 
@@ -42,13 +42,13 @@ mod tests {
         let last_idx = Some(2);
 
         let selected =
-            select_connection_idx(&connections, last_idx, recent_switch, false, false, false);
+            select_connection_idx(&connections, last_idx, recent_switch, false, false, false, Instant::now());
         assert_eq!(selected, Some(2)); // Sticks because it's both recent AND best
 
         // Test that it switches away when the last selection is not the best
         let last_idx_not_best = Some(1); // Connection 1 is not the best
         let selected_no_stick = 
-            select_connection_idx(&connections, last_idx_not_best, recent_switch, false, false, false);
+            select_connection_idx(&connections, last_idx_not_best, recent_switch, false, false, false, Instant::now());
         assert_eq!(selected_no_stick, Some(2)); // Switches to best (connection 2)
     }
 
@@ -78,6 +78,7 @@ mod tests {
             true, // enable quality
             false,
             false,
+            Instant::now(),
         );
 
         // Should prefer connection 1 (no NAKs)
@@ -106,6 +107,7 @@ mod tests {
             true, // enable quality
             false,
             false,
+            Instant::now(),
         );
 
         // Should prefer connection 2 (never had NAKs, best quality)
@@ -260,7 +262,7 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&connections, None, None, false, false, false);
+        let selected = select_connection_idx(&connections, None, None, false, false, false, Instant::now());
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -280,6 +282,7 @@ mod tests {
             false,
             true, // enable exploration
             false,
+            Instant::now(),
         );
 
         // The result depends on timing, but should not panic

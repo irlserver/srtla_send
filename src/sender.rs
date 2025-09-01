@@ -302,6 +302,7 @@ async fn handle_srt_packet(
                 effective_enable_quality,
                 effective_enable_explore,
                 classic,
+                Instant::now(),
             );
             if let Some(sel_idx) = sel_idx {
                 // Safe access - connection changes only happen between processing cycles
@@ -515,6 +516,7 @@ pub fn select_connection_idx(
     enable_quality: bool,
     enable_explore: bool,
     classic: bool,
+    now: Instant,
 ) -> Option<usize> {
     // Classic mode: simple algorithm matching original implementation
     if classic {
@@ -534,14 +536,15 @@ pub fn select_connection_idx(
     // Enhanced mode: Bond Bunny approach - calculate scores first, then apply
     // stickiness Check if we're in stickiness window
     let in_stickiness_window = if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
-        ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
+        now.duration_since(ts).as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
             && idx < conns.len()
             && conns[idx].connected
     } else {
         false
     };
     // Exploration window: simple periodic exploration of second-best
-    let explore_now = enable_explore && (Instant::now().elapsed().as_millis() % 5000) < 300;
+    // Use elapsed time since program start for consistent periodic behavior
+    let explore_now = enable_explore && (now.elapsed().as_millis() % 5000) < 300;
     // Score connections by base score; apply quality multiplier unless classic
     let mut best_idx: Option<usize> = None;
     let mut second_idx: Option<usize> = None;
