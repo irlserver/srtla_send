@@ -160,8 +160,8 @@ pub async fn run_sender_with_toggles(
             }
             _ = housekeeping_timer.tick() => {
                 // Apply any pending connection changes at a safe point
-                if let Some(changes) = pending_changes.take() {
-                    if let Some(new_ips) = changes.new_ips {
+                if let Some(changes) = pending_changes.take()
+                    && let Some(new_ips) = changes.new_ips {
                         info!("applying queued connection changes: {} IPs", new_ips.len());
                         apply_connection_changes(
                             &mut connections,
@@ -174,7 +174,6 @@ pub async fn run_sender_with_toggles(
                         ).await;
                         info!("connection changes applied successfully");
                     }
-                }
 
                 // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
                 status_counter += 1;
