@@ -311,15 +311,16 @@ impl SrtlaConnection {
     }
 
     pub fn handle_srt_ack(&mut self, ack: i32) {
-        let mut acked_count = 0;
         let mut ack_send_time_ms: Option<u64> = None;
+        let mut remaining_count = 0;
+        
+        // Bond Bunny approach: mark acknowledged packets and recount remaining
         for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             let val = self.packet_log[idx];
             if val == ack {
                 // Mark this specific packet as acknowledged
                 self.packet_log[idx] = -1;
-                acked_count += 1;
                 let t = self.packet_send_times_ms[idx];
                 if t != 0 {
                     ack_send_time_ms = Some(t);
@@ -327,11 +328,14 @@ impl SrtlaConnection {
             } else if val > 0 && val < ack {
                 // Cumulative ACK: mark older packets as acknowledged
                 self.packet_log[idx] = -1;
-                acked_count += 1;
+            } else if val > 0 {
+                // Count remaining unacknowledged packets
+                remaining_count += 1;
             }
         }
-        // Decrement in-flight count for each acknowledged packet
-        self.in_flight_packets = self.in_flight_packets.saturating_sub(acked_count);
+        
+        // Bond Bunny exact: recalculate in-flight count from scratch
+        self.in_flight_packets = remaining_count;
 
         // RTT from SRT ACK if we have a send timestamp
         if let Some(sent_ms) = ack_send_time_ms {
