@@ -104,6 +104,24 @@ mod tests {
     }
 
     #[test]
+    fn test_nak_handling_with_logged_packet() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let initial_window = conn.window;
+        let initial_nak_count = conn.nak_count;
+
+        // Register a packet (simulate sending it)
+        conn.register_packet(100);
+
+        // Now handle a NAK for that same packet
+        conn.handle_nak(100);
+
+        // Since the packet was found in the log, the connection should NOT be penalized
+        assert_eq!(conn.window, initial_window, "Window should not be reduced when packet is found in log");
+        assert_eq!(conn.nak_count, initial_nak_count, "NAK count should not be incremented when packet is found in log");
+    }
+
+    #[test]
     fn test_srtla_ack_handling() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
