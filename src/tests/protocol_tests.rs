@@ -28,6 +28,10 @@ mod tests {
         let buf = [0x80, 0x00, 0x10, 0x00];
         assert_eq!(get_srt_sequence_number(&buf), None);
 
+        // Valid sequence number (sequence 0)
+        let buf = [0x00, 0x00, 0x00, 0x00];
+        assert_eq!(get_srt_sequence_number(&buf), Some(0x0000));
+
         // Buffer too short
         assert_eq!(get_srt_sequence_number(&[0x00, 0x00]), None);
 

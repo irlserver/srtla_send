@@ -60,9 +60,9 @@ pub struct SrtlaConnection {
     #[cfg(not(feature = "test-internals"))]
     pub(crate) packet_idx: usize,
     #[cfg(feature = "test-internals")]
-    pub last_received: Instant,
+    pub last_received: Option<Instant>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_received: Instant,
+    pub(crate) last_received: Option<Instant>,
     #[cfg(feature = "test-internals")]
     pub last_keepalive_ms: u64,
     #[cfg(not(feature = "test-internals"))]
@@ -147,7 +147,7 @@ impl SrtlaConnection {
             packet_log: [-1; PKT_LOG_SIZE],
             packet_send_times_ms: [0; PKT_LOG_SIZE],
             packet_idx: 0,
-            last_received: Instant::now(),
+            last_received: None,
             last_keepalive_ms: 0,
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,
@@ -169,6 +169,11 @@ impl SrtlaConnection {
     pub fn get_score(&self) -> i32 {
         if !self.connected {
             return -1;
+        }
+        // Flow control: don't allow sending if at/over window limit
+        let max_in_flight = self.window / WINDOW_MULT;
+        if self.in_flight_packets >= max_in_flight {
+            return 0; // Connection is at capacity
         }
         self.window / (self.in_flight_packets + 1)
     }
@@ -221,7 +226,7 @@ impl SrtlaConnection {
                         break;
                     }
                     read_any = true;
-                    self.last_received = Instant::now();
+                    self.last_received = Some(Instant::now());
                     debug!("recv {} bytes from {}", n, self.label);
                     let pt = get_packet_type(&buf[..n]);
                     if let Some(pt) = pt {
@@ -252,6 +257,8 @@ impl SrtlaConnection {
                                     naks.push(seq);
                                 }
                             }
+                            // Forward NAKs to SRT client (like C implementation does)
+                            forward.push(buf[..n].to_vec());
                         } else if pt == SRTLA_TYPE_ACK {
                             // Collect SRTLA ACK packets for global processing
                             let ack_list = parse_srtla_ack(&buf[..n]);
@@ -302,24 +309,27 @@ impl SrtlaConnection {
     }
 
     pub fn handle_srt_ack(&mut self, ack: i32) {
-        let mut count = 0;
+        let mut acked_count = 0;
         let mut ack_send_time_ms: Option<u64> = None;
         for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             let val = self.packet_log[idx];
-            if val < ack {
-                self.packet_log[idx] = -1;
-            } else if val > 0 {
-                count += 1;
-            }
             if val == ack {
+                // Mark this specific packet as acknowledged
+                self.packet_log[idx] = -1;
+                acked_count += 1;
                 let t = self.packet_send_times_ms[idx];
                 if t != 0 {
                     ack_send_time_ms = Some(t);
                 }
+            } else if val > 0 && val < ack {
+                // Cumulative ACK: mark older packets as acknowledged
+                self.packet_log[idx] = -1;
+                acked_count += 1;
             }
         }
-        self.in_flight_packets = count;
+        // Decrement in-flight count for each acknowledged packet
+        self.in_flight_packets = self.in_flight_packets.saturating_sub(acked_count);
 
         // RTT from SRT ACK if we have a send timestamp
         if let Some(sent_ms) = ack_send_time_ms {
@@ -454,10 +464,11 @@ impl SrtlaConnection {
                 }
                 self.packet_log[idx] = -1;
 
-                // Window increase logic from original implementation
+                // Window increase logic from C version (lines 291-293)
+                // Only increase if in_flight_pkts*WINDOW_MULT > window
                 if self.in_flight_packets * WINDOW_MULT > self.window {
                     let old = self.window;
-                    self.window += WINDOW_INCR - 1;
+                    self.window += WINDOW_INCR - 1;  // Note: WINDOW_INCR - 1 in C code
                     if self.window > WINDOW_MAX * WINDOW_MULT {
                         self.window = WINDOW_MAX * WINDOW_MULT;
                     }
@@ -477,8 +488,8 @@ impl SrtlaConnection {
         // Global +1 window increase for connections that have received data (from
         // original implementation)
         // This matches C version: if (c->last_rcvd != 0)
-        // In Rust, we check if last_received has been updated since connection creation
-        if self.connected {
+        // In Rust, we check if last_received is Some (i.e., has been set when data was received)
+        if self.connected && self.last_received.is_some() {
             let old = self.window;
             self.window += 1;
             if self.window > WINDOW_MAX * WINDOW_MULT {
@@ -599,7 +610,7 @@ impl SrtlaConnection {
 
     #[allow(dead_code)]
     pub fn is_timed_out(&self) -> bool {
-        !self.connected || self.last_received.elapsed().as_secs() >= CONN_TIMEOUT
+        !self.connected || self.last_received.map_or(true, |lr| lr.elapsed().as_secs() >= CONN_TIMEOUT)
     }
 
     pub fn mark_disconnected(&mut self) {
@@ -672,7 +683,7 @@ impl SrtlaConnection {
         let socket = UdpSocket::from_std(std_sock)?;
         self.socket = socket;
         self.connected = true;
-        self.last_received = Instant::now();
+        self.last_received = None;
         self.window = WINDOW_MIN * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
@@ -703,10 +714,15 @@ fn bind_from_ip(ip: IpAddr, port: u16) -> Result<Socket> {
     };
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).context("create socket")?;
 
-    // Set send buffer size to match C implementation (32MB)
+    // Set send buffer size (32MB)
     const SEND_BUF_SIZE: usize = 32 * 1024 * 1024;
     sock.set_send_buffer_size(SEND_BUF_SIZE)
         .context("set send buffer size")?;
+
+    // Set receive buffer size to handle large SRT packets (100MB)
+    const RECV_BUF_SIZE: usize = 100 * 1024 * 1024;
+    sock.set_recv_buffer_size(RECV_BUF_SIZE)
+        .context("set receive buffer size")?;
 
     let addr = SocketAddr::new(ip, port);
     sock.bind(&addr.into()).context("bind socket")?;
