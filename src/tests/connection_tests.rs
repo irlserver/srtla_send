@@ -104,6 +104,30 @@ mod tests {
     }
 
     #[test]
+    fn test_nak_handling_with_logged_packet() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let initial_window = conn.window;
+        let initial_nak_count = conn.nak_count;
+
+        // Register a packet (simulate sending it)
+        conn.register_packet(100);
+
+        // Now handle a NAK for that same packet
+        conn.handle_nak(100);
+
+        // Since the packet was found in the log, the connection should NOT be penalized
+        assert_eq!(
+            conn.window, initial_window,
+            "Window should not be reduced when packet is found in log"
+        );
+        assert_eq!(
+            conn.nak_count, initial_nak_count,
+            "NAK count should not be incremented when packet is found in log"
+        );
+    }
+
+    #[test]
     fn test_srtla_ack_handling() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
@@ -218,7 +242,8 @@ mod tests {
 
         // Simulate old last_received time
         use std::time::Duration;
-        conn.last_received = tokio::time::Instant::now() - Duration::from_secs(CONN_TIMEOUT + 1);
+        conn.last_received =
+            tokio::time::Instant::now().checked_sub(Duration::from_secs(CONN_TIMEOUT + 1));
         assert!(conn.is_timed_out());
 
         // Disconnected connection should be timed out
@@ -233,9 +258,40 @@ mod tests {
 
         assert!(conn.connected);
 
-        conn.mark_disconnected();
+        // Test manual disconnection by setting connected = false
+        conn.connected = false;
         assert!(!conn.connected);
         assert_eq!(conn.get_score(), -1);
+    }
+
+    #[test]
+    fn test_connection_recovery_mode() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        // Initial state
+        assert!(conn.connected);
+        assert!(conn.get_score() > 0);
+        let initial_window = conn.window;
+
+        // Mark for recovery (C-style)
+        conn.mark_for_recovery();
+
+        // Connection should still be connected (unlike mark_disconnected)
+        assert!(conn.connected);
+
+        // But should be in recovery mode with reset state
+        assert!(conn.is_timed_out()); // Old timestamp should make it appear timed out
+        assert_eq!(conn.window, WINDOW_MIN * WINDOW_MULT);
+        assert_eq!(conn.in_flight_packets, 0);
+
+        // Score should still be calculated normally since connected=true, but with
+        // reset window
+        let expected_score = (WINDOW_MIN * WINDOW_MULT) / (0 + 1); // window / (in_flight + 1)
+        assert_eq!(conn.get_score(), expected_score);
+
+        // Verify window was reset from initial value
+        assert!(conn.window < initial_window);
     }
 
     #[test]

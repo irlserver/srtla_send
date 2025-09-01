@@ -60,9 +60,9 @@ pub struct SrtlaConnection {
     #[cfg(not(feature = "test-internals"))]
     pub(crate) packet_idx: usize,
     #[cfg(feature = "test-internals")]
-    pub last_received: Instant,
+    pub last_received: Option<Instant>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_received: Instant,
+    pub(crate) last_received: Option<Instant>,
     #[cfg(feature = "test-internals")]
     pub last_keepalive_ms: u64,
     #[cfg(not(feature = "test-internals"))]
@@ -147,7 +147,7 @@ impl SrtlaConnection {
             packet_log: [-1; PKT_LOG_SIZE],
             packet_send_times_ms: [0; PKT_LOG_SIZE],
             packet_idx: 0,
-            last_received: Instant::now(),
+            last_received: None,
             last_keepalive_ms: 0,
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,
@@ -170,6 +170,11 @@ impl SrtlaConnection {
         if !self.connected {
             return -1;
         }
+        // Flow control: don't allow sending if at/over window limit
+        let max_in_flight = (self.window / WINDOW_MULT).max(1);
+        if self.in_flight_packets >= max_in_flight {
+            return 0; // Connection is at capacity
+        }
         self.window / (self.in_flight_packets + 1)
     }
 
@@ -183,7 +188,6 @@ impl SrtlaConnection {
 
     pub async fn send_keepalive(&mut self) -> Result<()> {
         let pkt = create_keepalive_packet();
-        debug!("keepalive → {} ({} bytes)", self.label, pkt.len());
         self.socket.send(&pkt).await?;
         let now = now_ms();
         self.last_keepalive_ms = now;
@@ -221,8 +225,7 @@ impl SrtlaConnection {
                         break;
                     }
                     read_any = true;
-                    self.last_received = Instant::now();
-                    debug!("recv {} bytes from {}", n, self.label);
+                    self.last_received = Some(Instant::now());
                     let pt = get_packet_type(&buf[..n]);
                     if let Some(pt) = pt {
                         // registration first
@@ -232,7 +235,6 @@ impl SrtlaConnection {
                         // Protocol handling
                         if pt == SRT_TYPE_ACK {
                             if let Some(ack) = parse_srt_ack(&buf[..n]) {
-                                debug!("ACK {:?} from {}", ack, self.label);
                                 acks.push(ack);
                             }
                             // Instantly forward ACKs for minimal RTT
@@ -248,10 +250,11 @@ impl SrtlaConnection {
                                     nak_list.len()
                                 );
                                 for seq in nak_list {
-                                    debug!("NAK {:?} from {}", seq, self.label);
                                     naks.push(seq);
                                 }
                             }
+                            // Forward NAKs to SRT client (like C implementation does)
+                            forward.push(buf[..n].to_vec());
                         } else if pt == SRTLA_TYPE_ACK {
                             // Collect SRTLA ACK packets for global processing
                             let ack_list = parse_srtla_ack(&buf[..n]);
@@ -263,7 +266,6 @@ impl SrtlaConnection {
                                 );
                                 for seq in ack_list {
                                     srtla_acks.push(seq);
-                                    debug!("SRTLA ACK {:?} from {}", seq, self.label);
                                 }
                             }
                             // Don't forward SRTLA ACKs to SRT client
@@ -297,46 +299,72 @@ impl SrtlaConnection {
         let idx = self.packet_idx % PKT_LOG_SIZE;
         self.packet_log[idx] = seq;
         self.packet_send_times_ms[idx] = now_ms();
+
+        // Debug when packet log wraps around
+        let old_idx = self.packet_idx;
         self.packet_idx = (self.packet_idx + 1) % PKT_LOG_SIZE;
+        if self.packet_idx < old_idx {
+            debug!("{}: packet log wrapped around (seq={})", self.label, seq);
+        }
+
         self.in_flight_packets += 1;
     }
 
     pub fn handle_srt_ack(&mut self, ack: i32) {
-        let mut count = 0;
         let mut ack_send_time_ms: Option<u64> = None;
+        let mut remaining_count = 0;
+
+        // Bond Bunny approach: mark acknowledged packets and recount remaining
         for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             let val = self.packet_log[idx];
-            if val < ack {
-                self.packet_log[idx] = -1;
-            } else if val > 0 {
-                count += 1;
-            }
             if val == ack {
+                // Mark this specific packet as acknowledged
+                self.packet_log[idx] = -1;
                 let t = self.packet_send_times_ms[idx];
                 if t != 0 {
                     ack_send_time_ms = Some(t);
                 }
+            } else if val > 0 && val < ack {
+                // Cumulative ACK: mark older packets as acknowledged
+                self.packet_log[idx] = -1;
+            } else if val > 0 {
+                // Count remaining unacknowledged packets
+                remaining_count += 1;
             }
         }
-        self.in_flight_packets = count;
+
+        // Bond Bunny exact: recalculate in-flight count from scratch
+        self.in_flight_packets = remaining_count;
 
         // RTT from SRT ACK if we have a send timestamp
         if let Some(sent_ms) = ack_send_time_ms {
             let now = now_ms();
             let rtt = now.saturating_sub(sent_ms);
             if rtt > 0 && rtt <= 10_000 {
+                // Capture old RTT estimate before updating
+                let old_rtt_estimate = self.estimated_rtt_ms;
+
                 self.estimated_rtt_ms = if self.estimated_rtt_ms == 0.0 {
                     rtt as f64
                 } else {
                     (self.estimated_rtt_ms * 0.875) + (rtt as f64 * 0.125)
                 };
                 self.last_rtt_measurement_ms = now;
-                // Use info level for SRT ACK RTT since this is the authoritative measurement
-                info!(
-                    "{}: RTT (SRT ACK) measured: {} ms (avg {:.1} ms)",
-                    self.label, rtt, self.estimated_rtt_ms
-                );
+
+                // Log significant RTT changes (>20% difference) using old value
+                let rtt_change_pct = if old_rtt_estimate > 0.0 {
+                    ((rtt as f64 - old_rtt_estimate) / old_rtt_estimate * 100.0).abs()
+                } else {
+                    100.0
+                };
+
+                if rtt_change_pct > 20.0 {
+                    debug!(
+                        "{}: RTT changed significantly: {} ms (was {:.1} ms, +{:.1}%)",
+                        self.label, rtt, old_rtt_estimate, rtt_change_pct
+                    );
+                }
             }
         }
 
@@ -357,10 +385,13 @@ impl SrtlaConnection {
                     }
                     self.last_window_increase_ms = now;
                     self.consecutive_acks_without_nak = 0;
-                    if old <= 10_000 {
-                        info!(
-                            "{}: ACK increased window {} → {}",
-                            self.label, old, self.window
+                    if (self.window - old) > 500 {
+                        debug!(
+                            "{}: Major window increase {} → {} (+{})",
+                            self.label,
+                            old,
+                            self.window,
+                            self.window - old
                         );
                     }
                 }
@@ -368,7 +399,7 @@ impl SrtlaConnection {
         }
         if self.fast_recovery_mode && self.window >= 12_000 {
             self.fast_recovery_mode = false;
-            info!(
+            debug!(
                 "{}: Disabling FAST RECOVERY MODE - window {}",
                 self.label, self.window
             );
@@ -380,7 +411,7 @@ impl SrtlaConnection {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             if self.packet_log[idx] == seq {
                 self.packet_log[idx] = -1;
-                break;
+                return; // Found and processed - don't penalize this connection
             }
         }
 
@@ -454,10 +485,11 @@ impl SrtlaConnection {
                 }
                 self.packet_log[idx] = -1;
 
-                // Window increase logic from original implementation
+                // Window increase logic from C version (lines 291-293)
+                // Only increase if in_flight_pkts*WINDOW_MULT > window
                 if self.in_flight_packets * WINDOW_MULT > self.window {
                     let old = self.window;
-                    self.window += WINDOW_INCR - 1;
+                    self.window += WINDOW_INCR - 1; // Note: WINDOW_INCR - 1 in C code
                     if self.window > WINDOW_MAX * WINDOW_MULT {
                         self.window = WINDOW_MAX * WINDOW_MULT;
                     }
@@ -470,23 +502,32 @@ impl SrtlaConnection {
             }
         }
 
+        if !found {
+            // Not found in packet log
+        }
+
         found
     }
 
     pub fn handle_srtla_ack_global(&mut self) {
-        // Global +1 window increase for active connections (from original
-        // implementation) This is the second phase applied to ALL connections
-        // for each SRTLA ACK
-        if self.connected {
+        // Global +1 window increase for connections that have received data (from
+        // original implementation)
+        // This matches C version: if (c->last_rcvd != 0)
+        // In Rust, we check if last_received is Some (i.e., has been set when data was
+        // received)
+        if self.connected && self.last_received.is_some() {
             let old = self.window;
             self.window += 1;
             if self.window > WINDOW_MAX * WINDOW_MULT {
                 self.window = WINDOW_MAX * WINDOW_MULT;
             }
-            if old < self.window {
+            if old < self.window && (self.window - old) > 100 {
                 debug!(
-                    "{}: SRTLA ACK global recovery {} → {}",
-                    self.label, old, self.window
+                    "{}: Major window recovery {} → {} (+{})",
+                    self.label,
+                    old,
+                    self.window,
+                    self.window - old
                 );
             }
         }
@@ -513,7 +554,6 @@ impl SrtlaConnection {
             let rtt = now.saturating_sub(ts);
             if rtt <= 10_000 {
                 // Keepalive RTT is informational only; prefer SRT ACK-based RTT for accuracy
-                debug!("{}: Keepalive RTT observed: {} ms", self.label, rtt);
                 // still update timestamp to throttle RTT measurements
                 self.last_rtt_measurement_ms = now;
             }
@@ -576,33 +616,46 @@ impl SrtlaConnection {
             }
             self.last_window_increase_ms = now;
 
-            if self.window > old {
-                if let Some(tsn) = time_since_last_nak {
-                    info!(
-                        "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
-                        self.label,
-                        old,
-                        self.window,
-                        (tsn as f64) / 1000.0,
-                        self.fast_recovery_mode
-                    );
-                } else {
-                    debug!(
-                        "{}: Time-based window recovery {} → {} (no NAKs yet)",
-                        self.label, old, self.window
-                    );
-                }
+            if self.window > old
+                && let Some(tsn) = time_since_last_nak
+            {
+                debug!(
+                    "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
+                    self.label,
+                    old,
+                    self.window,
+                    (tsn as f64) / 1000.0,
+                    self.fast_recovery_mode
+                );
             }
         }
     }
 
     #[allow(dead_code)]
     pub fn is_timed_out(&self) -> bool {
-        !self.connected || self.last_received.elapsed().as_secs() >= CONN_TIMEOUT
+        !self.connected
+            || if let Some(lr) = self.last_received {
+                lr.elapsed().as_secs() >= CONN_TIMEOUT
+            } else {
+                true
+            }
     }
 
-    pub fn mark_disconnected(&mut self) {
-        self.connected = false;
+    /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
+    pub fn mark_for_recovery(&mut self) {
+        // Use a timestamp from 1970 (like C's last_rcvd = 1) to indicate recovery
+        // needed
+        self.last_received = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(86400))
+            .or_else(|| {
+                Instant::now().checked_sub(std::time::Duration::from_secs(
+                    crate::protocol::CONN_TIMEOUT + 1,
+                ))
+            });
+        // Reset connection state like C version does
+        self.window = WINDOW_MIN * WINDOW_MULT;
+        self.in_flight_packets = 0;
+        self.packet_log = [-1; PKT_LOG_SIZE];
     }
 
     pub fn time_since_last_nak_ms(&self) -> Option<u64> {
@@ -671,7 +724,7 @@ impl SrtlaConnection {
         let socket = UdpSocket::from_std(std_sock)?;
         self.socket = socket;
         self.connected = true;
-        self.last_received = Instant::now();
+        self.last_received = Some(Instant::now());
         self.window = WINDOW_MIN * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
@@ -701,6 +754,28 @@ fn bind_from_ip(ip: IpAddr, port: u16) -> Result<Socket> {
         IpAddr::V6(_) => Domain::IPV6,
     };
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).context("create socket")?;
+
+    // Set send buffer size (32MB)
+    const SEND_BUF_SIZE: usize = 32 * 1024 * 1024;
+    if let Err(e) = sock.set_send_buffer_size(SEND_BUF_SIZE) {
+        warn!("Failed to set send buffer size to {}: {}", SEND_BUF_SIZE, e);
+        if let Ok(actual_size) = sock.send_buffer_size() {
+            warn!("Effective send buffer size: {}", actual_size);
+        }
+    }
+
+    // Set receive buffer size to handle large SRT packets (100MB)
+    const RECV_BUF_SIZE: usize = 100 * 1024 * 1024;
+    if let Err(e) = sock.set_recv_buffer_size(RECV_BUF_SIZE) {
+        warn!(
+            "Failed to set receive buffer size to {}: {}",
+            RECV_BUF_SIZE, e
+        );
+        if let Ok(actual_size) = sock.recv_buffer_size() {
+            warn!("Effective receive buffer size: {}", actual_size);
+        }
+    }
+
     let addr = SocketAddr::new(ip, port);
     sock.bind(&addr.into()).context("bind socket")?;
     Ok(sock)

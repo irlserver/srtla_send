@@ -34,17 +34,27 @@ This tool assumes that data is streamed from a SRT _sender_ in _caller_ mode to 
 
 ## Requirements
 
-- Rust and Cargo (nightly)
+- **Rust nightly toolchain** and Cargo
 - Unix (Linux/macOS) or Windows
   - Note: SIGHUP-based IP reload is Unix-only; Windows runs without that arm
+
+**Important:** This project requires Rust nightly due to advanced rustfmt configuration options used in the codebase.
 
 ## Build
 
 ```bash
 cd srtla_send
 rustup install nightly
-cargo +nightly build --release
+rustup default nightly  # Set nightly as default for this project
+cargo build --release
 # binary at target/release/srtla_send
+```
+
+Alternatively, you can use nightly for individual commands:
+```bash
+cargo +nightly build --release
+cargo +nightly fmt
+cargo +nightly test
 ```
 
 ## Testing
@@ -54,7 +64,7 @@ The project includes comprehensive test suites covering unit tests, integration 
 ### Run Tests Locally
 
 ```bash
-# Run all tests
+# Run all tests (requires nightly)
 cargo test
 
 # Run with verbose output
@@ -62,6 +72,9 @@ cargo test --verbose
 
 # Run specific test
 cargo test test_connection_score
+
+# Check formatting (requires nightly)
+cargo fmt --all -- --check
 ```
 
 ### CI/CD

@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -13,9 +14,10 @@ use tokio::time::{self, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::connection::SrtlaConnection;
-use crate::protocol::{self, MTU};
+use crate::protocol::{self, MTU, PKT_LOG_SIZE};
 use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
+use crate::utils::now_ms;
 
 pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
@@ -50,15 +52,15 @@ pub async fn run_sender_with_toggles(
         return Err(anyhow!("no IPs in list: {}", ips_file));
     }
 
-    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, local_srt_port)))
-        .await
-        .context("bind local SRT UDP listener")?;
-    info!("listening for SRT on 0.0.0.0:{}", local_srt_port);
-
     let mut connections = create_connections_from_ips(&ips, receiver_host, receiver_port).await;
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
+
+    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, local_srt_port)))
+        .await
+        .context("bind local SRT UDP listener")?;
+    info!("listening for SRT on 0.0.0.0:{}", local_srt_port);
 
     let mut reg = SrtlaRegistrationManager::new();
 
@@ -88,17 +90,38 @@ pub async fn run_sender_with_toggles(
         });
     }
 
+    // Main packet processing loop variables
+    #[allow(unused_variables, unused_mut)]
     let mut recv_buf = vec![0u8; MTU];
-    let mut interval = time::interval(Duration::from_millis(1));
+    #[allow(unused_variables, unused_mut)]
+    let mut housekeeping_timer = time::interval(Duration::from_millis(1)); // Frequent timer for periodic tasks
+    #[allow(unused_variables, unused_mut)]
+    let mut status_counter = 0;
+    #[allow(unused_variables, unused_mut)]
     let mut last_client_addr: Option<SocketAddr> = None;
+    // Sequence → connection index mapping for correct NAK attribution
+    #[allow(unused_variables, unused_mut)]
+    let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
+    #[allow(unused_variables, unused_mut)]
+    let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
+    // Stickiness
+    #[allow(unused_variables, unused_mut)]
+    let mut last_selected_idx: Option<usize> = None;
+    #[allow(unused_variables, unused_mut)]
+    let mut last_switch_time: Option<Instant> = None;
+    // Connection failure tracking
+    #[allow(unused_variables, unused_mut)]
+    let mut all_failed_at: Option<Instant> = None;
+
+    // Pending connection changes (applied safely between processing cycles)
+    #[allow(unused_variables, unused_mut)]
+    let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Sequence → connection index mapping for correct NAK attribution
     let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
     let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
     // Stickiness
     let mut last_selected_idx: Option<usize> = None;
     let mut last_switch_time: Option<Instant> = None;
-    // stickiness interval defined at module level
-
     // Connection failure tracking
     let mut all_failed_at: Option<Instant> = None;
 
@@ -107,26 +130,56 @@ pub async fn run_sender_with_toggles(
 
     // Prepare SIGHUP stream (Unix only)
     #[cfg(unix)]
+    #[allow(unused_variables)]
     let mut sighup = signal(SignalKind::hangup())?;
 
-    // Main loop with conditional SIGHUP handling
+    // Main loop - run housekeeping frequently like C version
     #[cfg(unix)]
     loop {
+        // Run housekeeping frequently (like C version does every main loop iteration)
+        {
+            let classic = toggles
+                .classic_mode
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let _ = handle_housekeeping(
+                &mut connections,
+                &mut reg,
+                &instant_tx,
+                last_client_addr,
+                &local_listener,
+                &mut seq_to_conn,
+                classic,
+                &mut all_failed_at,
+            )
+            .await;
+        }
+
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
-            _ = interval.tick() => {
+            _ = housekeeping_timer.tick() => {
                 // Apply any pending connection changes at a safe point
                 if let Some(changes) = pending_changes.take()
                     && let Some(new_ips) = changes.new_ips {
                         info!("applying queued connection changes: {} IPs", new_ips.len());
-                        apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
+                        apply_connection_changes(
+                            &mut connections,
+                            &new_ips,
+                            &changes.receiver_host,
+                            changes.receiver_port,
+                            &mut last_selected_idx,
+                            &mut seq_to_conn,
+                             &mut seq_order,
+                        ).await;
                         info!("connection changes applied successfully");
                     }
 
-                let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
-                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
+                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
+                status_counter += 1;
+                if status_counter % 30000 == 0 {
+                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                }
             }
             _ = sighup.recv() => {
                 info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
@@ -144,22 +197,51 @@ pub async fn run_sender_with_toggles(
 
     #[cfg(not(unix))]
     loop {
+        // Run housekeeping frequently (like C version does every main loop iteration)
+        {
+            let classic = toggles
+                .classic_mode
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let _ = handle_housekeeping(
+                &mut connections,
+                &mut reg,
+                &instant_tx,
+                last_client_addr,
+                &local_listener,
+                &mut seq_to_conn,
+                classic,
+                &mut all_failed_at,
+            )
+            .await;
+        }
+
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
-            _ = interval.tick() => {
+            _ = housekeeping_timer.tick() => {
                 // Apply any pending connection changes at a safe point
                 if let Some(changes) = pending_changes.take() {
                     if let Some(new_ips) = changes.new_ips {
                         info!("applying queued connection changes: {} IPs", new_ips.len());
-                        apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
+                        apply_connection_changes(
+                            &mut connections,
+                            &new_ips,
+                            &changes.receiver_host,
+                            changes.receiver_port,
+                            &mut last_selected_idx,
+                            &mut seq_to_conn,
+                            &mut seq_order,
+                        ).await;
                         info!("connection changes applied successfully");
                     }
                 }
 
-                let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
-                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
+                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
+                status_counter += 1;
+                if status_counter % 30000 == 0 {
+                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                }
             }
         }
     }
@@ -219,18 +301,37 @@ async fn handle_srt_packet(
                 effective_enable_quality,
                 effective_enable_explore,
                 classic,
+                Instant::now(),
             );
             if let Some(sel_idx) = sel_idx {
                 // Safe access - connection changes only happen between processing cycles
                 if sel_idx < connections.len() {
                     // record stickiness
                     if *last_selected_idx != Some(sel_idx) {
+                        if let Some(prev_idx) = *last_selected_idx {
+                            if prev_idx < connections.len() {
+                                debug!(
+                                    "Connection switch: {} → {} (seq: {:?})",
+                                    connections[prev_idx].label, connections[sel_idx].label, seq
+                                );
+                            }
+                        } else {
+                            debug!(
+                                "Initial connection selected: {} (seq: {:?})",
+                                connections[sel_idx].label, seq
+                            );
+                        }
                         *last_selected_idx = Some(sel_idx);
                         *last_switch_time = Some(Instant::now());
                     }
                     let conn = &mut connections[sel_idx];
-                    debug!("forward {} bytes (seq={:?}) via {}", n, seq, conn.label);
-                    let _ = conn.send_data_with_tracking(pkt, seq).await;
+                    if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
+                        warn!(
+                            "{}: sendto() failed, marking for recovery: {}",
+                            conn.label, e
+                        );
+                        conn.mark_for_recovery();
+                    }
                     if let Some(s) = seq {
                         // track mapping
                         if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
@@ -283,14 +384,11 @@ async fn handle_housekeeping(
         // register_srtla_ack behavior
         for srtla_ack in incoming.srtla_ack_numbers.iter() {
             // Phase 1: Find the connection that sent this specific packet
-            let mut found = false;
             for c in connections.iter_mut() {
                 if c.handle_srtla_ack_specific(*srtla_ack as i32) {
-                    found = true;
                     break;
                 }
             }
-            debug!("SRTLA ACK {} processed (found={})", srtla_ack, found);
 
             // Phase 2: Apply +1 window increase to ALL active connections
             for c in connections.iter_mut() {
@@ -331,17 +429,16 @@ async fn handle_housekeeping(
             if connections[i].should_attempt_reconnect() {
                 connections[i].record_reconnect_attempt();
                 warn!(
-                    "{} timed out; attempting reconnection",
+                    "{} timed out; resetting connection state for recovery",
                     connections[i].label
                 );
-                connections[i].mark_disconnected();
-                match connections[i].reconnect().await {
-                    Ok(()) => {
-                        info!("{} reconnected; re-sending REG2", connections[i].label);
-                        reg.trigger_broadcast_reg2(connections).await;
-                    }
-                    Err(e) => warn!("{} reconnect failed: {}", connections[i].label, e),
-                }
+                // Use C-style recovery: reset state but keep socket alive
+                connections[i].mark_for_recovery();
+                info!(
+                    "{} marked for recovery; re-sending REG2",
+                    connections[i].label
+                );
+                reg.trigger_broadcast_reg2(connections).await;
             } else {
                 debug!("{} timed out but in backoff period", connections[i].label);
             }
@@ -418,6 +515,7 @@ pub fn select_connection_idx(
     enable_quality: bool,
     enable_explore: bool,
     classic: bool,
+    now: Instant,
 ) -> Option<usize> {
     // Classic mode: simple algorithm matching original implementation
     if classic {
@@ -434,15 +532,18 @@ pub fn select_connection_idx(
         return best_idx;
     }
 
-    // Enhanced mode: stickiness, quality scoring, exploration
-    // Base: stickiness window
-    if let (Some(idx), Some(ts)) = (last_idx, last_switch)
-        && ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
-    {
-        return Some(idx);
-    }
+    // Enhanced mode: Bond Bunny approach - calculate scores first, then apply
+    // stickiness Check if we're in stickiness window
+    let in_stickiness_window = if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
+        now.duration_since(ts).as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
+            && idx < conns.len()
+            && conns[idx].connected
+    } else {
+        false
+    };
     // Exploration window: simple periodic exploration of second-best
-    let explore_now = enable_explore && (Instant::now().elapsed().as_millis() % 5000) < 300;
+    // Use elapsed time since program start for consistent periodic behavior
+    let explore_now = enable_explore && (now.elapsed().as_millis() % 5000) < 300;
     // Score connections by base score; apply quality multiplier unless classic
     let mut best_idx: Option<usize> = None;
     let mut second_idx: Option<usize> = None;
@@ -456,10 +557,10 @@ pub fn select_connection_idx(
             let quality_mult = calculate_quality_multiplier(c);
             let final_score = (base * quality_mult).max(1.0);
 
-            // Log quality analysis for debugging (only for low scores to avoid spam)
-            if quality_mult < 1.0 {
+            // Log quality issues and recoveries for debugging
+            if quality_mult < 0.8 {
                 debug!(
-                    "{} quality penalty: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → \
+                    "{} quality degraded: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → \
                      final: {}",
                     c.label,
                     quality_mult,
@@ -468,6 +569,13 @@ pub fn select_connection_idx(
                     c.nak_burst_count(),
                     base as i32,
                     final_score as i32
+                );
+            } else if quality_mult < 1.0 && c.nak_burst_count() > 0 {
+                debug!(
+                    "{} quality recovering: {:.2} (burst: {})",
+                    c.label,
+                    quality_mult,
+                    c.nak_burst_count()
                 );
             }
 
@@ -483,6 +591,15 @@ pub fn select_connection_idx(
             second_idx = Some(i);
         }
     }
+
+    // Bond Bunny approach: if in stickiness window and last connection is still
+    // good, keep it
+    if in_stickiness_window && best_idx == last_idx {
+        return best_idx; // Sticky to the best connection
+    }
+
+    // Allow switching if better connection found (prevents getting stuck on
+    // degraded connections)
     if explore_now {
         second_idx.or(best_idx)
     } else {
@@ -513,6 +630,7 @@ pub async fn apply_connection_changes(
     receiver_port: u16,
     last_selected_idx: &mut Option<usize>,
     seq_to_conn: &mut HashMap<u32, usize>,
+    seq_order: &mut VecDeque<u32>,
 ) {
     use std::collections::HashSet;
 
@@ -543,6 +661,8 @@ pub async fn apply_connection_changes(
             }
         }
         *seq_to_conn = new_seq_to_conn;
+        // Drop stale sequence IDs from the order queue
+        seq_order.retain(|seq| seq_to_conn.contains_key(seq));
     }
 
     // Add new connections
@@ -586,4 +706,115 @@ pub async fn create_connections_from_ips(
         }
     }
     connections
+}
+
+/// Comprehensive status monitoring for connections
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn log_connection_status(
+    connections: &[SrtlaConnection],
+    seq_to_conn: &HashMap<u32, usize>,
+    seq_order: &VecDeque<u32>,
+    last_selected_idx: Option<usize>,
+    toggles: &DynamicToggles,
+) {
+    let total_connections = connections.len();
+    let active_connections = connections.iter().filter(|c| !c.is_timed_out()).count();
+    let timed_out_connections = total_connections - active_connections;
+
+    info!("📊 Connection Status Report:");
+    info!("  Total connections: {}", total_connections);
+    info!(
+        "  Active connections: {} ({:.1}%)",
+        active_connections,
+        if total_connections > 0 {
+            (active_connections as f64 / total_connections as f64) * 100.0
+        } else {
+            0.0
+        }
+    );
+    info!("  Timed out connections: {}", timed_out_connections);
+
+    // Show toggle states
+    info!(
+        "  Toggles: classic={}, stickiness={}, quality={}, exploration={}",
+        toggles.classic_mode.load(Ordering::Relaxed),
+        toggles.stickiness_enabled.load(Ordering::Relaxed),
+        toggles.quality_scoring_enabled.load(Ordering::Relaxed),
+        toggles.exploration_enabled.load(Ordering::Relaxed)
+    );
+
+    // Show sequence tracking info
+    info!(
+        "  Sequence tracking: {} mappings, {} in order queue",
+        seq_to_conn.len(),
+        seq_order.len()
+    );
+
+    // Show packet log utilization
+    let total_log_entries: usize = connections
+        .iter()
+        .map(|c| c.in_flight_packets as usize)
+        .sum();
+    let max_possible_entries = connections.len() * PKT_LOG_SIZE;
+    let log_utilization = if max_possible_entries > 0 {
+        (total_log_entries as f64 / max_possible_entries as f64) * 100.0
+    } else {
+        0.0
+    };
+    info!(
+        "  Packet log: {} entries used ({:.1}% of capacity)",
+        total_log_entries, log_utilization
+    );
+
+    // Show last selected connection
+    if let Some(idx) = last_selected_idx {
+        if idx < connections.len() {
+            info!("  Last selected: {}", connections[idx].label);
+        } else {
+            warn!("  Last selected index {} is out of bounds!", idx);
+        }
+    } else {
+        info!("  Last selected: none");
+    }
+
+    // Show individual connection details
+    for (i, conn) in connections.iter().enumerate() {
+        let status = if conn.is_timed_out() {
+            "⏰ TIMED_OUT"
+        } else {
+            "✅ ACTIVE"
+        };
+        let score = conn.get_score();
+        let score_desc: String = match score {
+            -1 => "DISCONNECTED".to_string(),
+            0 => "AT_CAPACITY".to_string(),
+            _ => score.to_string(),
+        };
+
+        let last_recv = conn
+            .last_received
+            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
+            .unwrap_or_else(|| "never".to_string());
+
+        info!(
+            "    [{}] {} {} - Score: {} - Last recv: {} - Window: {} - In-flight: {}",
+            i, status, conn.label, score_desc, last_recv, conn.window, conn.in_flight_packets
+        );
+
+        // Show RTT info if available
+        if conn.estimated_rtt_ms > 0.0 {
+            info!(
+                "        RTT: {:.1}ms (last measured: {:.1}s ago)",
+                conn.estimated_rtt_ms,
+                (now_ms().saturating_sub(conn.last_rtt_measurement_ms) as f64) / 1000.0
+            );
+        }
+    }
+
+    // Show any warnings
+    if active_connections == 0 {
+        warn!("⚠️  No active connections available!");
+    } else if active_connections < total_connections / 2 {
+        warn!("⚠️  Less than half of connections are active");
+    }
 }

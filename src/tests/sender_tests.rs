@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::Ordering;
@@ -24,22 +24,47 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&connections, None, None, false, false, true);
+        let selected =
+            select_connection_idx(&connections, None, None, false, false, true, Instant::now());
         assert_eq!(selected, Some(1));
     }
 
     #[test]
     fn test_select_connection_idx_stickiness() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let connections = rt.block_on(create_test_connections(3));
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Make connection 2 the best by giving it higher window
+        connections[2].window = connections[0].window + 100;
 
         // Test stickiness - should stick to current selection within interval
+        // when it's also the best connection (Bond Bunny behavior)
         let recent_switch = Some(Instant::now());
         let last_idx = Some(2);
 
-        let selected =
-            select_connection_idx(&connections, last_idx, recent_switch, false, false, false);
-        assert_eq!(selected, Some(2));
+        let selected = select_connection_idx(
+            &connections,
+            last_idx,
+            recent_switch,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
+        assert_eq!(selected, Some(2)); // Sticks because it's both recent AND best
+
+        // Test that it switches away when the last selection is not the best
+        let last_idx_not_best = Some(1); // Connection 1 is not the best
+        let selected_no_stick = select_connection_idx(
+            &connections,
+            last_idx_not_best,
+            recent_switch,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
+        assert_eq!(selected_no_stick, Some(2)); // Switches to best (connection 2)
     }
 
     #[test]
@@ -68,6 +93,7 @@ mod tests {
             true, // enable quality
             false,
             false,
+            Instant::now(),
         );
 
         // Should prefer connection 1 (no NAKs)
@@ -96,6 +122,7 @@ mod tests {
             true, // enable quality
             false,
             false,
+            Instant::now(),
         );
 
         // Should prefer connection 2 (never had NAKs, best quality)
@@ -153,6 +180,9 @@ mod tests {
         let mut seq_to_conn = HashMap::new();
         seq_to_conn.insert(100, 1);
         seq_to_conn.insert(200, 2);
+        let mut seq_order = VecDeque::new();
+        seq_order.push_back(100);
+        seq_order.push_back(200);
 
         rt.block_on(apply_connection_changes(
             &mut connections,
@@ -161,6 +191,7 @@ mod tests {
             8080,
             &mut last_selected_idx,
             &mut seq_to_conn,
+            &mut seq_order,
         ));
 
         // Should have removed some connections
@@ -171,6 +202,9 @@ mod tests {
 
         // Should have cleaned up sequence tracking
         assert!(seq_to_conn.len() < 2);
+
+        // Should have cleaned up seq_order to match seq_to_conn
+        assert_eq!(seq_order.len(), seq_to_conn.len());
     }
 
     #[test]
@@ -243,7 +277,15 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&connections, None, None, false, false, false);
+        let selected = select_connection_idx(
+            &connections,
+            None,
+            None,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -263,6 +305,7 @@ mod tests {
             false,
             true, // enable exploration
             false,
+            Instant::now(),
         );
 
         // The result depends on timing, but should not panic
