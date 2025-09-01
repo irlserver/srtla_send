@@ -400,7 +400,7 @@ impl SrtlaConnection {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             if self.packet_log[idx] == seq {
                 self.packet_log[idx] = -1;
-                break;
+                return; // Found and processed - don't penalize this connection
             }
         }
 
