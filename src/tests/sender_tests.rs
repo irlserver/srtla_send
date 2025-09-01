@@ -24,7 +24,8 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&connections, None, None, false, false, true, Instant::now());
+        let selected =
+            select_connection_idx(&connections, None, None, false, false, true, Instant::now());
         assert_eq!(selected, Some(1));
     }
 
@@ -36,19 +37,33 @@ mod tests {
         // Make connection 2 the best by giving it higher window
         connections[2].window = connections[0].window + 100;
 
-        // Test stickiness - should stick to current selection within interval 
+        // Test stickiness - should stick to current selection within interval
         // when it's also the best connection (Bond Bunny behavior)
         let recent_switch = Some(Instant::now());
         let last_idx = Some(2);
 
-        let selected =
-            select_connection_idx(&connections, last_idx, recent_switch, false, false, false, Instant::now());
+        let selected = select_connection_idx(
+            &connections,
+            last_idx,
+            recent_switch,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
         assert_eq!(selected, Some(2)); // Sticks because it's both recent AND best
 
         // Test that it switches away when the last selection is not the best
         let last_idx_not_best = Some(1); // Connection 1 is not the best
-        let selected_no_stick = 
-            select_connection_idx(&connections, last_idx_not_best, recent_switch, false, false, false, Instant::now());
+        let selected_no_stick = select_connection_idx(
+            &connections,
+            last_idx_not_best,
+            recent_switch,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
         assert_eq!(selected_no_stick, Some(2)); // Switches to best (connection 2)
     }
 
@@ -262,7 +277,15 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&connections, None, None, false, false, false, Instant::now());
+        let selected = select_connection_idx(
+            &connections,
+            None,
+            None,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
