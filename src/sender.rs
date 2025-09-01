@@ -783,10 +783,10 @@ pub fn log_connection_status(
             "✅ ACTIVE"
         };
         let score = conn.get_score();
-        let score_desc = match score {
-            -1 => "DISCONNECTED",
-            0 => "AT_CAPACITY",
-            _ => &format!("{}", score),
+        let score_desc: String = match score {
+            -1 => "DISCONNECTED".to_string(),
+            0 => "AT_CAPACITY".to_string(),
+            _ => score.to_string(),
         };
 
         let last_recv = conn
