@@ -619,8 +619,14 @@ impl SrtlaConnection {
             }
     }
 
-    pub fn mark_disconnected(&mut self) {
-        self.connected = false;
+    /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
+    pub fn mark_for_recovery(&mut self) {
+        // Use a timestamp from 1970 (like C's last_rcvd = 1) to indicate recovery needed
+        self.last_received = Some(Instant::now() - std::time::Duration::from_secs(86400)); // 1 day ago
+        // Reset connection state like C version does
+        self.window = WINDOW_MIN * WINDOW_MULT;
+        self.in_flight_packets = 0;
+        self.packet_log = [-1; PKT_LOG_SIZE];
     }
 
     pub fn time_since_last_nak_ms(&self) -> Option<u64> {

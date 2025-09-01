@@ -299,10 +299,10 @@ async fn handle_srt_packet(
                     debug!("forward {} bytes (seq={:?}) via {}", n, seq, conn.label);
                     if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
                         warn!(
-                            "{}: sendto() failed, disabling the connection: {}",
+                            "{}: sendto() failed, marking for recovery: {}",
                             conn.label, e
                         );
-                        conn.mark_disconnected();
+                        conn.mark_for_recovery();
                     }
                     if let Some(s) = seq {
                         // track mapping
@@ -404,17 +404,13 @@ async fn handle_housekeeping(
             if connections[i].should_attempt_reconnect() {
                 connections[i].record_reconnect_attempt();
                 warn!(
-                    "{} timed out; attempting reconnection",
+                    "{} timed out; resetting connection state for recovery",
                     connections[i].label
                 );
-                connections[i].mark_disconnected();
-                match connections[i].reconnect().await {
-                    Ok(()) => {
-                        info!("{} reconnected; re-sending REG2", connections[i].label);
-                        reg.trigger_broadcast_reg2(connections).await;
-                    }
-                    Err(e) => warn!("{} reconnect failed: {}", connections[i].label, e),
-                }
+                // Use C-style recovery: reset state but keep socket alive
+                connections[i].mark_for_recovery();
+                info!("{} marked for recovery; re-sending REG2", connections[i].label);
+                reg.trigger_broadcast_reg2(connections).await;
             } else {
                 debug!("{} timed out but in backoff period", connections[i].label);
             }
