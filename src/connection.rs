@@ -468,7 +468,7 @@ impl SrtlaConnection {
                 // Only increase if in_flight_pkts*WINDOW_MULT > window
                 if self.in_flight_packets * WINDOW_MULT > self.window {
                     let old = self.window;
-                    self.window += WINDOW_INCR - 1;  // Note: WINDOW_INCR - 1 in C code
+                    self.window += WINDOW_INCR - 1; // Note: WINDOW_INCR - 1 in C code
                     if self.window > WINDOW_MAX * WINDOW_MULT {
                         self.window = WINDOW_MAX * WINDOW_MULT;
                     }
@@ -488,7 +488,8 @@ impl SrtlaConnection {
         // Global +1 window increase for connections that have received data (from
         // original implementation)
         // This matches C version: if (c->last_rcvd != 0)
-        // In Rust, we check if last_received is Some (i.e., has been set when data was received)
+        // In Rust, we check if last_received is Some (i.e., has been set when data was
+        // received)
         if self.connected && self.last_received.is_some() {
             let old = self.window;
             self.window += 1;
@@ -610,7 +611,10 @@ impl SrtlaConnection {
 
     #[allow(dead_code)]
     pub fn is_timed_out(&self) -> bool {
-        !self.connected || self.last_received.map_or(true, |lr| lr.elapsed().as_secs() >= CONN_TIMEOUT)
+        !self.connected
+            || self
+                .last_received
+                .map_or(true, |lr| lr.elapsed().as_secs() >= CONN_TIMEOUT)
     }
 
     pub fn mark_disconnected(&mut self) {
