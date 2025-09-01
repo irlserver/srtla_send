@@ -16,5 +16,8 @@ target/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# This is so we can reference these files when debugging implementation details
+# but don't want them in the repo
 *.c
 *.h
+bond-bunny-main/
