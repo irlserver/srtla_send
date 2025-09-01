@@ -175,7 +175,7 @@ mod tests {
 
         // Should have cleaned up sequence tracking
         assert!(seq_to_conn.len() < 2);
-        
+
         // Should have cleaned up seq_order to match seq_to_conn
         assert_eq!(seq_order.len(), seq_to_conn.len());
     }

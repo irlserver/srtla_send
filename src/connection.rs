@@ -313,7 +313,7 @@ impl SrtlaConnection {
     pub fn handle_srt_ack(&mut self, ack: i32) {
         let mut ack_send_time_ms: Option<u64> = None;
         let mut remaining_count = 0;
-        
+
         // Bond Bunny approach: mark acknowledged packets and recount remaining
         for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
@@ -333,7 +333,7 @@ impl SrtlaConnection {
                 remaining_count += 1;
             }
         }
-        
+
         // Bond Bunny exact: recalculate in-flight count from scratch
         self.in_flight_packets = remaining_count;
 
@@ -384,7 +384,10 @@ impl SrtlaConnection {
                     if (self.window - old) > 500 {
                         debug!(
                             "{}: Major window increase {} → {} (+{})",
-                            self.label, old, self.window, self.window - old
+                            self.label,
+                            old,
+                            self.window,
+                            self.window - old
                         );
                     }
                 }
@@ -517,7 +520,10 @@ impl SrtlaConnection {
             if old < self.window && (self.window - old) > 100 {
                 debug!(
                     "{}: Major window recovery {} → {} (+{})",
-                    self.label, old, self.window, self.window - old
+                    self.label,
+                    old,
+                    self.window,
+                    self.window - old
                 );
             }
         }
@@ -633,7 +639,8 @@ impl SrtlaConnection {
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
     pub fn mark_for_recovery(&mut self) {
-        // Use a timestamp from 1970 (like C's last_rcvd = 1) to indicate recovery needed
+        // Use a timestamp from 1970 (like C's last_rcvd = 1) to indicate recovery
+        // needed
         self.last_received = Some(Instant::now() - std::time::Duration::from_secs(86400)); // 1 day ago
         // Reset connection state like C version does
         self.window = WINDOW_MIN * WINDOW_MULT;
@@ -750,7 +757,10 @@ fn bind_from_ip(ip: IpAddr, port: u16) -> Result<Socket> {
     // Set receive buffer size to handle large SRT packets (100MB)
     const RECV_BUF_SIZE: usize = 100 * 1024 * 1024;
     if let Err(e) = sock.set_recv_buffer_size(RECV_BUF_SIZE) {
-        warn!("Failed to set receive buffer size to {}: {}", RECV_BUF_SIZE, e);
+        warn!(
+            "Failed to set receive buffer size to {}: {}",
+            RECV_BUF_SIZE, e
+        );
         if let Ok(actual_size) = sock.recv_buffer_size() {
             warn!("Effective receive buffer size: {}", actual_size);
         }
