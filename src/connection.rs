@@ -342,15 +342,19 @@ impl SrtlaConnection {
             let now = now_ms();
             let rtt = now.saturating_sub(sent_ms);
             if rtt > 0 && rtt <= 10_000 {
+                // Capture old RTT estimate before updating
+                let old_rtt_estimate = self.estimated_rtt_ms;
+                
                 self.estimated_rtt_ms = if self.estimated_rtt_ms == 0.0 {
                     rtt as f64
                 } else {
                     (self.estimated_rtt_ms * 0.875) + (rtt as f64 * 0.125)
                 };
                 self.last_rtt_measurement_ms = now;
-                // Log significant RTT changes (>20% difference)
-                let rtt_change_pct = if self.estimated_rtt_ms > 0.0 {
-                    ((rtt as f64 - self.estimated_rtt_ms) / self.estimated_rtt_ms * 100.0).abs()
+                
+                // Log significant RTT changes (>20% difference) using old value
+                let rtt_change_pct = if old_rtt_estimate > 0.0 {
+                    ((rtt as f64 - old_rtt_estimate) / old_rtt_estimate * 100.0).abs()
                 } else {
                     100.0
                 };
@@ -358,7 +362,7 @@ impl SrtlaConnection {
                 if rtt_change_pct > 20.0 {
                     debug!(
                         "{}: RTT changed significantly: {} ms (was {:.1} ms, +{:.1}%)",
-                        self.label, rtt, self.estimated_rtt_ms, rtt_change_pct
+                        self.label, rtt, old_rtt_estimate, rtt_change_pct
                     );
                 }
             }
