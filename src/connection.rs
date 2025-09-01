@@ -474,9 +474,10 @@ impl SrtlaConnection {
     }
 
     pub fn handle_srtla_ack_global(&mut self) {
-        // Global +1 window increase for connections that have received data (from original
-        // implementation) This matches C version: if (c->last_rcvd != 0)
-        // In Rust, we check if last_received has been updated since connection creation
+        // Global +1 window increase for connections that have received data (from
+        // original implementation) This matches C version: if (c->last_rcvd !=
+        // 0) In Rust, we check if last_received has been updated since
+        // connection creation
         if self.connected {
             let old = self.window;
             self.window += 1;
@@ -704,7 +705,8 @@ fn bind_from_ip(ip: IpAddr, port: u16) -> Result<Socket> {
 
     // Set send buffer size to match C implementation (32MB)
     const SEND_BUF_SIZE: usize = 32 * 1024 * 1024;
-    sock.set_send_buffer_size(SEND_BUF_SIZE).context("set send buffer size")?;
+    sock.set_send_buffer_size(SEND_BUF_SIZE)
+        .context("set send buffer size")?;
 
     let addr = SocketAddr::new(ip, port);
     sock.bind(&addr.into()).context("bind socket")?;

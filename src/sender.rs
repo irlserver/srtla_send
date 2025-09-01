@@ -50,15 +50,15 @@ pub async fn run_sender_with_toggles(
         return Err(anyhow!("no IPs in list: {}", ips_file));
     }
 
-    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, local_srt_port)))
-        .await
-        .context("bind local SRT UDP listener")?;
-    info!("listening for SRT on 0.0.0.0:{}", local_srt_port);
-
     let mut connections = create_connections_from_ips(&ips, receiver_host, receiver_port).await;
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
+
+    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, local_srt_port)))
+        .await
+        .context("bind local SRT UDP listener")?;
+    info!("listening for SRT on 0.0.0.0:{}", local_srt_port);
 
     let mut reg = SrtlaRegistrationManager::new();
 
@@ -88,17 +88,36 @@ pub async fn run_sender_with_toggles(
         });
     }
 
+    // Main packet processing loop variables
+    #[allow(unused_variables, unused_mut)]
     let mut recv_buf = vec![0u8; MTU];
-    let mut interval = time::interval(Duration::from_millis(1));
+    #[allow(unused_variables, unused_mut)]
+    let mut housekeeping_timer = time::interval(Duration::from_millis(1));
+    #[allow(unused_variables, unused_mut)]
     let mut last_client_addr: Option<SocketAddr> = None;
+    // Sequence → connection index mapping for correct NAK attribution
+    #[allow(unused_variables, unused_mut)]
+    let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
+    #[allow(unused_variables, unused_mut)]
+    let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
+    // Stickiness
+    #[allow(unused_variables, unused_mut)]
+    let mut last_selected_idx: Option<usize> = None;
+    #[allow(unused_variables, unused_mut)]
+    let mut last_switch_time: Option<Instant> = None;
+    // Connection failure tracking
+    #[allow(unused_variables, unused_mut)]
+    let mut all_failed_at: Option<Instant> = None;
+
+    // Pending connection changes (applied safely between processing cycles)
+    #[allow(unused_variables, unused_mut)]
+    let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Sequence → connection index mapping for correct NAK attribution
     let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
     let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
     // Stickiness
     let mut last_selected_idx: Option<usize> = None;
     let mut last_switch_time: Option<Instant> = None;
-    // stickiness interval defined at module level
-
     // Connection failure tracking
     let mut all_failed_at: Option<Instant> = None;
 
@@ -107,26 +126,43 @@ pub async fn run_sender_with_toggles(
 
     // Prepare SIGHUP stream (Unix only)
     #[cfg(unix)]
+    #[allow(unused_variables)]
     let mut sighup = signal(SignalKind::hangup())?;
 
-    // Main loop with conditional SIGHUP handling
+    // Main loop - run housekeeping frequently like C version
     #[cfg(unix)]
     loop {
+        // Run housekeeping frequently (like C version does every main loop iteration)
+        {
+            let classic = toggles
+                .classic_mode
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let _ = handle_housekeeping(
+                &mut connections,
+                &mut reg,
+                &instant_tx,
+                last_client_addr,
+                &local_listener,
+                &mut seq_to_conn,
+                classic,
+                &mut all_failed_at,
+            )
+            .await;
+        }
+
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
-            _ = interval.tick() => {
+            _ = housekeeping_timer.tick() => {
                 // Apply any pending connection changes at a safe point
-                if let Some(changes) = pending_changes.take()
-                    && let Some(new_ips) = changes.new_ips {
+                if let Some(changes) = pending_changes.take() {
+                    if let Some(new_ips) = changes.new_ips {
                         info!("applying queued connection changes: {} IPs", new_ips.len());
                         apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
                         info!("connection changes applied successfully");
                     }
-
-                let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
-                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
+                }
             }
             _ = sighup.recv() => {
                 info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
@@ -144,11 +180,29 @@ pub async fn run_sender_with_toggles(
 
     #[cfg(not(unix))]
     loop {
+        // Run housekeeping frequently (like C version does every main loop iteration)
+        {
+            let classic = toggles
+                .classic_mode
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let _ = handle_housekeeping(
+                &mut connections,
+                &mut reg,
+                &instant_tx,
+                last_client_addr,
+                &local_listener,
+                &mut seq_to_conn,
+                classic,
+                &mut all_failed_at,
+            )
+            .await;
+        }
+
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
-            _ = interval.tick() => {
+            _ = housekeeping_timer.tick() => {
                 // Apply any pending connection changes at a safe point
                 if let Some(changes) = pending_changes.take() {
                     if let Some(new_ips) = changes.new_ips {
@@ -157,9 +211,6 @@ pub async fn run_sender_with_toggles(
                         info!("connection changes applied successfully");
                     }
                 }
-
-                let classic = toggles.classic_mode.load(std::sync::atomic::Ordering::Relaxed);
-                handle_housekeeping(&mut connections, &mut reg, &instant_tx, last_client_addr, &local_listener, &mut seq_to_conn, classic, &mut all_failed_at).await?;
             }
         }
     }
