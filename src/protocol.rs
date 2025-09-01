@@ -97,10 +97,13 @@ pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
 }
 
 pub fn create_ack_packet(acks: &[u32]) -> Vec<u8> {
-    let mut pkt = vec![0u8; 2 + 4 * acks.len()];
+    // Create packets that match the actual SRTLA receiver format (4-byte header)
+    let mut pkt = vec![0u8; 4 + 4 * acks.len()];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_ACK.to_be_bytes());
+    pkt[2] = 0x00; // Padding (matching receiver behavior)
+    pkt[3] = 0x00; // Padding (matching receiver behavior)
     for (i, &ack) in acks.iter().enumerate() {
-        let off = 2 + i * 4;
+        let off = 4 + i * 4;
         pkt[off..off + 4].copy_from_slice(&ack.to_be_bytes());
     }
     pkt

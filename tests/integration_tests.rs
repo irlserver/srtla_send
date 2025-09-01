@@ -58,7 +58,7 @@ async fn test_srt_ack_nak_parsing() {
 
 #[tokio::test]
 async fn test_srtla_ack_roundtrip() {
-    let original_acks = vec![100, 200, 300, 400];
+    let original_acks = vec![100u32, 200, 300, 400];
     let ack_packet = create_ack_packet(&original_acks);
 
     assert_eq!(get_packet_type(&ack_packet), Some(SRTLA_TYPE_ACK));
@@ -189,7 +189,7 @@ async fn test_empty_ack_packet() {
     let empty_acks: Vec<u32> = vec![];
     let packet = create_ack_packet(&empty_acks);
 
-    assert_eq!(packet.len(), 2); // Just the packet type
+    assert_eq!(packet.len(), 4); // Packet type + padding
     assert_eq!(get_packet_type(&packet), Some(SRTLA_TYPE_ACK));
 
     let parsed = parse_srtla_ack(&packet);

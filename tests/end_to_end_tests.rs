@@ -169,7 +169,7 @@ async fn test_ack_nak_sequence_handling() {
     use srtla_send::protocol::*;
 
     // Test sequence of ACKs and NAKs
-    let sequences = vec![100, 101, 102, 103, 104, 105];
+    let sequences = vec![100u32, 101, 102, 103, 104, 105];
 
     // Create SRTLA ACK packet
     let ack_packet = create_ack_packet(&sequences);
@@ -209,7 +209,7 @@ async fn test_packet_size_limits() {
     assert!(packet.len() <= MTU, "ACK packet should not exceed MTU");
     assert_eq!(
         packet.len(),
-        2 + 4 * max_acks,
+        4 + 4 * max_acks,
         "Expected full MTU utilization"
     );
 
@@ -265,7 +265,7 @@ async fn test_concurrent_packet_processing() {
             let keepalive = create_keepalive_packet();
             let timestamp = extract_keepalive_timestamp(&keepalive).unwrap();
 
-            let acks = vec![i * 100, i * 100 + 1, i * 100 + 2];
+            let acks = vec![i * 100u32, i * 100 + 1, i * 100 + 2];
             let ack_packet = create_ack_packet(&acks);
             let parsed_acks = parse_srtla_ack(&ack_packet);
 

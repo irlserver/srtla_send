@@ -95,9 +95,27 @@ mod tests {
         let acks = [100, 200, 300];
         let pkt = create_ack_packet(&acks);
 
-        assert_eq!(pkt.len(), 2 + 4 * acks.len());
+        assert_eq!(pkt.len(), 4 + 4 * acks.len());
         assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_ACK));
 
+        // Note: This test validates packet creation, not parsing compatibility
+    }
+
+    #[test]
+    fn test_create_ack_packet_with_4byte_header() {
+        let acks = [100u32, 200, 300];
+        let mut pkt = vec![0u8; 4 + 4 * acks.len()];
+
+        pkt[0..2].copy_from_slice(&SRTLA_TYPE_ACK.to_be_bytes());
+        pkt[2] = 0x00;
+        pkt[3] = 0x00;
+
+        for (i, &ack) in acks.iter().enumerate() {
+            let off = 4 + i * 4;
+            pkt[off..off + 4].copy_from_slice(&ack.to_be_bytes());
+        }
+
+        assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_ACK));
         let parsed_acks = parse_srtla_ack(&pkt);
         assert_eq!(parsed_acks, vec![100, 200, 300]);
     }
@@ -171,13 +189,24 @@ mod tests {
 
     #[test]
     fn test_parse_srtla_ack() {
-        let acks = [1000, 2000, 3000];
-        let pkt = create_ack_packet(&acks);
+        // Test with 4-byte header format
+        let acks = [1000u32, 2000, 3000];
+        let mut pkt = vec![0u8; 4 + 4 * acks.len()];
+
+        pkt[0..2].copy_from_slice(&SRTLA_TYPE_ACK.to_be_bytes());
+        pkt[2] = 0x00;
+        pkt[3] = 0x00;
+
+        for (i, &ack) in acks.iter().enumerate() {
+            let off = 4 + i * 4;
+            pkt[off..off + 4].copy_from_slice(&ack.to_be_bytes());
+        }
+
         let parsed = parse_srtla_ack(&pkt);
         assert_eq!(parsed, vec![1000, 2000, 3000]);
 
-        // Test empty ACK packet
-        let empty_pkt = create_ack_packet(&[]);
+        // Test empty ACK packet (4-byte header, no sequences)
+        let empty_pkt = vec![0x91, 0x00, 0x00, 0x00];
         let parsed_empty = parse_srtla_ack(&empty_pkt);
         assert_eq!(parsed_empty, vec![]);
 
@@ -186,7 +215,7 @@ mod tests {
         invalid[0] = 0x80;
         assert_eq!(parse_srtla_ack(&invalid), vec![]);
 
-        // Test buffer too short
+        // Test buffer too short (less than 8 bytes for 4-byte header format)
         assert_eq!(parse_srtla_ack(&[0x91, 0x00, 0x00]), vec![]);
     }
 
