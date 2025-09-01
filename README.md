@@ -34,7 +34,7 @@ This tool assumes that data is streamed from a SRT _sender_ in _caller_ mode to 
 
 ## Requirements
 
-- Rust and Cargo (stable)
+- Rust and Cargo (nightly)
 - Unix (Linux/macOS) or Windows
   - Note: SIGHUP-based IP reload is Unix-only; Windows runs without that arm
 
@@ -42,7 +42,8 @@ This tool assumes that data is streamed from a SRT _sender_ in _caller_ mode to 
 
 ```bash
 cd srtla_send
-cargo build --release
+rustup install nightly
+cargo +nightly build --release
 # binary at target/release/srtla_send
 ```
 
