@@ -148,14 +148,18 @@ pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
 }
 
 pub fn parse_srtla_ack(buf: &[u8]) -> Vec<u32> {
-    if buf.len() < 6 {
+    if buf.len() < 8 {
         return vec![];
     }
     if get_packet_type(buf) != Some(SRTLA_TYPE_ACK) {
         return vec![];
     }
     let mut out = Vec::new();
-    let mut i = 2usize; // Skip packet type (2 bytes)
+    
+    // Match original C implementation behavior: skip first 4 bytes, not 2
+    // The C code does: uint32_t *acks = (uint32_t *)buf; for (int i = 1; ...)
+    // which effectively skips acks[0] (first 4 bytes)
+    let mut i = 4usize; // Skip packet type + padding (4 bytes total)
     while i + 3 < buf.len() {
         let ack = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
         out.push(ack);
