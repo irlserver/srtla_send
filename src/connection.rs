@@ -720,13 +720,21 @@ fn bind_from_ip(ip: IpAddr, port: u16) -> Result<Socket> {
 
     // Set send buffer size (32MB)
     const SEND_BUF_SIZE: usize = 32 * 1024 * 1024;
-    sock.set_send_buffer_size(SEND_BUF_SIZE)
-        .context("set send buffer size")?;
+    if let Err(e) = sock.set_send_buffer_size(SEND_BUF_SIZE) {
+        warn!("Failed to set send buffer size to {}: {}", SEND_BUF_SIZE, e);
+        if let Ok(actual_size) = sock.send_buffer_size() {
+            warn!("Effective send buffer size: {}", actual_size);
+        }
+    }
 
     // Set receive buffer size to handle large SRT packets (100MB)
     const RECV_BUF_SIZE: usize = 100 * 1024 * 1024;
-    sock.set_recv_buffer_size(RECV_BUF_SIZE)
-        .context("set receive buffer size")?;
+    if let Err(e) = sock.set_recv_buffer_size(RECV_BUF_SIZE) {
+        warn!("Failed to set receive buffer size to {}: {}", RECV_BUF_SIZE, e);
+        if let Ok(actual_size) = sock.recv_buffer_size() {
+            warn!("Effective receive buffer size: {}", actual_size);
+        }
+    }
 
     let addr = SocketAddr::new(ip, port);
     sock.bind(&addr.into()).context("bind socket")?;
