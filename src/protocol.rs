@@ -158,7 +158,7 @@ pub fn parse_srtla_ack(buf: &[u8]) -> Vec<u32> {
         return vec![];
     }
     let mut out = Vec::new();
-    
+
     // Match original C implementation behavior: skip first 4 bytes, not 2
     // The C code does: uint32_t *acks = (uint32_t *)buf; for (int i = 1; ...)
     // which effectively skips acks[0] (first 4 bytes)
