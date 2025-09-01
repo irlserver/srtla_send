@@ -159,7 +159,15 @@ pub async fn run_sender_with_toggles(
                 if let Some(changes) = pending_changes.take() {
                     if let Some(new_ips) = changes.new_ips {
                         info!("applying queued connection changes: {} IPs", new_ips.len());
-                        apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
+                        apply_connection_changes(
+                            &mut connections,
+                            &new_ips,
+                            &changes.receiver_host,
+                            changes.receiver_port,
+                            &mut last_selected_idx,
+                            &mut seq_to_conn,
+                            &mut seq_order,
+                        ).await;
                         info!("connection changes applied successfully");
                     }
                 }
@@ -207,7 +215,15 @@ pub async fn run_sender_with_toggles(
                 if let Some(changes) = pending_changes.take() {
                     if let Some(new_ips) = changes.new_ips {
                         info!("applying queued connection changes: {} IPs", new_ips.len());
-                        apply_connection_changes(&mut connections, &new_ips, &changes.receiver_host, changes.receiver_port, &mut last_selected_idx, &mut seq_to_conn).await;
+                        apply_connection_changes(
+                            &mut connections,
+                            &new_ips,
+                            &changes.receiver_host,
+                            changes.receiver_port,
+                            &mut last_selected_idx,
+                            &mut seq_to_conn,
+                            &mut seq_order,
+                        ).await;
                         info!("connection changes applied successfully");
                     }
                 }
@@ -572,6 +588,7 @@ pub async fn apply_connection_changes(
     receiver_port: u16,
     last_selected_idx: &mut Option<usize>,
     seq_to_conn: &mut HashMap<u32, usize>,
+    seq_order: &mut VecDeque<u32>,
 ) {
     use std::collections::HashSet;
 
@@ -602,6 +619,8 @@ pub async fn apply_connection_changes(
             }
         }
         *seq_to_conn = new_seq_to_conn;
+        // Drop stale sequence IDs from the order queue
+        seq_order.retain(|seq| seq_to_conn.contains_key(seq));
     }
 
     // Add new connections

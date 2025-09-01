@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::Ordering;
@@ -153,6 +153,9 @@ mod tests {
         let mut seq_to_conn = HashMap::new();
         seq_to_conn.insert(100, 1);
         seq_to_conn.insert(200, 2);
+        let mut seq_order = VecDeque::new();
+        seq_order.push_back(100);
+        seq_order.push_back(200);
 
         rt.block_on(apply_connection_changes(
             &mut connections,
@@ -161,6 +164,7 @@ mod tests {
             8080,
             &mut last_selected_idx,
             &mut seq_to_conn,
+            &mut seq_order,
         ));
 
         // Should have removed some connections
@@ -171,6 +175,9 @@ mod tests {
 
         // Should have cleaned up sequence tracking
         assert!(seq_to_conn.len() < 2);
+        
+        // Should have cleaned up seq_order to match seq_to_conn
+        assert_eq!(seq_order.len(), seq_to_conn.len());
     }
 
     #[test]
