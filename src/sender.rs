@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, anyhow};
 use tokio::net::UdpSocket;
@@ -92,7 +93,9 @@ pub async fn run_sender_with_toggles(
     #[allow(unused_variables, unused_mut)]
     let mut recv_buf = vec![0u8; MTU];
     #[allow(unused_variables, unused_mut)]
-    let mut housekeeping_timer = time::interval(Duration::from_millis(1));
+    let mut housekeeping_timer = time::interval(Duration::from_millis(1)); // Frequent timer for periodic tasks
+    #[allow(unused_variables, unused_mut)]
+    let mut status_counter = 0;
     #[allow(unused_variables, unused_mut)]
     let mut last_client_addr: Option<SocketAddr> = None;
     // Sequence → connection index mapping for correct NAK attribution
@@ -166,10 +169,16 @@ pub async fn run_sender_with_toggles(
                             changes.receiver_port,
                             &mut last_selected_idx,
                             &mut seq_to_conn,
-                            &mut seq_order,
+                             &mut seq_order,
                         ).await;
                         info!("connection changes applied successfully");
                     }
+                }
+
+                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
+                status_counter += 1;
+                if status_counter % 30000 == 0 {
+                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                 }
             }
             _ = sighup.recv() => {
@@ -660,4 +669,77 @@ pub async fn create_connections_from_ips(
         }
     }
     connections
+}
+
+/// Comprehensive status monitoring for connections
+pub fn log_connection_status(
+    connections: &[SrtlaConnection],
+    seq_to_conn: &HashMap<u32, usize>,
+    seq_order: &VecDeque<u32>,
+    last_selected_idx: Option<usize>,
+    toggles: &DynamicToggles,
+) {
+    let total_connections = connections.len();
+    let active_connections = connections.iter().filter(|c| !c.is_timed_out()).count();
+    let timed_out_connections = total_connections - active_connections;
+
+    info!("📊 Connection Status Report:");
+    info!("  Total connections: {}", total_connections);
+    info!("  Active connections: {} ({:.1}%)",
+          active_connections,
+          if total_connections > 0 { (active_connections as f64 / total_connections as f64) * 100.0 } else { 0.0 });
+    info!("  Timed out connections: {}", timed_out_connections);
+
+    // Show toggle states
+    info!("  Toggles: classic={}, stickiness={}, quality={}, exploration={}",
+          toggles.classic_mode.load(Ordering::Relaxed),
+          toggles.stickiness_enabled.load(Ordering::Relaxed),
+          toggles.quality_scoring_enabled.load(Ordering::Relaxed),
+          toggles.exploration_enabled.load(Ordering::Relaxed));
+
+    // Show sequence tracking info
+    info!("  Sequence tracking: {} mappings, {} in order queue",
+          seq_to_conn.len(), seq_order.len());
+
+    // Show last selected connection
+    if let Some(idx) = last_selected_idx {
+        if idx < connections.len() {
+            info!("  Last selected: {}", connections[idx].label);
+        } else {
+            warn!("  Last selected index {} is out of bounds!", idx);
+        }
+    } else {
+        info!("  Last selected: none");
+    }
+
+    // Show individual connection details
+    for (i, conn) in connections.iter().enumerate() {
+        let status = if conn.is_timed_out() { "⏰ TIMED_OUT" } else { "✅ ACTIVE" };
+        let score = conn.get_score();
+        let score_desc = match score {
+            -1 => "DISCONNECTED",
+            0 => "AT_CAPACITY",
+            _ => &format!("{}", score),
+        };
+
+        let last_recv = conn.last_received
+            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
+            .unwrap_or_else(|| "never".to_string());
+
+        info!("    [{}] {} {} - Score: {} - Last recv: {} - Window: {} - In-flight: {}",
+              i, status, conn.label, score_desc, last_recv, conn.window, conn.in_flight_packets);
+
+        // Show RTT info if available
+        if conn.last_rtt_measurement_ms > 0 {
+            info!("        RTT: {:.1}ms (estimated: {:.1}ms)",
+                  conn.last_rtt_measurement_ms, conn.estimated_rtt_ms);
+        }
+    }
+
+    // Show any warnings
+    if active_connections == 0 {
+        warn!("⚠️  No active connections available!");
+    } else if active_connections < total_connections / 2 {
+        warn!("⚠️  Less than half of connections are active");
+    }
 }
