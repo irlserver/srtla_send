@@ -612,9 +612,11 @@ impl SrtlaConnection {
     #[allow(dead_code)]
     pub fn is_timed_out(&self) -> bool {
         !self.connected
-            || self
-                .last_received
-                .map_or(true, |lr| lr.elapsed().as_secs() >= CONN_TIMEOUT)
+            || if let Some(lr) = self.last_received {
+                lr.elapsed().as_secs() >= CONN_TIMEOUT
+            } else {
+                true
+            }
     }
 
     pub fn mark_disconnected(&mut self) {
