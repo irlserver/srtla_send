@@ -31,15 +31,25 @@ mod tests {
     #[test]
     fn test_select_connection_idx_stickiness() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let connections = rt.block_on(create_test_connections(3));
+        let mut connections = rt.block_on(create_test_connections(3));
 
-        // Test stickiness - should stick to current selection within interval
+        // Make connection 2 the best by giving it higher window
+        connections[2].window = connections[0].window + 100;
+
+        // Test stickiness - should stick to current selection within interval 
+        // when it's also the best connection (Bond Bunny behavior)
         let recent_switch = Some(Instant::now());
         let last_idx = Some(2);
 
         let selected =
             select_connection_idx(&connections, last_idx, recent_switch, false, false, false);
-        assert_eq!(selected, Some(2));
+        assert_eq!(selected, Some(2)); // Sticks because it's both recent AND best
+
+        // Test that it switches away when the last selection is not the best
+        let last_idx_not_best = Some(1); // Connection 1 is not the best
+        let selected_no_stick = 
+            select_connection_idx(&connections, last_idx_not_best, recent_switch, false, false, false);
+        assert_eq!(selected_no_stick, Some(2)); // Switches to best (connection 2)
     }
 
     #[test]
