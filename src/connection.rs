@@ -188,7 +188,6 @@ impl SrtlaConnection {
 
     pub async fn send_keepalive(&mut self) -> Result<()> {
         let pkt = create_keepalive_packet();
-        debug!("keepalive → {} ({} bytes)", self.label, pkt.len());
         self.socket.send(&pkt).await?;
         let now = now_ms();
         self.last_keepalive_ms = now;
@@ -227,7 +226,6 @@ impl SrtlaConnection {
                     }
                     read_any = true;
                     self.last_received = Some(Instant::now());
-                    debug!("recv {} bytes from {}", n, self.label);
                     let pt = get_packet_type(&buf[..n]);
                     if let Some(pt) = pt {
                         // registration first
@@ -237,7 +235,6 @@ impl SrtlaConnection {
                         // Protocol handling
                         if pt == SRT_TYPE_ACK {
                             if let Some(ack) = parse_srt_ack(&buf[..n]) {
-                                debug!("ACK {:?} from {}", ack, self.label);
                                 acks.push(ack);
                             }
                             // Instantly forward ACKs for minimal RTT
@@ -253,7 +250,6 @@ impl SrtlaConnection {
                                     nak_list.len()
                                 );
                                 for seq in nak_list {
-                                    debug!("NAK {:?} from {}", seq, self.label);
                                     naks.push(seq);
                                 }
                             }
@@ -270,7 +266,6 @@ impl SrtlaConnection {
                                 );
                                 for seq in ack_list {
                                     srtla_acks.push(seq);
-                                    debug!("SRTLA ACK {:?} from {}", seq, self.label);
                                 }
                             }
                             // Don't forward SRTLA ACKs to SRT client
@@ -304,7 +299,14 @@ impl SrtlaConnection {
         let idx = self.packet_idx % PKT_LOG_SIZE;
         self.packet_log[idx] = seq;
         self.packet_send_times_ms[idx] = now_ms();
+
+        // Debug when packet log wraps around
+        let old_idx = self.packet_idx;
         self.packet_idx = (self.packet_idx + 1) % PKT_LOG_SIZE;
+        if self.packet_idx < old_idx {
+            debug!("{}: packet log wrapped around (seq={})", self.label, seq);
+        }
+
         self.in_flight_packets += 1;
     }
 
@@ -342,11 +344,19 @@ impl SrtlaConnection {
                     (self.estimated_rtt_ms * 0.875) + (rtt as f64 * 0.125)
                 };
                 self.last_rtt_measurement_ms = now;
-                // Use info level for SRT ACK RTT since this is the authoritative measurement
-                info!(
-                    "{}: RTT (SRT ACK) measured: {} ms (avg {:.1} ms)",
-                    self.label, rtt, self.estimated_rtt_ms
-                );
+                // Log significant RTT changes (>20% difference)
+                let rtt_change_pct = if self.estimated_rtt_ms > 0.0 {
+                    ((rtt as f64 - self.estimated_rtt_ms) / self.estimated_rtt_ms * 100.0).abs()
+                } else {
+                    100.0
+                };
+
+                if rtt_change_pct > 20.0 {
+                    debug!(
+                        "{}: RTT changed significantly: {} ms (was {:.1} ms, +{:.1}%)",
+                        self.label, rtt, self.estimated_rtt_ms, rtt_change_pct
+                    );
+                }
             }
         }
 
@@ -367,10 +377,10 @@ impl SrtlaConnection {
                     }
                     self.last_window_increase_ms = now;
                     self.consecutive_acks_without_nak = 0;
-                    if old <= 10_000 {
-                        info!(
-                            "{}: ACK increased window {} → {}",
-                            self.label, old, self.window
+                    if (self.window - old) > 500 {
+                        debug!(
+                            "{}: Major window increase {} → {} (+{})",
+                            self.label, old, self.window, self.window - old
                         );
                     }
                 }
@@ -378,7 +388,7 @@ impl SrtlaConnection {
         }
         if self.fast_recovery_mode && self.window >= 12_000 {
             self.fast_recovery_mode = false;
-            info!(
+            debug!(
                 "{}: Disabling FAST RECOVERY MODE - window {}",
                 self.label, self.window
             );
@@ -481,6 +491,10 @@ impl SrtlaConnection {
             }
         }
 
+        if !found {
+            // Not found in packet log
+        }
+
         found
     }
 
@@ -496,10 +510,10 @@ impl SrtlaConnection {
             if self.window > WINDOW_MAX * WINDOW_MULT {
                 self.window = WINDOW_MAX * WINDOW_MULT;
             }
-            if old < self.window {
+            if old < self.window && (self.window - old) > 100 {
                 debug!(
-                    "{}: SRTLA ACK global recovery {} → {}",
-                    self.label, old, self.window
+                    "{}: Major window recovery {} → {} (+{})",
+                    self.label, old, self.window, self.window - old
                 );
             }
         }
@@ -526,7 +540,6 @@ impl SrtlaConnection {
             let rtt = now.saturating_sub(ts);
             if rtt <= 10_000 {
                 // Keepalive RTT is informational only; prefer SRT ACK-based RTT for accuracy
-                debug!("{}: Keepalive RTT observed: {} ms", self.label, rtt);
                 // still update timestamp to throttle RTT measurements
                 self.last_rtt_measurement_ms = now;
             }
@@ -591,18 +604,13 @@ impl SrtlaConnection {
 
             if self.window > old {
                 if let Some(tsn) = time_since_last_nak {
-                    info!(
+                    debug!(
                         "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
                         self.label,
                         old,
                         self.window,
                         (tsn as f64) / 1000.0,
                         self.fast_recovery_mode
-                    );
-                } else {
-                    debug!(
-                        "{}: Time-based window recovery {} → {} (no NAKs yet)",
-                        self.label, old, self.window
                     );
                 }
             }

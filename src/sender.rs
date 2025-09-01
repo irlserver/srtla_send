@@ -14,7 +14,7 @@ use tokio::time::{self, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::connection::SrtlaConnection;
-use crate::protocol::{self, MTU};
+use crate::protocol::{self, MTU, PKT_LOG_SIZE};
 use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
 
@@ -301,11 +301,20 @@ async fn handle_srt_packet(
                 if sel_idx < connections.len() {
                     // record stickiness
                     if *last_selected_idx != Some(sel_idx) {
+                        if let Some(prev_idx) = *last_selected_idx {
+                            if prev_idx < connections.len() {
+                                debug!(
+                                    "Connection switch: {} → {} (seq: {:?})",
+                                    connections[prev_idx].label, connections[sel_idx].label, seq
+                                );
+                            }
+                        } else {
+                            debug!("Initial connection selected: {} (seq: {:?})", connections[sel_idx].label, seq);
+                        }
                         *last_selected_idx = Some(sel_idx);
                         *last_switch_time = Some(Instant::now());
                     }
                     let conn = &mut connections[sel_idx];
-                    debug!("forward {} bytes (seq={:?}) via {}", n, seq, conn.label);
                     if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
                         warn!(
                             "{}: sendto() failed, marking for recovery: {}",
@@ -365,14 +374,11 @@ async fn handle_housekeeping(
         // register_srtla_ack behavior
         for srtla_ack in incoming.srtla_ack_numbers.iter() {
             // Phase 1: Find the connection that sent this specific packet
-            let mut found = false;
             for c in connections.iter_mut() {
                 if c.handle_srtla_ack_specific(*srtla_ack as i32) {
-                    found = true;
                     break;
                 }
             }
-            debug!("SRTLA ACK {} processed (found={})", srtla_ack, found);
 
             // Phase 2: Apply +1 window increase to ALL active connections
             for c in connections.iter_mut() {
@@ -536,10 +542,10 @@ pub fn select_connection_idx(
             let quality_mult = calculate_quality_multiplier(c);
             let final_score = (base * quality_mult).max(1.0);
 
-            // Log quality analysis for debugging (only for low scores to avoid spam)
-            if quality_mult < 1.0 {
+            // Log quality issues and recoveries for debugging
+            if quality_mult < 0.8 {
                 debug!(
-                    "{} quality penalty: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → \
+                    "{} quality degraded: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → \
                      final: {}",
                     c.label,
                     quality_mult,
@@ -548,6 +554,11 @@ pub fn select_connection_idx(
                     c.nak_burst_count(),
                     base as i32,
                     final_score as i32
+                );
+            } else if quality_mult < 1.0 && c.nak_burst_count() > 0 {
+                debug!(
+                    "{} quality recovering: {:.2} (burst: {})",
+                    c.label, quality_mult, c.nak_burst_count()
                 );
             }
 
@@ -700,6 +711,17 @@ pub fn log_connection_status(
     // Show sequence tracking info
     info!("  Sequence tracking: {} mappings, {} in order queue",
           seq_to_conn.len(), seq_order.len());
+
+    // Show packet log utilization
+    let total_log_entries: usize = connections.iter().map(|c| c.in_flight_packets as usize).sum();
+    let max_possible_entries = connections.len() * PKT_LOG_SIZE;
+    let log_utilization = if max_possible_entries > 0 {
+        (total_log_entries as f64 / max_possible_entries as f64) * 100.0
+    } else {
+        0.0
+    };
+    info!("  Packet log: {} entries used ({:.1}% of capacity)",
+          total_log_entries, log_utilization);
 
     // Show last selected connection
     if let Some(idx) = last_selected_idx {
