@@ -689,7 +689,7 @@ impl SrtlaConnection {
         let socket = UdpSocket::from_std(std_sock)?;
         self.socket = socket;
         self.connected = true;
-        self.last_received = None;
+        self.last_received = Some(Instant::now());
         self.window = WINDOW_MIN * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
