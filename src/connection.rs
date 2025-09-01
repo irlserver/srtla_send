@@ -171,7 +171,7 @@ impl SrtlaConnection {
             return -1;
         }
         // Flow control: don't allow sending if at/over window limit
-        let max_in_flight = self.window / WINDOW_MULT;
+        let max_in_flight = (self.window / WINDOW_MULT).max(1);
         if self.in_flight_packets >= max_in_flight {
             return 0; // Connection is at capacity
         }
