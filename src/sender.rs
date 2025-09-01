@@ -230,7 +230,13 @@ async fn handle_srt_packet(
                     }
                     let conn = &mut connections[sel_idx];
                     debug!("forward {} bytes (seq={:?}) via {}", n, seq, conn.label);
-                    let _ = conn.send_data_with_tracking(pkt, seq).await;
+                    if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
+                        warn!(
+                            "{}: sendto() failed, disabling the connection: {}",
+                            conn.label, e
+                        );
+                        conn.mark_disconnected();
+                    }
                     if let Some(s) = seq {
                         // track mapping
                         if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
