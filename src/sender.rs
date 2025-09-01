@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use tokio::net::UdpSocket;
@@ -17,6 +17,7 @@ use crate::connection::SrtlaConnection;
 use crate::protocol::{self, MTU, PKT_LOG_SIZE};
 use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
+use crate::utils::now_ms;
 
 pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
@@ -309,7 +310,10 @@ async fn handle_srt_packet(
                                 );
                             }
                         } else {
-                            debug!("Initial connection selected: {} (seq: {:?})", connections[sel_idx].label, seq);
+                            debug!(
+                                "Initial connection selected: {} (seq: {:?})",
+                                connections[sel_idx].label, seq
+                            );
                         }
                         *last_selected_idx = Some(sel_idx);
                         *last_switch_time = Some(Instant::now());
@@ -424,7 +428,10 @@ async fn handle_housekeeping(
                 );
                 // Use C-style recovery: reset state but keep socket alive
                 connections[i].mark_for_recovery();
-                info!("{} marked for recovery; re-sending REG2", connections[i].label);
+                info!(
+                    "{} marked for recovery; re-sending REG2",
+                    connections[i].label
+                );
                 reg.trigger_broadcast_reg2(connections).await;
             } else {
                 debug!("{} timed out but in backoff period", connections[i].label);
@@ -558,7 +565,9 @@ pub fn select_connection_idx(
             } else if quality_mult < 1.0 && c.nak_burst_count() > 0 {
                 debug!(
                     "{} quality recovering: {:.2} (burst: {})",
-                    c.label, quality_mult, c.nak_burst_count()
+                    c.label,
+                    quality_mult,
+                    c.nak_burst_count()
                 );
             }
 
@@ -696,32 +705,48 @@ pub fn log_connection_status(
 
     info!("📊 Connection Status Report:");
     info!("  Total connections: {}", total_connections);
-    info!("  Active connections: {} ({:.1}%)",
-          active_connections,
-          if total_connections > 0 { (active_connections as f64 / total_connections as f64) * 100.0 } else { 0.0 });
+    info!(
+        "  Active connections: {} ({:.1}%)",
+        active_connections,
+        if total_connections > 0 {
+            (active_connections as f64 / total_connections as f64) * 100.0
+        } else {
+            0.0
+        }
+    );
     info!("  Timed out connections: {}", timed_out_connections);
 
     // Show toggle states
-    info!("  Toggles: classic={}, stickiness={}, quality={}, exploration={}",
-          toggles.classic_mode.load(Ordering::Relaxed),
-          toggles.stickiness_enabled.load(Ordering::Relaxed),
-          toggles.quality_scoring_enabled.load(Ordering::Relaxed),
-          toggles.exploration_enabled.load(Ordering::Relaxed));
+    info!(
+        "  Toggles: classic={}, stickiness={}, quality={}, exploration={}",
+        toggles.classic_mode.load(Ordering::Relaxed),
+        toggles.stickiness_enabled.load(Ordering::Relaxed),
+        toggles.quality_scoring_enabled.load(Ordering::Relaxed),
+        toggles.exploration_enabled.load(Ordering::Relaxed)
+    );
 
     // Show sequence tracking info
-    info!("  Sequence tracking: {} mappings, {} in order queue",
-          seq_to_conn.len(), seq_order.len());
+    info!(
+        "  Sequence tracking: {} mappings, {} in order queue",
+        seq_to_conn.len(),
+        seq_order.len()
+    );
 
     // Show packet log utilization
-    let total_log_entries: usize = connections.iter().map(|c| c.in_flight_packets as usize).sum();
+    let total_log_entries: usize = connections
+        .iter()
+        .map(|c| c.in_flight_packets as usize)
+        .sum();
     let max_possible_entries = connections.len() * PKT_LOG_SIZE;
     let log_utilization = if max_possible_entries > 0 {
         (total_log_entries as f64 / max_possible_entries as f64) * 100.0
     } else {
         0.0
     };
-    info!("  Packet log: {} entries used ({:.1}% of capacity)",
-          total_log_entries, log_utilization);
+    info!(
+        "  Packet log: {} entries used ({:.1}% of capacity)",
+        total_log_entries, log_utilization
+    );
 
     // Show last selected connection
     if let Some(idx) = last_selected_idx {
@@ -736,7 +761,11 @@ pub fn log_connection_status(
 
     // Show individual connection details
     for (i, conn) in connections.iter().enumerate() {
-        let status = if conn.is_timed_out() { "⏰ TIMED_OUT" } else { "✅ ACTIVE" };
+        let status = if conn.is_timed_out() {
+            "⏰ TIMED_OUT"
+        } else {
+            "✅ ACTIVE"
+        };
         let score = conn.get_score();
         let score_desc = match score {
             -1 => "DISCONNECTED",
@@ -744,17 +773,23 @@ pub fn log_connection_status(
             _ => &format!("{}", score),
         };
 
-        let last_recv = conn.last_received
+        let last_recv = conn
+            .last_received
             .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
             .unwrap_or_else(|| "never".to_string());
 
-        info!("    [{}] {} {} - Score: {} - Last recv: {} - Window: {} - In-flight: {}",
-              i, status, conn.label, score_desc, last_recv, conn.window, conn.in_flight_packets);
+        info!(
+            "    [{}] {} {} - Score: {} - Last recv: {} - Window: {} - In-flight: {}",
+            i, status, conn.label, score_desc, last_recv, conn.window, conn.in_flight_packets
+        );
 
         // Show RTT info if available
-        if conn.last_rtt_measurement_ms > 0 {
-            info!("        RTT: {:.1}ms (estimated: {:.1}ms)",
-                  conn.last_rtt_measurement_ms, conn.estimated_rtt_ms);
+        if conn.estimated_rtt_ms > 0.0 {
+            info!(
+                "        RTT: {:.1}ms (last measured: {:.1}s ago)",
+                conn.estimated_rtt_ms,
+                (now_ms().saturating_sub(conn.last_rtt_measurement_ms) as f64) / 1000.0
+            );
         }
     }
 
