@@ -495,6 +495,8 @@ pub fn select_connection_idx(
     // Base: stickiness window
     if let (Some(idx), Some(ts)) = (last_idx, last_switch)
         && ts.elapsed().as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
+        && idx < conns.len()
+        && conns[idx].connected
     {
         return Some(idx);
     }
