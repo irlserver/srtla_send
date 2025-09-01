@@ -475,9 +475,9 @@ impl SrtlaConnection {
 
     pub fn handle_srtla_ack_global(&mut self) {
         // Global +1 window increase for connections that have received data (from
-        // original implementation) This matches C version: if (c->last_rcvd !=
-        // 0) In Rust, we check if last_received has been updated since
-        // connection creation
+        // original implementation)
+        // This matches C version: if (c->last_rcvd != 0)
+        // In Rust, we check if last_received has been updated since connection creation
         if self.connected {
             let old = self.window;
             self.window += 1;
