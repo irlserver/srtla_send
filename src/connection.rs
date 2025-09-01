@@ -645,7 +645,13 @@ impl SrtlaConnection {
     pub fn mark_for_recovery(&mut self) {
         // Use a timestamp from 1970 (like C's last_rcvd = 1) to indicate recovery
         // needed
-        self.last_received = Some(Instant::now() - std::time::Duration::from_secs(86400)); // 1 day ago
+        self.last_received = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(86400))
+            .or_else(|| {
+                Instant::now().checked_sub(std::time::Duration::from_secs(
+                    crate::protocol::CONN_TIMEOUT + 1,
+                ))
+            });
         // Reset connection state like C version does
         self.window = WINDOW_MIN * WINDOW_MULT;
         self.in_flight_packets = 0;

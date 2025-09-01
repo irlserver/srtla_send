@@ -243,7 +243,7 @@ mod tests {
         // Simulate old last_received time
         use std::time::Duration;
         conn.last_received =
-            Some(tokio::time::Instant::now() - Duration::from_secs(CONN_TIMEOUT + 1));
+            tokio::time::Instant::now().checked_sub(Duration::from_secs(CONN_TIMEOUT + 1));
         assert!(conn.is_timed_out());
 
         // Disconnected connection should be timed out
