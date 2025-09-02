@@ -482,6 +482,17 @@ async fn handle_housekeeping(
 /// Calculate quality multiplier for a connection based on NAK history
 /// Returns a multiplier between 0.05 and 1.2
 pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
+    use crate::utils::now_ms;
+
+    // Startup grace period: first 10 seconds after connection establishment
+    // During this time, use simple scoring like original C version to go live fast
+    // This prevents early NAKs from permanently degrading connections
+    let connection_age_ms = now_ms().saturating_sub(conn.connection_established_ms());
+    if connection_age_ms < 10000 {
+        // During startup grace period, only apply light penalties to prevent permanent degradation
+        return if conn.total_nak_count() == 0 { 1.2 } else { 0.95 };
+    }
+
     if let Some(tsn) = conn.time_since_last_nak_ms() {
         let mut quality_mult = if tsn < 2000 {
             0.1

@@ -42,6 +42,7 @@ pub async fn create_test_connection() -> SrtlaConnection {
         nak_burst_start_time_ms: 0,
         last_reconnect_attempt_ms: 0,
         reconnect_failure_count: 0,
+        connection_established_ms: 0,
     }
 }
 
@@ -82,6 +83,7 @@ pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
             nak_burst_start_time_ms: 0,
             last_reconnect_attempt_ms: 0,
             reconnect_failure_count: 0,
+            connection_established_ms: 0,
         };
         connections.push(conn);
     }

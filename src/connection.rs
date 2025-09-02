@@ -126,6 +126,11 @@ pub struct SrtlaConnection {
     pub reconnect_failure_count: u32,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) reconnect_failure_count: u32,
+    // Connection establishment timestamp for startup grace period
+    #[cfg(feature = "test-internals")]
+    pub connection_established_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) connection_established_ms: u64,
 }
 
 impl SrtlaConnection {
@@ -163,6 +168,7 @@ impl SrtlaConnection {
             nak_burst_start_time_ms: 0,
             last_reconnect_attempt_ms: 0,
             reconnect_failure_count: 0,
+            connection_established_ms: now_ms(),
         })
     }
 
@@ -700,6 +706,7 @@ impl SrtlaConnection {
         self.window = WINDOW_MIN * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
+        self.connection_established_ms = now_ms(); // Reset startup grace period
     }
 
     pub fn time_since_last_nak_ms(&self) -> Option<u64> {
@@ -716,6 +723,10 @@ impl SrtlaConnection {
 
     pub fn nak_burst_count(&self) -> i32 {
         self.nak_burst_count
+    }
+
+    pub fn connection_established_ms(&self) -> u64 {
+        self.connection_established_ms
     }
 
     pub fn should_attempt_reconnect(&self) -> bool {
@@ -787,6 +798,7 @@ impl SrtlaConnection {
         self.fast_recovery_start_ms = 0;
         self.last_reconnect_attempt_ms = now_ms();
         self.reconnect_failure_count = 0;
+        self.connection_established_ms = now_ms(); // Reset startup grace period
         self.mark_reconnect_success();
         Ok(())
     }
