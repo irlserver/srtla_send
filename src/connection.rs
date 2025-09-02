@@ -502,7 +502,8 @@ impl SrtlaConnection {
                             self.window = WINDOW_MAX * WINDOW_MULT;
                         }
                         debug!(
-                            "{}: SRTLA ACK specific increased window {} → {} (seq={}, in_flight={}) [CLASSIC]",
+                            "{}: SRTLA ACK specific increased window {} → {} (seq={}, \
+                             in_flight={}) [CLASSIC]",
                             self.label, old, self.window, seq, self.in_flight_packets
                         );
                     }
@@ -522,7 +523,8 @@ impl SrtlaConnection {
     }
 
     fn handle_srtla_ack_enhanced(&mut self, _seq: i32) {
-        // Enhanced mode ACK handling with utilization thresholds and consecutive ACK tracking
+        // Enhanced mode ACK handling with utilization thresholds and consecutive ACK
+        // tracking
         let old_window = self.window;
         let mut window_increased = false;
         let current_time = now_ms();
@@ -536,7 +538,9 @@ impl SrtlaConnection {
                 0.85 // NORMAL_UTILIZATION_THRESHOLD
             };
 
-            if (self.in_flight_packets as f64) < (self.window as f64 * utilization_threshold / WINDOW_MULT as f64) {
+            if (self.in_flight_packets as f64)
+                < (self.window as f64 * utilization_threshold / WINDOW_MULT as f64)
+            {
                 self.consecutive_acks_without_nak += 1;
 
                 // Conservative recovery - require more ACKs
@@ -557,9 +561,14 @@ impl SrtlaConnection {
         // Log window recovery for diagnosis
         if window_increased && old_window <= 10000 {
             debug!(
-                "{}: ACK increased window {} → {} (in_flight={}, consec_acks={}, fast_mode={}) [ENHANCED]",
-                self.label, old_window, self.window, self.in_flight_packets,
-                self.consecutive_acks_without_nak, self.fast_recovery_mode
+                "{}: ACK increased window {} → {} (in_flight={}, consec_acks={}, fast_mode={}) \
+                 [ENHANCED]",
+                self.label,
+                old_window,
+                self.window,
+                self.in_flight_packets,
+                self.consecutive_acks_without_nak,
+                self.fast_recovery_mode
             );
         }
     }

@@ -489,8 +489,13 @@ pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
     // This prevents early NAKs from permanently degrading connections
     let connection_age_ms = now_ms().saturating_sub(conn.connection_established_ms());
     if connection_age_ms < 10000 {
-        // During startup grace period, only apply light penalties to prevent permanent degradation
-        return if conn.total_nak_count() == 0 { 1.2 } else { 0.95 };
+        // During startup grace period, only apply light penalties to prevent permanent
+        // degradation
+        return if conn.total_nak_count() == 0 {
+            1.2
+        } else {
+            0.95
+        };
     }
 
     if let Some(tsn) = conn.time_since_last_nak_ms() {
