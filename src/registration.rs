@@ -61,7 +61,11 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    pub fn process_registration_packet(&mut self, conn_idx: usize, buf: &[u8]) -> Option<RegistrationEvent> {
+    pub fn process_registration_packet(
+        &mut self,
+        conn_idx: usize,
+        buf: &[u8],
+    ) -> Option<RegistrationEvent> {
         match get_packet_type(buf) {
             Some(SRTLA_TYPE_REG_NGP) => {
                 debug!("REG_NGP from uplink #{}", conn_idx);

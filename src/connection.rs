@@ -8,7 +8,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::protocol::*;
-use crate::registration::{SrtlaRegistrationManager, RegistrationEvent};
+use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
 use crate::utils::now_ms;
 
 pub struct SrtlaIncoming {
@@ -817,7 +817,8 @@ impl SrtlaConnection {
         self.fast_recovery_start_ms = 0;
         self.last_reconnect_attempt_ms = now_ms();
         self.reconnect_failure_count = 0;
-        // Don't reset connection_established_ms for reconnections - only set when REG3 is received
+        // Don't reset connection_established_ms for reconnections - only set when REG3
+        // is received
         self.mark_reconnect_success();
         Ok(())
     }
