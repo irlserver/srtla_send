@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
@@ -57,10 +57,10 @@ pub async fn run_sender_with_toggles(
         return Err(anyhow!("no uplinks available"));
     }
 
-    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, local_srt_port)))
+    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, local_srt_port)))
         .await
         .context("bind local SRT UDP listener")?;
-    info!("listening for SRT on 0.0.0.0:{}", local_srt_port);
+    info!("listening for SRT on [::]:{}", local_srt_port);
 
     let mut reg = SrtlaRegistrationManager::new();
 
