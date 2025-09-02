@@ -428,21 +428,26 @@ impl SrtlaConnection {
         // Detect NAK bursts (multiple NAKs within 1 second)
         if current_time.saturating_sub(self.last_nak_time_ms) < 1000 {
             if self.nak_burst_count == 0 {
-                self.nak_burst_start_time_ms = self.last_nak_time_ms; // Start of burst
+                self.nak_burst_start_time_ms = current_time; // Start of burst
             }
             self.nak_burst_count += 1;
         } else {
             // End of burst - log if it was significant
             if self.nak_burst_count >= 3 {
+                let burst_duration = if self.nak_burst_start_time_ms > 0 {
+                    current_time.saturating_sub(self.nak_burst_start_time_ms)
+                } else {
+                    // Fallback: estimate duration based on NAK count (assume ~100ms per NAK)
+                    (self.nak_burst_count as u64) * 100
+                };
                 warn!(
                     "{}: NAK burst ended - {} NAKs in {}ms",
-                    self.label,
-                    self.nak_burst_count,
-                    self.last_nak_time_ms
-                        .saturating_sub(self.nak_burst_start_time_ms)
+                    self.label, self.nak_burst_count, burst_duration
                 );
             }
-            self.nak_burst_count = 1; // Start new burst count
+            // Reset for new burst
+            self.nak_burst_count = 1;
+            self.nak_burst_start_time_ms = current_time; // Start new burst
         }
 
         self.last_nak_time_ms = current_time;
