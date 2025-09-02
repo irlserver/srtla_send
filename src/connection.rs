@@ -825,8 +825,8 @@ fn bind_from_ip(ip: IpAddr, port: u16) -> Result<Socket> {
     };
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).context("create socket")?;
 
-    // Set send buffer size (32MB)
-    const SEND_BUF_SIZE: usize = 32 * 1024 * 1024;
+    // Set send buffer size (100MB)
+    const SEND_BUF_SIZE: usize = 100 * 1024 * 1024;
     if let Err(e) = sock.set_send_buffer_size(SEND_BUF_SIZE) {
         warn!("Failed to set send buffer size to {}: {}", SEND_BUF_SIZE, e);
         if let Ok(actual_size) = sock.send_buffer_size() {
