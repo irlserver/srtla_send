@@ -138,13 +138,13 @@ mod tests {
         }
         assert_eq!(conn.in_flight_packets, 3);
 
-        // Test specific SRTLA ACK
-        let found = conn.handle_srtla_ack_specific(200);
+        // Test specific SRTLA ACK (using classic mode for original behavior)
+        let found = conn.handle_srtla_ack_specific(200, true);
         assert!(found);
         assert_eq!(conn.in_flight_packets, 2);
 
         // Test not found
-        let not_found = conn.handle_srtla_ack_specific(999);
+        let not_found = conn.handle_srtla_ack_specific(999, true);
         assert!(!not_found);
         assert_eq!(conn.in_flight_packets, 2);
 
@@ -152,6 +152,78 @@ mod tests {
         let initial_window = conn.window;
         conn.handle_srtla_ack_global();
         assert_eq!(conn.window, initial_window + 1);
+    }
+
+    #[test]
+    fn test_classic_vs_enhanced_mode_ack_handling() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        // Set up connection with some packets in flight
+        conn.register_packet(100);
+        conn.register_packet(200);
+        conn.register_packet(300);
+        assert_eq!(conn.in_flight_packets, 3);
+
+        // Set window to a moderate value
+        conn.window = 1500; // Below the threshold for classic mode increase
+        let initial_window = conn.window;
+
+        // Test CLASSIC MODE: Should use simple C logic
+        // With in_flight_packets=3 and window=1500, condition should be true
+        // 3 * 1000 = 3000 > 1500, so SHOULD increase in classic mode
+        let found = conn.handle_srtla_ack_specific(100, true); // classic_mode = true
+        assert!(found);
+        assert_eq!(conn.window, initial_window + WINDOW_INCR - 1); // Should increase by WINDOW_INCR - 1
+        assert_eq!(conn.in_flight_packets, 2); // Should decrease
+
+        // Reset for enhanced mode test
+        conn.window = initial_window;
+        conn.register_packet(400); // Add another packet
+        assert_eq!(conn.in_flight_packets, 3);
+
+        // Test ENHANCED MODE: Should use sophisticated logic
+        // Reset connection state for enhanced mode test
+        conn.window = 5000; // Higher window to make utilization threshold work
+        conn.in_flight_packets = 0;
+        conn.consecutive_acks_without_nak = 0;
+        conn.last_window_increase_ms = 0; // Reset timing
+
+        // Add packets for testing
+        conn.register_packet(200);
+        conn.register_packet(300);
+        conn.register_packet(400);
+        conn.register_packet(500);
+        assert_eq!(conn.in_flight_packets, 4);
+
+        // First ACK - should increment consecutive counter but not increase window yet
+        // With window=5000, in_flight=4, utilization check should pass
+        let found2 = conn.handle_srtla_ack_specific(200, false); // classic_mode = false
+        assert!(found2);
+        assert_eq!(conn.window, 5000); // Should NOT increase yet
+        assert_eq!(conn.in_flight_packets, 3);
+        assert_eq!(conn.consecutive_acks_without_nak, 1); // Should increment
+
+        // Second ACK - should still not increase (needs 4 consecutive for normal mode)
+        let found3 = conn.handle_srtla_ack_specific(300, false);
+        assert!(found3);
+        assert_eq!(conn.window, 5000); // Should NOT increase yet
+        assert_eq!(conn.in_flight_packets, 2);
+        assert_eq!(conn.consecutive_acks_without_nak, 2); // Should increment
+
+        // Third ACK - still not enough
+        let found4 = conn.handle_srtla_ack_specific(400, false);
+        assert!(found4);
+        assert_eq!(conn.window, 5000); // Should NOT increase yet
+        assert_eq!(conn.in_flight_packets, 1);
+        assert_eq!(conn.consecutive_acks_without_nak, 3); // Should increment
+
+        // Fourth ACK - should finally increase window
+        let found5 = conn.handle_srtla_ack_specific(500, false);
+        assert!(found5);
+        assert_eq!(conn.window, 5000 + WINDOW_INCR); // Should increase now
+        assert_eq!(conn.in_flight_packets, 0);
+        assert_eq!(conn.consecutive_acks_without_nak, 0); // Should reset after increase
     }
 
     #[test]

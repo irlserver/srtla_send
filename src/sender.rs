@@ -385,7 +385,7 @@ async fn handle_housekeeping(
         for srtla_ack in incoming.srtla_ack_numbers.iter() {
             // Phase 1: Find the connection that sent this specific packet
             for c in connections.iter_mut() {
-                if c.handle_srtla_ack_specific(*srtla_ack as i32) {
+                if c.handle_srtla_ack_specific(*srtla_ack as i32, classic) {
                     break;
                 }
             }

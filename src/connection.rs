@@ -442,7 +442,7 @@ impl SrtlaConnection {
         self.last_nak_time_ms = current_time;
         self.consecutive_acks_without_nak = 0;
 
-        // Decrease window (congestion response)
+        // Decrease window (congestion response) - EXACT C implementation
         let old = self.window;
         self.window = (self.window - WINDOW_DECR).max(WINDOW_MIN * WINDOW_MULT);
 
@@ -469,7 +469,7 @@ impl SrtlaConnection {
         }
     }
 
-    pub fn handle_srtla_ack_specific(&mut self, seq: i32) -> bool {
+    pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool) -> bool {
         // Find the specific packet in the log and handle targeted logic
         // This mimics the first phase of the original implementation's
         // register_srtla_ack
@@ -485,18 +485,24 @@ impl SrtlaConnection {
                 }
                 self.packet_log[idx] = -1;
 
-                // Window increase logic from C version (lines 291-293)
-                // Only increase if in_flight_pkts*WINDOW_MULT > window
-                if self.in_flight_packets * WINDOW_MULT > self.window {
-                    let old = self.window;
-                    self.window += WINDOW_INCR - 1; // Note: WINDOW_INCR - 1 in C code
-                    if self.window > WINDOW_MAX * WINDOW_MULT {
-                        self.window = WINDOW_MAX * WINDOW_MULT;
+                if classic_mode {
+                    // CLASSIC MODE: Exact C implementation
+                    // Window increase logic from C version (lines 291-293)
+                    // Only increase if in_flight_pkts*WINDOW_MULT > window
+                    if self.in_flight_packets * WINDOW_MULT > self.window {
+                        let old = self.window;
+                        self.window += WINDOW_INCR - 1; // Note: WINDOW_INCR - 1 in C code
+                        if self.window > WINDOW_MAX * WINDOW_MULT {
+                            self.window = WINDOW_MAX * WINDOW_MULT;
+                        }
+                        debug!(
+                            "{}: SRTLA ACK specific increased window {} → {} (seq={}, in_flight={}) [CLASSIC]",
+                            self.label, old, self.window, seq, self.in_flight_packets
+                        );
                     }
-                    debug!(
-                        "{}: SRTLA ACK specific increased window {} → {} (seq={}, in_flight={})",
-                        self.label, old, self.window, seq, self.in_flight_packets
-                    );
+                } else {
+                    // ENHANCED MODE: Sophisticated ACK handling with utilization thresholds
+                    self.handle_srtla_ack_enhanced(seq);
                 }
                 break;
             }
@@ -507,6 +513,49 @@ impl SrtlaConnection {
         }
 
         found
+    }
+
+    fn handle_srtla_ack_enhanced(&mut self, _seq: i32) {
+        // Enhanced mode ACK handling with utilization thresholds and consecutive ACK tracking
+        let old_window = self.window;
+        let mut window_increased = false;
+        let current_time = now_ms();
+
+        // Only increase window if we haven't increased recently (slower recovery)
+        if current_time.saturating_sub(self.last_window_increase_ms) > 200 {
+            // Utilization thresholds for enhanced mode
+            let utilization_threshold = if self.fast_recovery_mode {
+                0.95 // FAST_UTILIZATION_THRESHOLD
+            } else {
+                0.85 // NORMAL_UTILIZATION_THRESHOLD
+            };
+
+            if (self.in_flight_packets as f64) < (self.window as f64 * utilization_threshold / WINDOW_MULT as f64) {
+                self.consecutive_acks_without_nak += 1;
+
+                // Conservative recovery - require more ACKs
+                let acks_required = if self.fast_recovery_mode { 2 } else { 4 };
+
+                if self.consecutive_acks_without_nak >= acks_required {
+                    self.window += WINDOW_INCR;
+                    if self.window > WINDOW_MAX * WINDOW_MULT {
+                        self.window = WINDOW_MAX * WINDOW_MULT;
+                    }
+                    window_increased = true;
+                    self.last_window_increase_ms = current_time;
+                    self.consecutive_acks_without_nak = 0; // Reset counter to prevent burst increases
+                }
+            }
+        }
+
+        // Log window recovery for diagnosis
+        if window_increased && old_window <= 10000 {
+            debug!(
+                "{}: ACK increased window {} → {} (in_flight={}, consec_acks={}, fast_mode={}) [ENHANCED]",
+                self.label, old_window, self.window, self.in_flight_packets,
+                self.consecutive_acks_without_nak, self.fast_recovery_mode
+            );
+        }
     }
 
     pub fn handle_srtla_ack_global(&mut self) {
@@ -580,53 +629,48 @@ impl SrtlaConnection {
             None
         };
 
-        // Conservative recovery timing (aligned with Java)
-        let min_wait_time = if self.fast_recovery_mode { 500 } else { 2000 };
-        let increment_wait = if self.fast_recovery_mode { 300 } else { 1000 };
+        // Enhanced mode conservative recovery with fast mode support
+        if let Some(tsn) = time_since_last_nak {
+            // Conservative recovery timing (matches Bond Bunny)
+            let min_wait_time = if self.fast_recovery_mode { 500 } else { 2000 };
+            let increment_wait = if self.fast_recovery_mode { 300 } else { 1000 };
 
-        if time_since_last_nak.unwrap_or(u64::MAX) > min_wait_time
-            && now.saturating_sub(self.last_window_increase_ms) > increment_wait
-        {
-            let old = self.window;
-            let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
+            if tsn > min_wait_time
+                && now.saturating_sub(self.last_window_increase_ms) > increment_wait
+            {
+                let old = self.window;
+                let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
 
-            #[allow(clippy::if_same_then_else)]
-            if let Some(tsn) = time_since_last_nak {
-                if tsn > 10_000 {
+                // Multi-tier recovery based on time since last NAK (Bond Bunny style)
+                if tsn > 10000 {
                     // No NAKs for 10+ seconds: moderate recovery
                     self.window += WINDOW_INCR * 2 * fast_mode_bonus;
-                } else if tsn > 7_000 {
+                } else if tsn > 7000 {
                     // No NAKs for 7+ seconds: slow recovery
-                    self.window += WINDOW_INCR * fast_mode_bonus;
-                } else if tsn > 5_000 {
+                    self.window += WINDOW_INCR * 1 * fast_mode_bonus;
+                } else if tsn > 5000 {
                     // No NAKs for 5+ seconds: very slow recovery
-                    self.window += WINDOW_INCR * fast_mode_bonus;
+                    self.window += WINDOW_INCR * 1 * fast_mode_bonus;
                 } else {
                     // Recent NAKs: minimal recovery
                     self.window += WINDOW_INCR * fast_mode_bonus;
                 }
-            } else {
-                // No NAKs yet: minimal recovery step
-                self.window += WINDOW_INCR * fast_mode_bonus;
-            }
 
-            let maxw = WINDOW_MAX * WINDOW_MULT;
-            if self.window > maxw {
-                self.window = maxw;
-            }
-            self.last_window_increase_ms = now;
+                if self.window > WINDOW_MAX * WINDOW_MULT {
+                    self.window = WINDOW_MAX * WINDOW_MULT;
+                }
+                self.last_window_increase_ms = now;
 
-            if self.window > old
-                && let Some(tsn) = time_since_last_nak
-            {
-                debug!(
-                    "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
-                    self.label,
-                    old,
-                    self.window,
-                    (tsn as f64) / 1000.0,
-                    self.fast_recovery_mode
-                );
+                if self.window > old {
+                    debug!(
+                        "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
+                        self.label,
+                        old,
+                        self.window,
+                        (tsn as f64) / 1000.0,
+                        self.fast_recovery_mode
+                    );
+                }
             }
         }
     }
