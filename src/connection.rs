@@ -8,7 +8,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::protocol::*;
-use crate::registration::SrtlaRegistrationManager;
+use crate::registration::{SrtlaRegistrationManager, RegistrationEvent};
 use crate::utils::now_ms;
 
 pub struct SrtlaIncoming {
@@ -168,7 +168,7 @@ impl SrtlaConnection {
             nak_burst_start_time_ms: 0,
             last_reconnect_attempt_ms: 0,
             reconnect_failure_count: 0,
-            connection_established_ms: now_ms(),
+            connection_established_ms: 0, // Will be set when REG3 is received
         })
     }
 
@@ -235,7 +235,13 @@ impl SrtlaConnection {
                     let pt = get_packet_type(&buf[..n]);
                     if let Some(pt) = pt {
                         // registration first
-                        if reg.process_registration_packet(conn_idx, &buf[..n]) {
+                        if let Some(event) = reg.process_registration_packet(conn_idx, &buf[..n]) {
+                            // Set connection established timestamp when REG3 is received
+                            if matches!(event, RegistrationEvent::Reg3) {
+                                if self.connection_established_ms == 0 {
+                                    self.connection_established_ms = crate::utils::now_ms();
+                                }
+                            }
                             continue;
                         }
                         // Protocol handling
@@ -720,7 +726,6 @@ impl SrtlaConnection {
         self.window = WINDOW_MIN * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
-        self.connection_established_ms = now_ms(); // Reset startup grace period
     }
 
     pub fn time_since_last_nak_ms(&self) -> Option<u64> {
@@ -812,7 +817,7 @@ impl SrtlaConnection {
         self.fast_recovery_start_ms = 0;
         self.last_reconnect_attempt_ms = now_ms();
         self.reconnect_failure_count = 0;
-        self.connection_established_ms = now_ms(); // Reset startup grace period
+        // Don't reset connection_established_ms for reconnections - only set when REG3 is received
         self.mark_reconnect_success();
         Ok(())
     }

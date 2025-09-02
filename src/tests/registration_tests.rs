@@ -30,7 +30,7 @@ mod tests {
 
         // Process REG_NGP from connection 1
         let handled = reg.process_registration_packet(1, &buf);
-        assert!(handled);
+        assert!(handled.is_some());
         assert_eq!(reg.reg1_target_idx(), Some(1));
 
         let current_time = now_ms();
@@ -51,7 +51,7 @@ mod tests {
         let buf = create_reg2_packet(&modified_id);
 
         let handled = reg.process_registration_packet(0, &buf);
-        assert!(handled);
+        assert!(handled.is_some());
 
         // Should have updated the ID and set broadcast pending
         assert_eq!(reg.srtla_id, modified_id);
@@ -71,7 +71,7 @@ mod tests {
         let buf = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
 
         let handled = reg.process_registration_packet(2, &buf);
-        assert!(handled);
+        assert!(handled.is_some());
 
         // Should have incremented active connections and set has_connected
         assert_eq!(reg.active_connections(), 1);
@@ -92,7 +92,7 @@ mod tests {
         buf[0..2].copy_from_slice(&SRTLA_TYPE_REG_ERR.to_be_bytes());
 
         let handled = reg.process_registration_packet(1, &buf);
-        assert!(handled);
+        assert!(handled.is_some());
 
         // Should have cleared pending state
         assert_eq!(reg.pending_reg2_idx(), None);
@@ -109,7 +109,7 @@ mod tests {
         buf[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
 
         let handled = reg.process_registration_packet(0, &buf);
-        assert!(!handled);
+        assert!(handled.is_none());
     }
 
     #[tokio::test]
@@ -179,7 +179,7 @@ mod tests {
         // Simulate multiple REG3 responses
         for i in 0..3 {
             let handled = reg.process_registration_packet(i, &reg3_packet);
-            assert!(handled);
+            assert!(handled.is_some());
         }
 
         assert_eq!(reg.active_connections(), 3);

@@ -5,6 +5,14 @@ use crate::connection::SrtlaConnection;
 use crate::protocol::*;
 use crate::utils::now_ms;
 
+#[derive(Debug)]
+pub enum RegistrationEvent {
+    RegNgp,
+    Reg2,
+    Reg3,
+    RegErr,
+}
+
 pub struct SrtlaRegistrationManager {
     pub srtla_id: [u8; SRTLA_ID_LEN],
     pending_reg2_idx: Option<usize>,
@@ -53,29 +61,29 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    pub fn process_registration_packet(&mut self, conn_idx: usize, buf: &[u8]) -> bool {
+    pub fn process_registration_packet(&mut self, conn_idx: usize, buf: &[u8]) -> Option<RegistrationEvent> {
         match get_packet_type(buf) {
             Some(SRTLA_TYPE_REG_NGP) => {
                 debug!("REG_NGP from uplink #{}", conn_idx);
                 self.handle_reg_ngp(conn_idx);
-                true
+                Some(RegistrationEvent::RegNgp)
             }
             Some(SRTLA_TYPE_REG2) => {
                 debug!("REG2 from uplink #{} (len={})", conn_idx, buf.len());
                 self.handle_reg2(conn_idx, buf);
-                true
+                Some(RegistrationEvent::Reg2)
             }
             Some(SRTLA_TYPE_REG3) => {
                 debug!("REG3 from uplink #{}", conn_idx);
                 self.handle_reg3(conn_idx);
-                true
+                Some(RegistrationEvent::Reg3)
             }
             Some(SRTLA_TYPE_REG_ERR) => {
                 debug!("REG_ERR from uplink #{}", conn_idx);
                 self.handle_reg_err(conn_idx);
-                true
+                Some(RegistrationEvent::RegErr)
             }
-            _ => false,
+            _ => None,
         }
     }
 
