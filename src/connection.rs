@@ -314,12 +314,12 @@ impl SrtlaConnection {
 
         // Debug when packet log wraps around
         let old_idx = self.packet_idx;
-        self.packet_idx = (self.packet_idx + 1) % PKT_LOG_SIZE;
-        if self.packet_idx < old_idx {
+        self.packet_idx = self.packet_idx.wrapping_add(1) % PKT_LOG_SIZE;
+        if old_idx == PKT_LOG_SIZE - 1 && self.packet_idx == 0 {
             debug!("{}: packet log wrapped around (seq={})", self.label, seq);
         }
 
-        self.in_flight_packets += 1;
+        self.in_flight_packets = self.in_flight_packets.saturating_add(1);
     }
 
     pub fn handle_srt_ack(&mut self, ack: i32) {
@@ -387,7 +387,7 @@ impl SrtlaConnection {
             if (self.in_flight_packets as f64)
                 < (self.window as f64 * utilization_threshold / WINDOW_MULT as f64)
             {
-                self.consecutive_acks_without_nak += 1;
+                self.consecutive_acks_without_nak = self.consecutive_acks_without_nak.saturating_add(1);
                 let acks_required = if self.fast_recovery_mode { 2 } else { 4 };
                 if self.consecutive_acks_without_nak >= acks_required {
                     let old = self.window;
@@ -428,7 +428,7 @@ impl SrtlaConnection {
         }
 
         // Track NAK statistics and bursts (matches Java implementation)
-        self.nak_count += 1;
+        self.nak_count = self.nak_count.saturating_add(1);
         let current_time = now_ms();
 
         // Detect NAK bursts (multiple NAKs within 1 second)
@@ -436,7 +436,7 @@ impl SrtlaConnection {
             if self.nak_burst_count == 0 {
                 self.nak_burst_start_time_ms = current_time; // Start of burst
             }
-            self.nak_burst_count += 1;
+            self.nak_burst_count = self.nak_burst_count.saturating_add(1);
         } else {
             // End of burst - log if it was significant
             if self.nak_burst_count >= 3 {
@@ -552,7 +552,7 @@ impl SrtlaConnection {
             if (self.in_flight_packets as f64)
                 < (self.window as f64 * utilization_threshold / WINDOW_MULT as f64)
             {
-                self.consecutive_acks_without_nak += 1;
+                self.consecutive_acks_without_nak = self.consecutive_acks_without_nak.saturating_add(1);
 
                 // Conservative recovery - require more ACKs
                 let acks_required = if self.fast_recovery_mode { 2 } else { 4 };
@@ -770,7 +770,7 @@ impl SrtlaConnection {
 
     pub fn record_reconnect_attempt(&mut self) {
         self.last_reconnect_attempt_ms = now_ms();
-        self.reconnect_failure_count += 1;
+        self.reconnect_failure_count = self.reconnect_failure_count.saturating_add(1);
 
         const MAX_BACKOFF_COUNT: u32 = 5;
         let capped_count = self.reconnect_failure_count.min(MAX_BACKOFF_COUNT);

@@ -96,7 +96,7 @@ pub async fn run_sender_with_toggles(
     #[allow(unused_variables, unused_mut)]
     let mut housekeeping_timer = time::interval(Duration::from_millis(1)); // Frequent timer for periodic tasks
     #[allow(unused_variables, unused_mut)]
-    let mut status_counter = 0;
+    let mut status_counter: u64 = 0;
     #[allow(unused_variables, unused_mut)]
     let mut last_client_addr: Option<SocketAddr> = None;
     // Sequence → connection index mapping for correct NAK attribution
@@ -175,8 +175,8 @@ pub async fn run_sender_with_toggles(
                         info!("connection changes applied successfully");
                     }
 
-                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
-                status_counter += 1;
+                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)  
+                status_counter = status_counter.wrapping_add(1);
                 if status_counter % 30000 == 0 {
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                 }
@@ -238,7 +238,7 @@ pub async fn run_sender_with_toggles(
                 }
 
                 // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
-                status_counter += 1;
+                status_counter = status_counter.wrapping_add(1);
                 if status_counter % 30000 == 0 {
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                 }
