@@ -237,10 +237,10 @@ impl SrtlaConnection {
                         // registration first
                         if let Some(event) = reg.process_registration_packet(conn_idx, &buf[..n]) {
                             // Set connection established timestamp when REG3 is received
-                            if matches!(event, RegistrationEvent::Reg3) {
-                                if self.connection_established_ms == 0 {
-                                    self.connection_established_ms = crate::utils::now_ms();
-                                }
+                            if matches!(event, RegistrationEvent::Reg3)
+                                && self.connection_established_ms == 0
+                            {
+                                self.connection_established_ms = crate::utils::now_ms();
                             }
                             continue;
                         }
@@ -675,10 +675,10 @@ impl SrtlaConnection {
                     self.window += WINDOW_INCR * 2 * fast_mode_bonus;
                 } else if tsn > 7000 {
                     // No NAKs for 7+ seconds: slow recovery
-                    self.window += WINDOW_INCR * 1 * fast_mode_bonus;
+                    self.window += WINDOW_INCR * fast_mode_bonus;
                 } else if tsn > 5000 {
                     // No NAKs for 5+ seconds: very slow recovery
-                    self.window += WINDOW_INCR * 1 * fast_mode_bonus;
+                    self.window += WINDOW_INCR * fast_mode_bonus;
                 } else {
                     // Recent NAKs: minimal recovery
                     self.window += WINDOW_INCR * fast_mode_bonus;
