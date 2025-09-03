@@ -387,7 +387,8 @@ impl SrtlaConnection {
             if (self.in_flight_packets as f64)
                 < (self.window as f64 * utilization_threshold / WINDOW_MULT as f64)
             {
-                self.consecutive_acks_without_nak = self.consecutive_acks_without_nak.saturating_add(1);
+                self.consecutive_acks_without_nak =
+                    self.consecutive_acks_without_nak.saturating_add(1);
                 let acks_required = if self.fast_recovery_mode { 2 } else { 4 };
                 if self.consecutive_acks_without_nak >= acks_required {
                     let old = self.window;
@@ -552,7 +553,8 @@ impl SrtlaConnection {
             if (self.in_flight_packets as f64)
                 < (self.window as f64 * utilization_threshold / WINDOW_MULT as f64)
             {
-                self.consecutive_acks_without_nak = self.consecutive_acks_without_nak.saturating_add(1);
+                self.consecutive_acks_without_nak =
+                    self.consecutive_acks_without_nak.saturating_add(1);
 
                 // Conservative recovery - require more ACKs
                 let acks_required = if self.fast_recovery_mode { 2 } else { 4 };
