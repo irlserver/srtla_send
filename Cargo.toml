@@ -52,3 +52,18 @@ required-features = ["test-internals"]
 [[test]]
 name = "end_to_end_tests"
 required-features = ["test-internals"]
+
+[profile.dev]
+opt-level = 1
+
+[profile.release-debug]
+inherits = "release"
+strip = false
+debug = true
+lto = "thin"
+
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+debug = false
+strip = true
