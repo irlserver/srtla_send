@@ -253,8 +253,9 @@ async fn test_error_resilience() {
 async fn test_concurrent_packet_processing() {
     use std::sync::Arc;
 
-    use crate::protocol::*;
     use tokio::sync::Mutex;
+
+    use crate::protocol::*;
 
     let results = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
