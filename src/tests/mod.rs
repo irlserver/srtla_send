@@ -12,3 +12,9 @@ pub mod sender_tests;
 
 #[cfg(test)]
 pub mod protocol_tests;
+
+#[cfg(test)]
+pub mod integration_tests;
+
+#[cfg(test)]
+pub mod end_to_end_tests;

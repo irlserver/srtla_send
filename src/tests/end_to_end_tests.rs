@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -95,7 +97,7 @@ async fn test_concurrent_udp_operations() {
 
 #[tokio::test]
 async fn test_protocol_message_flow() {
-    use srtla_send::protocol::*;
+    use crate::protocol::*;
 
     // Simulate a registration flow
     let mut sender_id = [0u8; SRTLA_ID_LEN];
@@ -130,7 +132,7 @@ async fn test_protocol_message_flow() {
 
 #[tokio::test]
 async fn test_keepalive_timing() {
-    use srtla_send::protocol::*;
+    use crate::protocol::*;
 
     let start_time = std::time::Instant::now();
 
@@ -166,7 +168,7 @@ async fn test_keepalive_timing() {
 
 #[tokio::test]
 async fn test_ack_nak_sequence_handling() {
-    use srtla_send::protocol::*;
+    use crate::protocol::*;
 
     // Test sequence of ACKs and NAKs
     let sequences = vec![100u32, 101, 102, 103, 104, 105];
@@ -199,7 +201,7 @@ async fn test_ack_nak_sequence_handling() {
 
 #[tokio::test]
 async fn test_packet_size_limits() {
-    use srtla_send::protocol::*;
+    use crate::protocol::*;
 
     // Test that we don't create packets larger than MTU
     let max_acks = (MTU - 2) / 4; // Maximum ACKs that fit in MTU
@@ -221,7 +223,7 @@ async fn test_packet_size_limits() {
 
 #[tokio::test]
 async fn test_error_resilience() {
-    use srtla_send::protocol::*;
+    use crate::protocol::*;
 
     // Test various malformed inputs don't crash
     let test_cases = vec![
@@ -251,7 +253,7 @@ async fn test_error_resilience() {
 async fn test_concurrent_packet_processing() {
     use std::sync::Arc;
 
-    use srtla_send::protocol::*;
+    use crate::protocol::*;
     use tokio::sync::Mutex;
 
     let results = Arc::new(Mutex::new(Vec::new()));
@@ -295,7 +297,7 @@ async fn test_concurrent_packet_processing() {
 
 #[test]
 fn test_memory_usage_bounds() {
-    use srtla_send::protocol::*;
+    use crate::protocol::*;
 
     // Test that parsing large NAK ranges doesn't consume excessive memory
     let mut large_nak = Vec::new();

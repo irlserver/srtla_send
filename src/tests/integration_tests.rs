@@ -1,4 +1,6 @@
-use srtla_send::protocol::*;
+#![cfg(test)]
+
+use crate::protocol::*;
 
 #[tokio::test]
 async fn test_protocol_packet_roundtrip() {
