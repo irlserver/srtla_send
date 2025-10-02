@@ -379,9 +379,8 @@ async fn handle_housekeeping(
             }
         }
 
-        // Process SRTLA ACKs: first find specific packet, then apply global +1 to all
-        // connections This matches the original implementation's
-        // register_srtla_ack behavior
+        // Process SRTLA ACKs: first find specific packet, then optionally apply
+        // classic-mode global recovery.
         for srtla_ack in incoming.srtla_ack_numbers.iter() {
             // Phase 1: Find the connection that sent this specific packet
             for c in connections.iter_mut() {
@@ -390,9 +389,14 @@ async fn handle_housekeeping(
                 }
             }
 
-            // Phase 2: Apply +1 window increase to ALL active connections
-            for c in connections.iter_mut() {
-                c.handle_srtla_ack_global();
+            // Phase 2: Classic mode mirrors the C implementation by bumping every
+            // active connection's window. Enhanced mode relies on the fine-grained
+            // Bond Bunny logic inside `handle_srtla_ack_specific` and skips the
+            // global +1 to avoid over-inflating other links.
+            if classic {
+                for c in connections.iter_mut() {
+                    c.handle_srtla_ack_global();
+                }
             }
         }
 

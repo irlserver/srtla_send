@@ -595,6 +595,17 @@ impl SrtlaConnection {
                 self.fast_recovery_mode
             );
         }
+
+        if self.fast_recovery_mode && self.window >= 12_000 {
+            self.fast_recovery_mode = false;
+            let recovery_duration = current_time.saturating_sub(self.fast_recovery_start_ms);
+            debug!(
+                "{}: Disabling FAST RECOVERY MODE after enhanced ACK recovery (window={}, duration={}ms)",
+                self.label,
+                self.window,
+                recovery_duration
+            );
+        }
     }
 
     pub fn handle_srtla_ack_global(&mut self) {
