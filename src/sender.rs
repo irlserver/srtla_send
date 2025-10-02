@@ -539,6 +539,9 @@ pub fn select_connection_idx(
         let mut best_score: i32 = -1;
 
         for (i, c) in conns.iter().enumerate() {
+            if c.is_timed_out() {
+                continue;
+            }
             let score = c.get_score();
             if score > best_score {
                 best_score = score;
@@ -554,6 +557,7 @@ pub fn select_connection_idx(
         now.duration_since(ts).as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
             && idx < conns.len()
             && conns[idx].connected
+            && !conns[idx].is_timed_out()
     } else {
         false
     };
@@ -566,6 +570,9 @@ pub fn select_connection_idx(
     let mut best_score: f64 = -1.0;
     let mut second_score: f64 = -1.0;
     for (i, c) in conns.iter().enumerate() {
+        if c.is_timed_out() {
+            continue;
+        }
         let base = c.get_score() as f64;
         let score = if !enable_quality {
             base

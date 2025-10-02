@@ -67,7 +67,7 @@ pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
             packet_log: [-1; PKT_LOG_SIZE],
             packet_send_times_ms: [0; PKT_LOG_SIZE],
             packet_idx: 0,
-            last_received: None,
+            last_received: Some(Instant::now()),
             last_keepalive_ms: 0,
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,

@@ -231,19 +231,31 @@ impl SrtlaConnection {
                         break;
                     }
                     read_any = true;
-                    self.last_received = Some(Instant::now());
+                    let recv_time = Instant::now();
                     let pt = get_packet_type(&buf[..n]);
                     if let Some(pt) = pt {
                         // registration first
                         if let Some(event) = reg.process_registration_packet(conn_idx, &buf[..n]) {
-                            // Set connection established timestamp when REG3 is received
-                            if matches!(event, RegistrationEvent::Reg3)
-                                && self.connection_established_ms == 0
-                            {
-                                self.connection_established_ms = crate::utils::now_ms();
+                            match event {
+                                RegistrationEvent::Reg3 => {
+                                    self.connected = true;
+                                    self.last_received = Some(recv_time);
+                                    if self.connection_established_ms == 0 {
+                                        self.connection_established_ms = crate::utils::now_ms();
+                                    }
+                                    self.mark_reconnect_success();
+                                }
+                                RegistrationEvent::RegErr => {
+                                    self.connected = false;
+                                    self.last_received = None;
+                                }
+                                RegistrationEvent::RegNgp | RegistrationEvent::Reg2 => {
+                                    // No state updates required for intermediate registration packets
+                                }
                             }
                             continue;
                         }
+                        self.last_received = Some(recv_time);
                         // Protocol handling
                         if pt == SRT_TYPE_ACK {
                             if let Some(ack) = parse_srt_ack(&buf[..n]) {
@@ -715,15 +727,10 @@ impl SrtlaConnection {
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
     pub fn mark_for_recovery(&mut self) {
-        // Use a timestamp from 1970 (like C's last_rcvd = 1) to indicate recovery
-        // needed
-        self.last_received = Instant::now()
-            .checked_sub(std::time::Duration::from_secs(86400))
-            .or_else(|| {
-                Instant::now().checked_sub(std::time::Duration::from_secs(
-                    crate::protocol::CONN_TIMEOUT + 1,
-                ))
-            });
+        self.last_received = None;
+        self.last_keepalive_ms = 0;
+        self.last_keepalive_sent_ms = 0;
+        self.waiting_for_keepalive_response = false;
         // Reset connection state like C version does
         self.window = WINDOW_MIN * WINDOW_MULT;
         self.in_flight_packets = 0;
