@@ -1,9 +1,9 @@
 use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{Context, Result};
+use smallvec::SmallVec;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
-// mpsc channel for instant forwarding
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -12,10 +12,10 @@ use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
 use crate::utils::now_ms;
 
 pub struct SrtlaIncoming {
-    pub forward_to_client: Vec<Vec<u8>>,
-    pub ack_numbers: Vec<u32>,
-    pub nak_numbers: Vec<u32>,
-    pub srtla_ack_numbers: Vec<u32>,
+    pub forward_to_client: SmallVec<Vec<u8>, 4>,
+    pub ack_numbers: SmallVec<u32, 4>,
+    pub nak_numbers: SmallVec<u32, 4>,
+    pub srtla_ack_numbers: SmallVec<u32, 4>,
     pub read_any: bool,
 }
 
@@ -202,6 +202,7 @@ impl SrtlaConnection {
         })
     }
 
+    #[inline]
     pub fn get_score(&self) -> i32 {
         if !self.connected {
             return -1;
@@ -213,6 +214,7 @@ impl SrtlaConnection {
         self.window / denom
     }
 
+    #[inline]
     pub async fn send_data_with_tracking(&mut self, data: &[u8], seq: Option<u32>) -> Result<()> {
         self.socket.send(data).await?;
         if let Some(s) = seq {
@@ -249,10 +251,10 @@ impl SrtlaConnection {
     ) -> Result<SrtlaIncoming> {
         let mut buf = [0u8; MTU];
         let mut read_any = false;
-        let mut forward: Vec<Vec<u8>> = Vec::new();
-        let mut acks: Vec<u32> = Vec::new();
-        let mut naks: Vec<u32> = Vec::new();
-        let mut srtla_acks: Vec<u32> = Vec::new();
+        let mut forward: SmallVec<Vec<u8>, 4> = SmallVec::new();
+        let mut acks: SmallVec<u32, 4> = SmallVec::new();
+        let mut naks: SmallVec<u32, 4> = SmallVec::new();
+        let mut srtla_acks: SmallVec<u32, 4> = SmallVec::new();
         loop {
             match self.socket.try_recv(&mut buf) {
                 Ok(n) => {
@@ -290,10 +292,12 @@ impl SrtlaConnection {
                             if let Some(ack) = parse_srt_ack(&buf[..n]) {
                                 acks.push(ack);
                             }
+                            // Create packet once and share it
+                            let ack_packet = buf[..n].to_vec();
                             // Instantly forward ACKs for minimal RTT
-                            let _ = instant_forwarder.send(buf[..n].to_vec());
+                            let _ = instant_forwarder.send(ack_packet.clone());
                             // Also add to regular batch for compatibility
-                            forward.push(buf[..n].to_vec());
+                            forward.push(ack_packet);
                         } else if pt == SRT_TYPE_NAK {
                             let nak_list = parse_srt_nak(&buf[..n]);
                             if !nak_list.is_empty() {

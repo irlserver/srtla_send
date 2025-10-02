@@ -28,6 +28,7 @@ tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
 socket2 = { version = "0.6", features = ["all"] }
 bytes = "1.10.1"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
+smallvec = "=2.0.0-alpha.11"
 
 [features]
 test-internals = []
