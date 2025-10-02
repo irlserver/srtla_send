@@ -176,12 +176,11 @@ impl SrtlaConnection {
         if !self.connected {
             return -1;
         }
-        // Flow control: don't allow sending if at/over window limit
-        let max_in_flight = (self.window / WINDOW_MULT).max(1);
-        if self.in_flight_packets >= max_in_flight {
-            return 0; // Connection is at capacity
-        }
-        self.window / (self.in_flight_packets + 1)
+        // Mirror classic implementations: score is window divided by in-flight load.
+        // Use saturating_add to avoid overflow when the queue is extremely large and
+        // clamp the denominator to at least 1 to prevent division by zero.
+        let denom = self.in_flight_packets.saturating_add(1).max(1);
+        self.window / denom
     }
 
     pub async fn send_data_with_tracking(&mut self, data: &[u8], seq: Option<u32>) -> Result<()> {
