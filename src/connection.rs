@@ -81,6 +81,30 @@ pub struct SrtlaConnection {
     #[cfg(not(feature = "test-internals"))]
     pub(crate) last_rtt_measurement_ms: u64,
     #[cfg(feature = "test-internals")]
+    pub smooth_rtt_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) smooth_rtt_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub fast_rtt_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) fast_rtt_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub rtt_jitter_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) rtt_jitter_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub prev_rtt_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) prev_rtt_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub rtt_avg_delta_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) rtt_avg_delta_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub rtt_min_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) rtt_min_ms: f64,
+    #[cfg(feature = "test-internals")]
     pub estimated_rtt_ms: f64,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) estimated_rtt_ms: f64,
@@ -157,6 +181,12 @@ impl SrtlaConnection {
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,
             last_rtt_measurement_ms: 0,
+            smooth_rtt_ms: 0.0,
+            fast_rtt_ms: 0.0,
+            rtt_jitter_ms: 0.0,
+            prev_rtt_ms: 0.0,
+            rtt_avg_delta_ms: 0.0,
+            rtt_min_ms: 200.0,
             estimated_rtt_ms: 0.0,
             nak_count: 0,
             last_nak_time_ms: 0,
@@ -337,57 +367,32 @@ impl SrtlaConnection {
         let mut ack_send_time_ms: Option<u64> = None;
         let mut remaining_count = 0;
 
-        // Bond Bunny approach: mark acknowledged packets and recount remaining
+        // Mark acknowledged packets and recount remaining
         for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             let val = self.packet_log[idx];
             if val == ack {
-                // Mark this specific packet as acknowledged
                 self.packet_log[idx] = -1;
                 let t = self.packet_send_times_ms[idx];
                 if t != 0 {
                     ack_send_time_ms = Some(t);
                 }
             } else if val > 0 && val < ack {
-                // Cumulative ACK: mark older packets as acknowledged
                 self.packet_log[idx] = -1;
             } else if val > 0 {
-                // Count remaining unacknowledged packets
                 remaining_count += 1;
             }
         }
 
-        // Bond Bunny exact: recalculate in-flight count from scratch
+        // Recalculate in-flight count from scratch
         self.in_flight_packets = remaining_count;
 
-        // RTT from SRT ACK if we have a send timestamp
+        // Measure RTT from SRT ACK if we have a send timestamp
         if let Some(sent_ms) = ack_send_time_ms {
             let now = now_ms();
             let rtt = now.saturating_sub(sent_ms);
             if rtt > 0 && rtt <= 10_000 {
-                // Capture old RTT estimate before updating
-                let old_rtt_estimate = self.estimated_rtt_ms;
-
-                self.estimated_rtt_ms = if self.estimated_rtt_ms == 0.0 {
-                    rtt as f64
-                } else {
-                    (self.estimated_rtt_ms * 0.875) + (rtt as f64 * 0.125)
-                };
-                self.last_rtt_measurement_ms = now;
-
-                // Log significant RTT changes (>20% difference) using old value
-                let rtt_change_pct = if old_rtt_estimate > 0.0 {
-                    ((rtt as f64 - old_rtt_estimate) / old_rtt_estimate * 100.0).abs()
-                } else {
-                    100.0
-                };
-
-                if rtt_change_pct > 20.0 {
-                    debug!(
-                        "{}: RTT changed significantly: {} ms (was {:.1} ms, +{:.1}%)",
-                        self.label, rtt, old_rtt_estimate, rtt_change_pct
-                    );
-                }
+                self.update_rtt_estimate(rtt);
             }
         }
 
@@ -601,9 +606,7 @@ impl SrtlaConnection {
             let recovery_duration = current_time.saturating_sub(self.fast_recovery_start_ms);
             debug!(
                 "{}: Disabling FAST RECOVERY MODE after enhanced ACK recovery (window={}, duration={}ms)",
-                self.label,
-                self.window,
-                recovery_duration
+                self.label, self.window, recovery_duration
             );
         }
     }
@@ -632,6 +635,95 @@ impl SrtlaConnection {
         }
     }
 
+    fn update_rtt_estimate(&mut self, rtt_ms: u64) {
+        let current_rtt = rtt_ms as f64;
+
+        // Initialize on first measurement
+        if self.smooth_rtt_ms == 0.0 {
+            self.smooth_rtt_ms = current_rtt;
+            self.fast_rtt_ms = current_rtt;
+            self.prev_rtt_ms = current_rtt;
+            self.estimated_rtt_ms = current_rtt;
+            self.last_rtt_measurement_ms = now_ms();
+            return;
+        }
+
+        // Asymmetric smoothing for smooth RTT: fast decrease, slow increase
+        if self.smooth_rtt_ms > current_rtt {
+            self.smooth_rtt_ms = self.smooth_rtt_ms * 0.60 + current_rtt * 0.40;
+        } else {
+            self.smooth_rtt_ms = self.smooth_rtt_ms * 0.96 + current_rtt * 0.04;
+        }
+
+        // Asymmetric smoothing for fast RTT: catches spikes quickly
+        if self.fast_rtt_ms > current_rtt {
+            self.fast_rtt_ms = self.fast_rtt_ms * 0.70 + current_rtt * 0.30;
+        } else {
+            self.fast_rtt_ms = self.fast_rtt_ms * 0.90 + current_rtt * 0.10;
+        }
+
+        // Track RTT change rate
+        let delta_rtt = current_rtt - self.prev_rtt_ms;
+        self.rtt_avg_delta_ms = self.rtt_avg_delta_ms * 0.8 + delta_rtt * 0.2;
+        self.prev_rtt_ms = current_rtt;
+
+        // Track minimum RTT with slow decay, only update when stable
+        self.rtt_min_ms *= 1.001;
+        if current_rtt < self.rtt_min_ms && self.rtt_avg_delta_ms.abs() < 1.0 {
+            self.rtt_min_ms = current_rtt;
+        }
+
+        // Track peak deviation with exponential decay
+        self.rtt_jitter_ms *= 0.99;
+        if delta_rtt.abs() > self.rtt_jitter_ms {
+            self.rtt_jitter_ms = delta_rtt.abs();
+        }
+
+        // Update legacy field for backwards compatibility
+        self.estimated_rtt_ms = self.smooth_rtt_ms;
+        self.last_rtt_measurement_ms = now_ms();
+
+        // Log significant RTT changes for debugging
+        if delta_rtt.abs() > 20.0 || self.rtt_jitter_ms > 50.0 {
+            debug!(
+                "{}: RTT update - raw={:.1}ms, smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, delta={:.1}ms, stable={}",
+                self.label,
+                current_rtt,
+                self.smooth_rtt_ms,
+                self.fast_rtt_ms,
+                self.rtt_jitter_ms,
+                self.rtt_avg_delta_ms,
+                self.is_rtt_stable()
+            );
+        }
+    }
+
+    pub fn is_rtt_stable(&self) -> bool {
+        self.rtt_avg_delta_ms.abs() < 1.0
+    }
+
+    pub fn get_smooth_rtt_ms(&self) -> f64 {
+        self.smooth_rtt_ms
+    }
+
+    pub fn get_fast_rtt_ms(&self) -> f64 {
+        self.fast_rtt_ms
+    }
+
+    pub fn get_rtt_jitter_ms(&self) -> f64 {
+        self.rtt_jitter_ms
+    }
+
+    #[allow(dead_code)]
+    pub fn get_rtt_min_ms(&self) -> f64 {
+        self.rtt_min_ms
+    }
+
+    #[allow(dead_code)]
+    pub fn get_rtt_avg_delta_ms(&self) -> f64 {
+        self.rtt_avg_delta_ms
+    }
+
     pub fn needs_rtt_measurement(&self) -> bool {
         self.connected
             && !self.waiting_for_keepalive_response
@@ -652,9 +744,11 @@ impl SrtlaConnection {
             let now = now_ms();
             let rtt = now.saturating_sub(ts);
             if rtt <= 10_000 {
-                // Keepalive RTT is informational only; prefer SRT ACK-based RTT for accuracy
-                // still update timestamp to throttle RTT measurements
-                self.last_rtt_measurement_ms = now;
+                self.update_rtt_estimate(rtt);
+                info!(
+                    "{}: RTT from keepalive: {}ms (smooth: {:.1}ms, fast: {:.1}ms, jitter: {:.1}ms)",
+                    self.label, rtt, self.smooth_rtt_ms, self.fast_rtt_ms, self.rtt_jitter_ms
+                );
             }
         }
         self.waiting_for_keepalive_response = false;
@@ -830,6 +924,12 @@ impl SrtlaConnection {
         self.consecutive_acks_without_nak = 0;
         self.fast_recovery_mode = false;
         self.last_rtt_measurement_ms = 0;
+        self.smooth_rtt_ms = 0.0;
+        self.fast_rtt_ms = 0.0;
+        self.rtt_jitter_ms = 0.0;
+        self.prev_rtt_ms = 0.0;
+        self.rtt_avg_delta_ms = 0.0;
+        self.rtt_min_ms = 200.0;
         self.estimated_rtt_ms = 0.0;
         self.last_keepalive_ms = 0;
         self.last_keepalive_sent_ms = 0;

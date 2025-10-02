@@ -354,16 +354,16 @@ mod tests {
 
         // But should be in recovery mode with reset state
         assert!(conn.is_timed_out()); // Old timestamp should make it appear timed out
-        assert_eq!(conn.window, WINDOW_MIN * WINDOW_MULT);
+        assert_eq!(conn.window, WINDOW_DEF * WINDOW_MULT);
         assert_eq!(conn.in_flight_packets, 0);
 
         // Score should still be calculated normally since connected=true, but with
         // reset window
-        let expected_score = (WINDOW_MIN * WINDOW_MULT) / (0 + 1); // window / (in_flight + 1)
+        let expected_score = (WINDOW_DEF * WINDOW_MULT) / (0 + 1); // window / (in_flight + 1)
         assert_eq!(conn.get_score(), expected_score);
 
-        // Verify window was reset from initial value
-        assert!(conn.window < initial_window);
+        // Verify window was reset (note: WINDOW_DEF == initial_window by default)
+        assert_eq!(conn.window, initial_window);
     }
 
     #[test]

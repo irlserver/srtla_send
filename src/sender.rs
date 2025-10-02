@@ -828,11 +828,13 @@ pub fn log_connection_status(
             i, status, conn.label, score_desc, last_recv, conn.window, conn.in_flight_packets
         );
 
-        // Show RTT info if available
         if conn.estimated_rtt_ms > 0.0 {
             info!(
-                "        RTT: {:.1}ms (last measured: {:.1}s ago)",
-                conn.estimated_rtt_ms,
+                "        RTT: smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, stable={} (last: {:.1}s ago)",
+                conn.get_smooth_rtt_ms(),
+                conn.get_fast_rtt_ms(),
+                conn.get_rtt_jitter_ms(),
+                conn.is_rtt_stable(),
                 (now_ms().saturating_sub(conn.last_rtt_measurement_ms) as f64) / 1000.0
             );
         }
