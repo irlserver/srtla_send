@@ -731,7 +731,9 @@ impl SrtlaConnection {
         self.last_keepalive_sent_ms = 0;
         self.waiting_for_keepalive_response = false;
         // Reset connection state like C version does
-        self.window = WINDOW_MIN * WINDOW_MULT;
+        // Reset to default window like classic implementation so reconnecting
+        // links can ramp quickly once registration completes.
+        self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
     }
