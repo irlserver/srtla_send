@@ -178,8 +178,21 @@ mod tests {
 
         let mut last_selected_idx = Some(1);
         let mut seq_to_conn = HashMap::new();
-        seq_to_conn.insert(100, 1);
-        seq_to_conn.insert(200, 2);
+        let now = now_ms();
+        seq_to_conn.insert(
+            100,
+            SequenceTrackingEntry {
+                conn_idx: 1,
+                timestamp_ms: now,
+            },
+        );
+        seq_to_conn.insert(
+            200,
+            SequenceTrackingEntry {
+                conn_idx: 2,
+                timestamp_ms: now,
+            },
+        );
         let mut seq_order = VecDeque::new();
         seq_order.push_back(100);
         seq_order.push_back(200);

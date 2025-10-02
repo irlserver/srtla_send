@@ -21,7 +21,20 @@ use crate::utils::now_ms;
 
 pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
+pub const SEQUENCE_TRACKING_MAX_AGE_MS: u64 = 5000;
+pub const SEQUENCE_MAP_CLEANUP_INTERVAL_MS: u64 = 5000;
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
+
+pub(crate) struct SequenceTrackingEntry {
+    pub(crate) conn_idx: usize,
+    pub(crate) timestamp_ms: u64,
+}
+
+impl SequenceTrackingEntry {
+    fn is_expired(&self, current_time_ms: u64) -> bool {
+        current_time_ms.saturating_sub(self.timestamp_ms) > SEQUENCE_TRACKING_MAX_AGE_MS
+    }
+}
 
 pub struct PendingConnectionChanges {
     pub new_ips: Option<Vec<IpAddr>>,
@@ -90,42 +103,17 @@ pub async fn run_sender_with_toggles(
         });
     }
 
-    // Main packet processing loop variables
-    #[allow(unused_variables, unused_mut)]
     let mut recv_buf = vec![0u8; MTU];
-    #[allow(unused_variables, unused_mut)]
-    let mut housekeeping_timer = time::interval(Duration::from_millis(1)); // Frequent timer for periodic tasks
-    #[allow(unused_variables, unused_mut)]
+    let mut housekeeping_timer = time::interval(Duration::from_millis(1));
     let mut status_counter: u64 = 0;
-    #[allow(unused_variables, unused_mut)]
     let mut last_client_addr: Option<SocketAddr> = None;
-    // Sequence → connection index mapping for correct NAK attribution
-    #[allow(unused_variables, unused_mut)]
-    let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
-    #[allow(unused_variables, unused_mut)]
+    let mut seq_to_conn: HashMap<u32, SequenceTrackingEntry> =
+        HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
     let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
-    // Stickiness
-    #[allow(unused_variables, unused_mut)]
-    let mut last_selected_idx: Option<usize> = None;
-    #[allow(unused_variables, unused_mut)]
-    let mut last_switch_time: Option<Instant> = None;
-    // Connection failure tracking
-    #[allow(unused_variables, unused_mut)]
-    let mut all_failed_at: Option<Instant> = None;
-
-    // Pending connection changes (applied safely between processing cycles)
-    #[allow(unused_variables, unused_mut)]
-    let mut pending_changes: Option<PendingConnectionChanges> = None;
-    // Sequence → connection index mapping for correct NAK attribution
-    let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
-    let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
-    // Stickiness
+    let mut last_sequence_cleanup_ms: u64 = 0;
     let mut last_selected_idx: Option<usize> = None;
     let mut last_switch_time: Option<Instant> = None;
-    // Connection failure tracking
     let mut all_failed_at: Option<Instant> = None;
-
-    // Pending connection changes (applied safely between processing cycles)
     let mut pending_changes: Option<PendingConnectionChanges> = None;
 
     // Prepare SIGHUP stream (Unix only)
@@ -136,7 +124,6 @@ pub async fn run_sender_with_toggles(
     // Main loop - run housekeeping frequently like C version
     #[cfg(unix)]
     loop {
-        // Run housekeeping frequently (like C version does every main loop iteration)
         {
             let classic = toggles
                 .classic_mode
@@ -148,6 +135,8 @@ pub async fn run_sender_with_toggles(
                 last_client_addr,
                 &local_listener,
                 &mut seq_to_conn,
+                &mut seq_order,
+                &mut last_sequence_cleanup_ms,
                 classic,
                 &mut all_failed_at,
             )
@@ -197,7 +186,6 @@ pub async fn run_sender_with_toggles(
 
     #[cfg(not(unix))]
     loop {
-        // Run housekeeping frequently (like C version does every main loop iteration)
         {
             let classic = toggles
                 .classic_mode
@@ -209,6 +197,8 @@ pub async fn run_sender_with_toggles(
                 last_client_addr,
                 &local_listener,
                 &mut seq_to_conn,
+                &mut seq_order,
+                &mut last_sequence_cleanup_ms,
                 classic,
                 &mut all_failed_at,
             )
@@ -254,7 +244,7 @@ async fn handle_srt_packet(
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
     last_switch_time: &mut Option<Instant>,
-    seq_to_conn: &mut HashMap<u32, usize>,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
     shared_client_addr: &Arc<Mutex<Option<SocketAddr>>>,
@@ -333,13 +323,18 @@ async fn handle_srt_packet(
                         conn.mark_for_recovery();
                     }
                     if let Some(s) = seq {
-                        // track mapping
                         if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
                             && let Some(old) = seq_order.pop_front()
                         {
                             seq_to_conn.remove(&old);
                         }
-                        seq_to_conn.insert(s, sel_idx);
+                        seq_to_conn.insert(
+                            s,
+                            SequenceTrackingEntry {
+                                conn_idx: sel_idx,
+                                timestamp_ms: now_ms(),
+                            },
+                        );
                         seq_order.push_back(s);
                     }
                 }
@@ -363,7 +358,9 @@ async fn handle_housekeeping(
     instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
-    seq_to_conn: &mut HashMap<u32, usize>,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    last_sequence_cleanup_ms: &mut u64,
     classic: bool,
     all_failed_at: &mut Option<Instant>,
 ) -> Result<()> {
@@ -400,16 +397,17 @@ async fn handle_housekeeping(
             }
         }
 
-        // NAK attribution to the connection that originally sent the packet
         for nak in incoming.nak_numbers.iter() {
-            if let Some(&idx) = seq_to_conn.get(nak) {
-                if let Some(conn) = connections.get_mut(idx) {
-                    conn.handle_nak(*nak as i32);
+            if let Some(entry) = seq_to_conn.get(nak) {
+                let current_time = now_ms();
+                if !entry.is_expired(current_time) {
+                    if let Some(conn) = connections.get_mut(entry.conn_idx) {
+                        conn.handle_nak(*nak as i32);
+                        continue;
+                    }
                 }
-            } else {
-                // Fallback: attribute to the connection that received the NAK
-                connections[i].handle_nak(*nak as i32);
             }
+            connections[i].handle_nak(*nak as i32);
         }
 
         // Forward responses back to local SRT client
@@ -480,11 +478,56 @@ async fn handle_housekeeping(
         *all_failed_at = None;
     }
 
+    cleanup_expired_sequence_tracking(seq_to_conn, seq_order, last_sequence_cleanup_ms);
+
     Ok(())
 }
 
-/// Calculate quality multiplier for a connection based on NAK history
-/// Returns a multiplier between 0.05 and 1.2
+fn cleanup_expired_sequence_tracking(
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    last_cleanup_ms: &mut u64,
+) {
+    let current_time = now_ms();
+    if current_time.saturating_sub(*last_cleanup_ms) < SEQUENCE_MAP_CLEANUP_INTERVAL_MS {
+        return;
+    }
+    *last_cleanup_ms = current_time;
+
+    let before_size = seq_to_conn.len();
+    let mut removed_count = 0;
+
+    seq_to_conn.retain(|_seq, entry| {
+        if entry.is_expired(current_time) {
+            removed_count += 1;
+            false
+        } else {
+            true
+        }
+    });
+
+    seq_order.retain(|seq| seq_to_conn.contains_key(seq));
+
+    if removed_count > 0 {
+        info!(
+            "Cleaned up {} stale sequence mappings ({} → {}, {:.1}% capacity)",
+            removed_count,
+            before_size,
+            seq_to_conn.len(),
+            (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0
+        );
+    }
+
+    if seq_to_conn.len() > (MAX_SEQUENCE_TRACKING as f64 * 0.8) as usize {
+        warn!(
+            "Sequence tracking at {:.1}% capacity ({}/{}) - consider review",
+            (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0,
+            seq_to_conn.len(),
+            MAX_SEQUENCE_TRACKING
+        );
+    }
+}
+
 pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
     use crate::utils::now_ms;
 
@@ -650,13 +693,13 @@ pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     Ok(out)
 }
 
-pub async fn apply_connection_changes(
+pub(crate) async fn apply_connection_changes(
     connections: &mut Vec<SrtlaConnection>,
     new_ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
     last_selected_idx: &mut Option<usize>,
-    seq_to_conn: &mut HashMap<u32, usize>,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
 ) {
     use std::collections::HashSet;
@@ -675,20 +718,10 @@ pub async fn apply_connection_changes(
     // tracking
     if connections.len() != old_len {
         info!("removed {} stale connections", old_len - connections.len());
-        *last_selected_idx = None; // Reset selection to prevent index issues
+        *last_selected_idx = None;
 
-        // Clean up sequence tracking for removed connections
-        seq_to_conn.retain(|_, &mut conn_idx| conn_idx < connections.len());
+        seq_to_conn.retain(|_, entry| entry.conn_idx < connections.len());
 
-        // Rebuild sequence tracking with correct indices
-        let mut new_seq_to_conn = HashMap::with_capacity(seq_to_conn.len());
-        for (seq, &old_idx) in seq_to_conn.iter() {
-            if old_idx < connections.len() {
-                new_seq_to_conn.insert(*seq, old_idx);
-            }
-        }
-        *seq_to_conn = new_seq_to_conn;
-        // Drop stale sequence IDs from the order queue
         seq_order.retain(|seq| seq_to_conn.contains_key(seq));
     }
 
@@ -737,9 +770,9 @@ pub async fn create_connections_from_ips(
 
 /// Comprehensive status monitoring for connections
 #[cfg_attr(not(unix), allow(dead_code))]
-pub fn log_connection_status(
+pub(crate) fn log_connection_status(
     connections: &[SrtlaConnection],
-    seq_to_conn: &HashMap<u32, usize>,
+    seq_to_conn: &HashMap<u32, SequenceTrackingEntry>,
     seq_order: &VecDeque<u32>,
     last_selected_idx: Option<usize>,
     toggles: &DynamicToggles,
@@ -770,10 +803,10 @@ pub fn log_connection_status(
         toggles.exploration_enabled.load(Ordering::Relaxed)
     );
 
-    // Show sequence tracking info
     info!(
-        "  Sequence tracking: {} mappings, {} in order queue",
+        "  Sequence tracking: {} mappings ({:.1}% capacity), {} in queue",
         seq_to_conn.len(),
+        (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0,
         seq_order.len()
     );
 
