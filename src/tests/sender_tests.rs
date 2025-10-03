@@ -64,7 +64,7 @@ mod tests {
             false,
             Instant::now(),
         );
-        assert_eq!(selected_no_stick, Some(2)); // Switches to best (connection 2)
+        assert_eq!(selected_no_stick, Some(1)); // Holds stickiness even if another link scores higher
     }
 
     #[test]

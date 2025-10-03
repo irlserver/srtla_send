@@ -94,10 +94,12 @@ mod tests {
         let handled = reg.process_registration_packet(1, &buf);
         assert!(handled.is_some());
 
-        // Should have cleared pending state
+        // Should clear pending state and wait for a new REG_NGP before retrying
+        let after = now_ms();
         assert_eq!(reg.pending_reg2_idx(), None);
         assert_eq!(reg.pending_timeout_at_ms(), 0);
         assert_eq!(reg.reg1_target_idx(), None);
+        assert!(reg.reg1_next_send_at_ms() >= after + REG2_TIMEOUT * 1000);
     }
 
     #[test]
@@ -116,6 +118,10 @@ mod tests {
     async fn test_reg_driver_initial_reg1() {
         let mut reg = SrtlaRegistrationManager::new();
         let mut connections = vec![create_test_connection().await];
+
+        let mut ngp = vec![0u8; 2];
+        ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
+        reg.process_registration_packet(0, &ngp);
 
         // Should send REG1 to first connection when no connections are active
         reg.reg_driver_send_if_needed(&mut connections).await;
@@ -142,6 +148,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reg_driver_waits_for_ngp() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![create_test_connection().await];
+
+        // Without REG_NGP, nothing should happen
+        reg.reg_driver_send_if_needed(&mut connections).await;
+        assert_eq!(reg.pending_reg2_idx(), None);
+
+        let mut ngp = vec![0u8; 2];
+        ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
+        reg.process_registration_packet(0, &ngp);
+
+        reg.reg_driver_send_if_needed(&mut connections).await;
+        assert_eq!(reg.pending_reg2_idx(), Some(0));
+    }
+
+    #[tokio::test]
     async fn test_broadcast_reg2() {
         let mut reg = SrtlaRegistrationManager::new();
         let mut connections = vec![
@@ -158,17 +181,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_trigger_broadcast_reg2() {
+    async fn test_send_reg1_to_sets_pending_state() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut connections = vec![
-            create_test_connection().await,
-            create_test_connection().await,
-        ];
+        let mut conn = create_test_connection().await;
 
-        reg.trigger_broadcast_reg2(&mut connections).await;
+        reg.send_reg1_to(0, &mut conn).await;
 
-        // This test mainly ensures the function doesn't panic
-        // and can be called successfully
+        assert_eq!(reg.pending_reg2_idx(), Some(0));
+        assert_eq!(reg.reg1_target_idx(), Some(0));
+        let now = now_ms();
+        assert!(reg.pending_timeout_at_ms() >= now);
+        assert!(reg.reg1_next_send_at_ms() >= now);
+        assert!(reg.reg1_next_send_at_ms() <= reg.pending_timeout_at_ms());
+    }
+
+    #[tokio::test]
+    async fn test_send_reg2_to_does_not_override_state() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut conn = create_test_connection().await;
+
+        // Pretend we already have pending state for another index
+        reg.set_pending_reg2_idx(Some(1));
+        reg.set_reg1_target_idx(Some(1));
+
+        reg.send_reg2_to(0, &mut conn).await;
+
+        // State should remain unchanged
+        assert_eq!(reg.pending_reg2_idx(), Some(1));
+        assert_eq!(reg.reg1_target_idx(), Some(1));
+    }
+
+    #[test]
+    fn test_clear_pending_if_timed_out() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        let start = now_ms();
+        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_timeout_at_ms(start + 10);
+        reg.set_reg1_target_idx(Some(0));
+        reg.set_reg1_next_send_at_ms(start + 1000);
+
+        // Advance time beyond timeout
+        let cleared_time = start + 20;
+        let cleared = reg.clear_pending_if_timed_out(cleared_time);
+
+        assert_eq!(cleared, Some(0));
+        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_timeout_at_ms(), 0);
+        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.reg1_next_send_at_ms(), cleared_time);
     }
 
     #[tokio::test]

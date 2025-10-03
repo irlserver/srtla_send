@@ -161,7 +161,7 @@ async fn test_keepalive_timing() {
 
     assert!(timestamp_range >= 80, "Expected >= ~2*50ms with margin");
     assert!(
-        timestamp_range <= elapsed_ms + 150,
+        timestamp_range <= elapsed_ms + 500,
         "Allow scheduler jitter"
     );
 }

@@ -104,7 +104,7 @@ pub async fn run_sender_with_toggles(
     }
 
     let mut recv_buf = vec![0u8; MTU];
-    let mut housekeeping_timer = time::interval(Duration::from_millis(1000));
+    let mut housekeeping_timer = time::interval(Duration::from_millis(1));
     let mut status_counter: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
     let mut seq_to_conn: HashMap<u32, SequenceTrackingEntry> =
@@ -156,14 +156,28 @@ pub async fn run_sender_with_toggles(
                     &mut last_selected_idx,
                     &mut seq_to_conn,
                     &mut seq_order,
-                ).await;
+                )
+                .await;
                 info!("connection changes applied successfully");
             }
         }
 
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
-                handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
+                handle_srt_packet(
+                    res,
+                    &mut recv_buf,
+                    &mut connections,
+                    &mut last_selected_idx,
+                    &mut last_switch_time,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &mut last_client_addr,
+                    &shared_client_addr,
+                    reg.has_connected,
+                    &toggles,
+                )
+                .await;
             }
             _ = housekeeping_timer.tick() => {
                 // Periodic status reporting (every 30 seconds = 30 ticks at 1000ms intervals)
@@ -219,14 +233,28 @@ pub async fn run_sender_with_toggles(
                     &mut last_selected_idx,
                     &mut seq_to_conn,
                     &mut seq_order,
-                ).await;
+                )
+                .await;
                 info!("connection changes applied successfully");
             }
         }
 
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
-                handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
+                handle_srt_packet(
+                    res,
+                    &mut recv_buf,
+                    &mut connections,
+                    &mut last_selected_idx,
+                    &mut last_switch_time,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &mut last_client_addr,
+                    &shared_client_addr,
+                    reg.has_connected,
+                    &toggles,
+                )
+                .await;
             }
             _ = housekeeping_timer.tick() => {
                 // Periodic status reporting (every 30 seconds = 30 ticks at 1000ms intervals)
@@ -250,6 +278,7 @@ async fn handle_srt_packet(
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
     shared_client_addr: &Arc<Mutex<Option<SocketAddr>>>,
+    registration_complete: bool,
     toggles: &DynamicToggles,
 ) {
     match res {
@@ -259,6 +288,43 @@ async fn handle_srt_packet(
             }
             let pkt = &recv_buf[..n];
             let seq = protocol::get_srt_sequence_number(pkt);
+            if !registration_complete {
+                let sel_idx = if let Some(idx) = last_selected_idx {
+                    if let Some(conn) = connections.get(*idx) {
+                        if conn.connected && !conn.is_timed_out() {
+                            Some(*idx)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    connections
+                        .iter()
+                        .enumerate()
+                        .find(|(_, c)| !c.is_timed_out())
+                        .map(|(i, _)| i)
+                        .or(Some(0))
+                };
+                if let Some(sel_idx) = sel_idx {
+                    forward_via_connection(
+                        sel_idx,
+                        pkt,
+                        seq,
+                        connections,
+                        last_selected_idx,
+                        last_switch_time,
+                        seq_to_conn,
+                        seq_order,
+                        last_client_addr,
+                        shared_client_addr,
+                        src,
+                    )
+                    .await;
+                    return;
+                }
+            }
             // pick best connection (respect dynamic stickiness toggle)
             let enable_stick = toggles
                 .stickiness_enabled
@@ -296,50 +362,20 @@ async fn handle_srt_packet(
                 Instant::now(),
             );
             if let Some(sel_idx) = sel_idx {
-                // Safe access - connection changes only happen between processing cycles
-                if sel_idx < connections.len() {
-                    // record stickiness
-                    if *last_selected_idx != Some(sel_idx) {
-                        if let Some(prev_idx) = *last_selected_idx {
-                            if prev_idx < connections.len() {
-                                debug!(
-                                    "Connection switch: {} → {} (seq: {:?})",
-                                    connections[prev_idx].label, connections[sel_idx].label, seq
-                                );
-                            }
-                        } else {
-                            debug!(
-                                "Initial connection selected: {} (seq: {:?})",
-                                connections[sel_idx].label, seq
-                            );
-                        }
-                        *last_selected_idx = Some(sel_idx);
-                        *last_switch_time = Some(Instant::now());
-                    }
-                    let conn = &mut connections[sel_idx];
-                    if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
-                        warn!(
-                            "{}: sendto() failed, marking for recovery: {}",
-                            conn.label, e
-                        );
-                        conn.mark_for_recovery();
-                    }
-                    if let Some(s) = seq {
-                        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
-                            && let Some(old) = seq_order.pop_front()
-                        {
-                            seq_to_conn.remove(&old);
-                        }
-                        seq_to_conn.insert(
-                            s,
-                            SequenceTrackingEntry {
-                                conn_idx: sel_idx,
-                                timestamp_ms: now_ms(),
-                            },
-                        );
-                        seq_order.push_back(s);
-                    }
-                }
+                forward_via_connection(
+                    sel_idx,
+                    pkt,
+                    seq,
+                    connections,
+                    last_selected_idx,
+                    last_switch_time,
+                    seq_to_conn,
+                    seq_order,
+                    last_client_addr,
+                    shared_client_addr,
+                    src,
+                )
+                .await;
             } else {
                 warn!("no available connection to forward packet from {}", src);
             }
@@ -350,6 +386,69 @@ async fn handle_srt_packet(
             }
         }
         Err(e) => warn!("error reading local SRT: {}", e),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn forward_via_connection(
+    sel_idx: usize,
+    pkt: &[u8],
+    seq: Option<u32>,
+    connections: &mut [SrtlaConnection],
+    last_selected_idx: &mut Option<usize>,
+    last_switch_time: &mut Option<Instant>,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    last_client_addr: &mut Option<SocketAddr>,
+    shared_client_addr: &Arc<Mutex<Option<SocketAddr>>>,
+    src: SocketAddr,
+) {
+    if sel_idx >= connections.len() {
+        return;
+    }
+    if *last_selected_idx != Some(sel_idx) {
+        if let Some(prev_idx) = *last_selected_idx {
+            if prev_idx < connections.len() {
+                debug!(
+                    "Connection switch: {} → {} (seq: {:?})",
+                    connections[prev_idx].label, connections[sel_idx].label, seq
+                );
+            }
+        } else {
+            debug!(
+                "Initial connection selected: {} (seq: {:?})",
+                connections[sel_idx].label, seq
+            );
+        }
+        *last_selected_idx = Some(sel_idx);
+        *last_switch_time = Some(Instant::now());
+    }
+    let conn = &mut connections[sel_idx];
+    if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
+        warn!(
+            "{}: sendto() failed, marking for recovery: {}",
+            conn.label, e
+        );
+        conn.mark_for_recovery();
+    }
+    if let Some(s) = seq {
+        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
+            && let Some(old) = seq_order.pop_front()
+        {
+            seq_to_conn.remove(&old);
+        }
+        seq_to_conn.insert(
+            s,
+            SequenceTrackingEntry {
+                conn_idx: sel_idx,
+                timestamp_ms: now_ms(),
+            },
+        );
+        seq_order.push_back(s);
+    }
+    *last_client_addr = Some(src);
+    if let Ok(mut addr_guard) = shared_client_addr.lock() {
+        *addr_guard = Some(src);
     }
 }
 
@@ -366,6 +465,10 @@ async fn handle_housekeeping(
     classic: bool,
     all_failed_at: &mut Option<Instant>,
 ) -> Result<()> {
+    // If we're waiting on a REG2 response past the timeout, proactively retry REG1
+    let current_ms = now_ms();
+    let _ = reg.clear_pending_if_timed_out(current_ms);
+
     // housekeeping: receive responses, drive registration, send keepalives
     for i in 0..connections.len() {
         let incoming = connections[i].drain_incoming(i, reg, instant_tx).await?;
@@ -419,6 +522,40 @@ async fn handle_housekeeping(
             }
         }
 
+        // Simple reconnect-on-timeout, then allow reg driver to proceed
+        if connections[i].is_timed_out() {
+            if connections[i].should_attempt_reconnect() {
+                let label = connections[i].label.clone();
+                connections[i].record_reconnect_attempt();
+                warn!(
+                    "{} timed out; resetting connection state for recovery",
+                    label
+                );
+                // Use C-style recovery: reset state but keep socket alive
+                connections[i].mark_for_recovery();
+
+                match reg.pending_reg2_idx() {
+                    Some(idx) if idx == i => {
+                        info!("{} marked for recovery; re-sending REG1", label);
+                        reg.send_reg1_to(i, &mut connections[i]).await;
+                    }
+                    Some(_) => {
+                        debug!(
+                            "{} timed out but another uplink is awaiting REG2; deferring",
+                            label
+                        );
+                    }
+                    None => {
+                        info!("{} marked for recovery; re-sending REG2", label);
+                        reg.send_reg2_to(i, &mut connections[i]).await;
+                    }
+                }
+            } else {
+                debug!("{} timed out but in retry interval", connections[i].label);
+            }
+            continue;
+        }
+
         if connections[i].needs_keepalive() {
             let _ = connections[i].send_keepalive().await;
         }
@@ -427,25 +564,6 @@ async fn handle_housekeeping(
         }
         if !classic {
             connections[i].perform_window_recovery();
-        }
-        // Simple reconnect-on-timeout, then allow reg driver to proceed
-        if connections[i].is_timed_out() {
-            if connections[i].should_attempt_reconnect() {
-                connections[i].record_reconnect_attempt();
-                warn!(
-                    "{} timed out; resetting connection state for recovery",
-                    connections[i].label
-                );
-                // Use C-style recovery: reset state but keep socket alive
-                connections[i].mark_for_recovery();
-                info!(
-                    "{} marked for recovery; re-sending REG2",
-                    connections[i].label
-                );
-                reg.trigger_broadcast_reg2(connections).await;
-            } else {
-                debug!("{} timed out but in backoff period", connections[i].label);
-            }
         }
     }
 
@@ -671,8 +789,12 @@ pub fn select_connection_idx(
 
     // Bond Bunny approach: if in stickiness window and last connection is still
     // good, keep it
-    if in_stickiness_window && best_idx == last_idx {
-        return best_idx; // Sticky to the best connection
+    if in_stickiness_window {
+        if let Some(idx) = last_idx {
+            if idx < conns.len() && !conns[idx].is_timed_out() {
+                return Some(idx);
+            }
+        }
     }
 
     // Allow switching if better connection found (prevents getting stuck on
