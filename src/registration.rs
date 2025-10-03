@@ -157,14 +157,6 @@ impl SrtlaRegistrationManager {
 
     fn handle_reg3(&mut self, _conn_idx: usize) {
         self.has_connected = true;
-        self.active_connections += 1;
-        // Note: This increment may be inaccurate (can drift over time), but it's
-        // reset and recalculated from scratch in update_active_connections() during
-        // housekeeping, matching C and Bond Bunny behavior
-        info!(
-            "connection established (active={})",
-            self.active_connections
-        );
     }
 
     fn handle_reg_err(&mut self, conn_idx: usize) {
@@ -183,9 +175,11 @@ impl SrtlaRegistrationManager {
         // Bond Bunny (line 235): activeConnections = 0; then counts CONNECTED state connections
         let new_count = connections.iter().filter(|c| !c.is_timed_out()).count();
         
-        // Only log when count changes from the recalculated value
+        // Log any changes in connection count
         if new_count != self.active_connections {
-            if new_count < self.active_connections {
+            if new_count > self.active_connections {
+                info!("connection established (active={})", new_count);
+            } else {
                 info!("connection(s) lost - active connections: {}", new_count);
             }
         }

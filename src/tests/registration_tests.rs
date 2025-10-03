@@ -73,8 +73,8 @@ mod tests {
         let handled = reg.process_registration_packet(2, &buf);
         assert!(handled.is_some());
 
-        // Should have incremented active connections and set has_connected
-        assert_eq!(reg.active_connections(), 1);
+        // REG3 should set has_connected flag
+        // Note: active_connections is updated by update_active_connections() during housekeeping
         assert!(reg.has_connected);
     }
 
@@ -171,10 +171,17 @@ mod tests {
         // and can be called successfully
     }
 
-    #[test]
-    fn test_multiple_reg3_connections() {
+    #[tokio::test]
+    async fn test_multiple_reg3_connections() {
         let mut reg = SrtlaRegistrationManager::new();
         let reg3_packet = vec![0x92, 0x02];
+
+        // Create 3 test connections
+        let connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
 
         // Simulate multiple REG3 responses
         for i in 0..3 {
@@ -182,8 +189,13 @@ mod tests {
             assert!(handled.is_some());
         }
 
-        assert_eq!(reg.active_connections(), 3);
         assert!(reg.has_connected);
+        
+        // Update active connections count based on connection states
+        reg.update_active_connections(&connections);
+        
+        // All 3 connections should be active (none timed out)
+        assert_eq!(reg.active_connections(), 3);
     }
 
     #[tokio::test]
@@ -203,9 +215,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_registration_state_transitions() {
+    #[tokio::test]
+    async fn test_registration_state_transitions() {
         let mut reg = SrtlaRegistrationManager::new();
+        let connections = vec![create_test_connection().await];
 
         // Initial state
         assert_eq!(reg.active_connections(), 0);
@@ -232,8 +245,11 @@ mod tests {
         let reg3_packet = vec![0x92, 0x02];
         reg.process_registration_packet(0, &reg3_packet);
 
-        assert_eq!(reg.active_connections(), 1);
         assert!(reg.has_connected);
+        
+        // Update active connections count based on connection states
+        reg.update_active_connections(&connections);
+        assert_eq!(reg.active_connections(), 1);
     }
 
     #[test]
