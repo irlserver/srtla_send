@@ -104,7 +104,7 @@ pub async fn run_sender_with_toggles(
     }
 
     let mut recv_buf = vec![0u8; MTU];
-    let mut housekeeping_timer = time::interval(Duration::from_millis(1));
+    let mut housekeeping_timer = time::interval(Duration::from_millis(1000));
     let mut status_counter: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
     let mut seq_to_conn: HashMap<u32, SequenceTrackingEntry> =
@@ -143,30 +143,32 @@ pub async fn run_sender_with_toggles(
             .await;
         }
 
+        // Apply pending connection changes immediately (like C srtla_send)
+        // This matches C behavior: SIGHUP sets flag, next loop iteration applies changes
+        if let Some(changes) = pending_changes.take() {
+            if let Some(new_ips) = changes.new_ips {
+                info!("applying queued connection changes: {} IPs", new_ips.len());
+                apply_connection_changes(
+                    &mut connections,
+                    &new_ips,
+                    &changes.receiver_host,
+                    changes.receiver_port,
+                    &mut last_selected_idx,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                ).await;
+                info!("connection changes applied successfully");
+            }
+        }
+
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
             _ = housekeeping_timer.tick() => {
-                // Apply any pending connection changes at a safe point
-                if let Some(changes) = pending_changes.take()
-                    && let Some(new_ips) = changes.new_ips {
-                        info!("applying queued connection changes: {} IPs", new_ips.len());
-                        apply_connection_changes(
-                            &mut connections,
-                            &new_ips,
-                            &changes.receiver_host,
-                            changes.receiver_port,
-                            &mut last_selected_idx,
-                            &mut seq_to_conn,
-                             &mut seq_order,
-                        ).await;
-                        info!("connection changes applied successfully");
-                    }
-
-                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
+                // Periodic status reporting (every 30 seconds = 30 ticks at 1000ms intervals)
                 status_counter = status_counter.wrapping_add(1);
-                if status_counter.is_multiple_of(30000) {
+                if status_counter.is_multiple_of(30) {
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                 }
             }
@@ -205,31 +207,31 @@ pub async fn run_sender_with_toggles(
             .await;
         }
 
+        // Apply pending connection changes immediately (like C srtla_send)
+        if let Some(changes) = pending_changes.take() {
+            if let Some(new_ips) = changes.new_ips {
+                info!("applying queued connection changes: {} IPs", new_ips.len());
+                apply_connection_changes(
+                    &mut connections,
+                    &new_ips,
+                    &changes.receiver_host,
+                    changes.receiver_port,
+                    &mut last_selected_idx,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                ).await;
+                info!("connection changes applied successfully");
+            }
+        }
+
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
             }
             _ = housekeeping_timer.tick() => {
-                // Apply any pending connection changes at a safe point
-                if let Some(changes) = pending_changes.take() {
-                    if let Some(new_ips) = changes.new_ips {
-                        info!("applying queued connection changes: {} IPs", new_ips.len());
-                        apply_connection_changes(
-                            &mut connections,
-                            &new_ips,
-                            &changes.receiver_host,
-                            changes.receiver_port,
-                            &mut last_selected_idx,
-                            &mut seq_to_conn,
-                            &mut seq_order,
-                        ).await;
-                        info!("connection changes applied successfully");
-                    }
-                }
-
-                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
+                // Periodic status reporting (every 30 seconds = 30 ticks at 1000ms intervals)
                 status_counter = status_counter.wrapping_add(1);
-                if status_counter.is_multiple_of(30000) {
+                if status_counter.is_multiple_of(30) {
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                 }
             }
@@ -446,11 +448,11 @@ async fn handle_housekeeping(
             }
         }
     }
-    
+
     // Update active connections count (matches C implementation behavior)
     // C code resets active_connections=0 then counts non-timed-out connections
     reg.update_active_connections(connections);
-    
+
     // drive registration (send REG1/REG2 as needed)
     reg.reg_driver_send_if_needed(connections).await;
 

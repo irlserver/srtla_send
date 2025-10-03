@@ -168,13 +168,13 @@ impl SrtlaRegistrationManager {
         self.reg1_target_idx = None;
         warn!("registration failed for connection {}", conn_idx);
     }
-    
+
     pub fn update_active_connections(&mut self, connections: &[SrtlaConnection]) {
         // Match C/Bond Bunny implementation: recalculate from scratch each housekeeping cycle
         // C code (line 653): active_connections = 0; then counts non-timed-out connections
         // Bond Bunny (line 235): activeConnections = 0; then counts CONNECTED state connections
         let new_count = connections.iter().filter(|c| !c.is_timed_out()).count();
-        
+
         // Log any changes in connection count
         if new_count != self.active_connections {
             if new_count > self.active_connections {
@@ -183,7 +183,7 @@ impl SrtlaRegistrationManager {
                 info!("connection(s) lost - active connections: {}", new_count);
             }
         }
-        
+
         // Reset and recalculate - this is the authoritative count
         self.active_connections = new_count;
     }

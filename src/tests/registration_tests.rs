@@ -190,10 +190,10 @@ mod tests {
         }
 
         assert!(reg.has_connected);
-        
+
         // Update active connections count based on connection states
         reg.update_active_connections(&connections);
-        
+
         // All 3 connections should be active (none timed out)
         assert_eq!(reg.active_connections(), 3);
     }
@@ -246,7 +246,7 @@ mod tests {
         reg.process_registration_packet(0, &reg3_packet);
 
         assert!(reg.has_connected);
-        
+
         // Update active connections count based on connection states
         reg.update_active_connections(&connections);
         assert_eq!(reg.active_connections(), 1);
