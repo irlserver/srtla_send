@@ -446,6 +446,11 @@ async fn handle_housekeeping(
             }
         }
     }
+    
+    // Update active connections count (matches C implementation behavior)
+    // C code resets active_connections=0 then counts non-timed-out connections
+    reg.update_active_connections(connections);
+    
     // drive registration (send REG1/REG2 as needed)
     reg.reg_driver_send_if_needed(connections).await;
 
