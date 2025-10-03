@@ -180,9 +180,9 @@ pub async fn run_sender_with_toggles(
                 .await;
             }
             _ = housekeeping_timer.tick() => {
-                // Periodic status reporting (every 30 seconds = 30 ticks at 1000ms intervals)
+                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
                 status_counter = status_counter.wrapping_add(1);
-                if status_counter.is_multiple_of(30) {
+                if status_counter.is_multiple_of(30000) {
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                 }
             }
@@ -257,9 +257,9 @@ pub async fn run_sender_with_toggles(
                 .await;
             }
             _ = housekeeping_timer.tick() => {
-                // Periodic status reporting (every 30 seconds = 30 ticks at 1000ms intervals)
+                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
                 status_counter = status_counter.wrapping_add(1);
-                if status_counter.is_multiple_of(30) {
+                if status_counter.is_multiple_of(30000) {
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                 }
             }
