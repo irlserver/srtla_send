@@ -350,7 +350,8 @@ mod tests {
             .next()
             .unwrap();
 
-        // Test connection with no NAKs - should get bonus
+        conn.connection_established_ms = now_ms() - 15000;
+
         assert_eq!(calculate_quality_multiplier(&conn), 1.2);
 
         // Test connection with recent NAK (< 2 seconds ago) - heavy penalty
