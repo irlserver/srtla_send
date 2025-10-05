@@ -145,8 +145,8 @@ pub async fn run_sender_with_toggles(
 
         // Apply pending connection changes immediately (like C srtla_send)
         // This matches C behavior: SIGHUP sets flag, next loop iteration applies changes
-        if let Some(changes) = pending_changes.take() {
-            if let Some(new_ips) = changes.new_ips {
+        if let Some(changes) = pending_changes.take()
+            && let Some(new_ips) = changes.new_ips {
                 info!("applying queued connection changes: {} IPs", new_ips.len());
                 apply_connection_changes(
                     &mut connections,
@@ -160,7 +160,6 @@ pub async fn run_sender_with_toggles(
                 .await;
                 info!("connection changes applied successfully");
             }
-        }
 
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
@@ -505,12 +504,11 @@ async fn handle_housekeeping(
         for nak in incoming.nak_numbers.iter() {
             if let Some(entry) = seq_to_conn.get(nak) {
                 let current_time = now_ms();
-                if !entry.is_expired(current_time) {
-                    if let Some(conn) = connections.get_mut(entry.conn_idx) {
+                if !entry.is_expired(current_time)
+                    && let Some(conn) = connections.get_mut(entry.conn_idx) {
                         conn.handle_nak(*nak as i32);
                         continue;
                     }
-                }
             }
             connections[i].handle_nak(*nak as i32);
         }
@@ -789,13 +787,11 @@ pub fn select_connection_idx(
 
     // Bond Bunny approach: if in stickiness window and last connection is still
     // good, keep it
-    if in_stickiness_window {
-        if let Some(idx) = last_idx {
-            if idx < conns.len() && !conns[idx].is_timed_out() {
+    if in_stickiness_window
+        && let Some(idx) = last_idx
+            && idx < conns.len() && !conns[idx].is_timed_out() {
                 return Some(idx);
             }
-        }
-    }
 
     // Allow switching if better connection found (prevents getting stuck on
     // degraded connections)
