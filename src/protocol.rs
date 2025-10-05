@@ -39,6 +39,7 @@ pub const WINDOW_INCR: i32 = 30;
 
 pub const PKT_LOG_SIZE: usize = 256;
 
+#[inline]
 pub fn get_packet_type(buf: &[u8]) -> Option<u16> {
     if buf.len() < 2 {
         return None;
@@ -46,6 +47,7 @@ pub fn get_packet_type(buf: &[u8]) -> Option<u16> {
     Some(u16::from_be_bytes([buf[0], buf[1]]))
 }
 
+#[inline]
 pub fn get_srt_sequence_number(buf: &[u8]) -> Option<u32> {
     if buf.len() < 4 {
         return None;
@@ -58,22 +60,22 @@ pub fn get_srt_sequence_number(buf: &[u8]) -> Option<u32> {
     }
 }
 
-pub fn create_reg1_packet(id: &[u8; SRTLA_ID_LEN]) -> Vec<u8> {
-    let mut pkt = vec![0u8; SRTLA_TYPE_REG1_LEN];
+pub fn create_reg1_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG1_LEN] {
+    let mut pkt = [0u8; SRTLA_TYPE_REG1_LEN];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_REG1.to_be_bytes());
     pkt[2..].copy_from_slice(id);
     pkt
 }
 
-pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> Vec<u8> {
-    let mut pkt = vec![0u8; SRTLA_TYPE_REG2_LEN];
+pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG2_LEN] {
+    let mut pkt = [0u8; SRTLA_TYPE_REG2_LEN];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_REG2.to_be_bytes());
     pkt[2..].copy_from_slice(id);
     pkt
 }
 
-pub fn create_keepalive_packet() -> Vec<u8> {
-    let mut pkt = vec![0u8; 10];
+pub fn create_keepalive_packet() -> [u8; 10] {
+    let mut pkt = [0u8; 10];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
     let ts = chrono::Utc::now().timestamp_millis() as u64;
     for i in 0..8 {
@@ -109,6 +111,7 @@ pub fn create_ack_packet(acks: &[u32]) -> Vec<u8> {
     pkt
 }
 
+#[inline]
 pub fn parse_srt_ack(buf: &[u8]) -> Option<u32> {
     if buf.len() < 20 {
         return None;
@@ -119,6 +122,7 @@ pub fn parse_srt_ack(buf: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]))
 }
 
+#[inline]
 pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
     if buf.len() < 8 {
         return vec![];
@@ -150,6 +154,7 @@ pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
     out
 }
 
+#[inline]
 pub fn parse_srtla_ack(buf: &[u8]) -> Vec<u32> {
     if buf.len() < 8 {
         return vec![];

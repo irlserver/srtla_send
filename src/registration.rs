@@ -48,16 +48,28 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    pub async fn trigger_broadcast_reg2(&mut self, connections: &mut [SrtlaConnection]) {
+    pub async fn send_reg1_to(&mut self, conn_idx: usize, conn: &mut SrtlaConnection) {
+        let pkt = create_reg1_packet(&self.srtla_id);
+        debug!("queueing REG1 for uplink #{}", conn_idx);
+        info!("REG1 → uplink #{} ({} bytes)", conn_idx, pkt.len());
+        if let Err(e) = conn.send_srtla_packet(&pkt).await {
+            warn!("Failed to send REG1 to uplink #{}: {:?}", conn_idx, e);
+        }
+
+        let now = now_ms();
+        self.pending_reg2_idx = Some(conn_idx);
+        self.reg1_target_idx = Some(conn_idx);
+        self.pending_timeout_at_ms = now + REG2_TIMEOUT * 1000;
+        // Allow the driver to retry at a 1s cadence while waiting on REG2
+        self.reg1_next_send_at_ms = now + 1000;
+    }
+
+    pub async fn send_reg2_to(&mut self, conn_idx: usize, conn: &mut SrtlaConnection) {
         let pkt = create_reg2_packet(&self.srtla_id);
-        info!(
-            "broadcast REG2 to {} uplinks ({} bytes)",
-            connections.len(),
-            pkt.len()
-        );
-        for (i, c) in connections.iter_mut().enumerate() {
-            let _ = c.send_srtla_packet(&pkt).await;
-            debug!("REG2 → uplink #{} sent", i);
+        debug!("queueing REG2 for uplink #{}", conn_idx);
+        info!("REG2 → uplink #{} ({} bytes)", conn_idx, pkt.len());
+        if let Err(e) = conn.send_srtla_packet(&pkt).await {
+            warn!("Failed to send REG2 to uplink #{}: {:?}", conn_idx, e);
         }
     }
 
@@ -95,24 +107,26 @@ impl SrtlaRegistrationManager {
         // If nothing connected yet, send REG1. Prefer target from REG_NGP; otherwise,
         // pick the first uplink.
         if self.active_connections == 0 {
-            let target_idx = if let Some(idx) = self.reg1_target_idx {
-                Some(idx)
-            } else if !connections.is_empty() {
-                Some(0)
-            } else {
-                None
-            };
-            if let Some(idx) = target_idx {
+            if let Some(idx) = self.reg1_target_idx {
                 let now = now_ms();
                 if self.pending_reg2_idx.is_none() && now >= self.reg1_next_send_at_ms {
                     let pkt = create_reg1_packet(&self.srtla_id);
                     info!("REG1 → uplink #{} ({} bytes)", idx, pkt.len());
-                    let _ = connections[idx].send_srtla_packet(&pkt).await;
+                    if let Err(e) = connections[idx].send_srtla_packet(&pkt).await {
+                        warn!("Failed to send REG1 to uplink #{}: {:?}", idx, e);
+                    }
                     self.pending_reg2_idx = Some(idx);
                     self.pending_timeout_at_ms = now + REG2_TIMEOUT * 1000;
-                    // schedule retry in case of REG_ERR/timeout
+                    // throttle retries until next REG_NGP/timeout
                     self.reg1_next_send_at_ms = now + REG2_TIMEOUT * 1000;
+                } else if self.pending_reg2_idx.is_some() {
+                    debug!(
+                        "REG1 pending for uplink #{} (timeout at {}), skipping send",
+                        idx, self.pending_timeout_at_ms
+                    );
                 }
+            } else {
+                debug!("No REG1 target selected; awaiting REG_NGP");
             }
         }
 
@@ -133,10 +147,16 @@ impl SrtlaRegistrationManager {
     }
 
     fn handle_reg_ngp(&mut self, conn_idx: usize) {
-        if self.active_connections == 0 {
-            // Select target to receive REG1; driver will send
+        if self.active_connections == 0 && self.pending_reg2_idx.is_none() {
+            debug!("REG_NGP from uplink #{} accepted as REG1 target", conn_idx);
             self.reg1_target_idx = Some(conn_idx);
+            // Allow immediate REG1 send; driver will enforce minimum cadence later
             self.reg1_next_send_at_ms = now_ms();
+        } else {
+            debug!(
+                "REG_NGP from uplink #{} ignored (active connections present or pending)",
+                conn_idx
+            );
         }
     }
 
@@ -147,31 +167,89 @@ impl SrtlaRegistrationManager {
         if self.pending_reg2_idx == Some(conn_idx) {
             // server returns full id starting at byte 2
             self.srtla_id.copy_from_slice(&buf[2..2 + SRTLA_ID_LEN]);
+            debug!(
+                "REG2 from uplink #{} accepted; broadcasting to peers",
+                conn_idx
+            );
             self.pending_reg2_idx = None;
             self.pending_timeout_at_ms = now_ms() + REG3_TIMEOUT * 1000;
             self.broadcast_reg2_pending = true;
-            // stop sending REG1
+            // stop sending REG1 until next REG_NGP
             self.reg1_target_idx = None;
+            self.reg1_next_send_at_ms = 0;
         }
     }
 
     fn handle_reg3(&mut self, _conn_idx: usize) {
         self.has_connected = true;
-        self.active_connections += 1;
-        info!(
-            "connection established (active={})",
-            self.active_connections
-        );
     }
 
     fn handle_reg_err(&mut self, conn_idx: usize) {
         if self.pending_reg2_idx == Some(conn_idx) {
+            debug!("REG_ERR for uplink #{} while awaiting REG2", conn_idx);
+        } else {
+            debug!("REG_ERR for uplink #{} (no pending REG2)", conn_idx);
+        }
+
+        self.pending_reg2_idx = None;
+        self.pending_timeout_at_ms = 0;
+        self.reg1_target_idx = None;
+        // Wait for a fresh REG_NGP to select the next REG1 target
+        self.reg1_next_send_at_ms = now_ms() + REG2_TIMEOUT * 1000;
+
+        warn!("registration failed for connection {}", conn_idx);
+    }
+
+    pub async fn try_send_reg1_immediately(&mut self, conn_idx: usize, conn: &mut SrtlaConnection) {
+        if self.active_connections == 0
+            && self.pending_reg2_idx.is_none()
+            && self.reg1_target_idx == Some(conn_idx)
+            && now_ms() >= self.reg1_next_send_at_ms
+        {
+            debug!("REG_NGP immediate send for uplink #{}", conn_idx);
+            self.send_reg1_to(conn_idx, conn).await;
+        }
+    }
+
+    pub fn update_active_connections(&mut self, connections: &[SrtlaConnection]) {
+        // Match C/Bond Bunny implementation: recalculate from scratch each housekeeping cycle
+        // C code (line 653): active_connections = 0; then counts non-timed-out connections
+        // Bond Bunny (line 235): activeConnections = 0; then counts CONNECTED state connections
+        let new_count = connections.iter().filter(|c| !c.is_timed_out()).count();
+
+        // Log any changes in connection count
+        if new_count != self.active_connections {
+            if new_count > self.active_connections {
+                info!("connection established (active={})", new_count);
+            } else {
+                info!("connection(s) lost - active connections: {}", new_count);
+            }
+        }
+
+        // Reset and recalculate - this is the authoritative count
+        self.active_connections = new_count;
+    }
+    pub(crate) fn pending_reg2_idx(&self) -> Option<usize> {
+        self.pending_reg2_idx
+    }
+
+    pub fn clear_pending_if_timed_out(&mut self, now_ms_value: u64) -> Option<usize> {
+        if let Some(idx) = self.pending_reg2_idx
+            && self.pending_timeout_at_ms != 0
+            && now_ms_value >= self.pending_timeout_at_ms
+        {
+            warn!(
+                "REG2 wait exceeded {}ms for uplink #{}; clearing pending handshake",
+                REG2_TIMEOUT * 1000,
+                idx
+            );
             self.pending_reg2_idx = None;
             self.pending_timeout_at_ms = 0;
+            self.reg1_target_idx = None;
+            self.reg1_next_send_at_ms = now_ms_value;
+            return Some(idx);
         }
-        // Do not retry REG1 immediately; wait for next REG_NGP to select target again
-        self.reg1_target_idx = None;
-        warn!("registration failed for connection {}", conn_idx);
+        None
     }
 }
 
@@ -183,14 +261,6 @@ impl SrtlaRegistrationManager {
 impl SrtlaRegistrationManager {
     pub(crate) fn srtla_id(&self) -> &[u8; SRTLA_ID_LEN] {
         &self.srtla_id
-    }
-
-    pub(crate) fn pending_reg2_idx(&self) -> Option<usize> {
-        self.pending_reg2_idx
-    }
-
-    pub(crate) fn pending_timeout_at_ms(&self) -> u64 {
-        self.pending_timeout_at_ms
     }
 
     pub(crate) fn active_connections(&self) -> usize {
@@ -211,6 +281,10 @@ impl SrtlaRegistrationManager {
 
     pub(crate) fn reg1_next_send_at_ms(&self) -> u64 {
         self.reg1_next_send_at_ms
+    }
+
+    pub(crate) fn pending_timeout_at_ms(&self) -> u64 {
+        self.pending_timeout_at_ms
     }
 
     // Mutable accessors for tests that need to modify state

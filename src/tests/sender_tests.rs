@@ -64,7 +64,7 @@ mod tests {
             false,
             Instant::now(),
         );
-        assert_eq!(selected_no_stick, Some(2)); // Switches to best (connection 2)
+        assert_eq!(selected_no_stick, Some(1)); // Holds stickiness even if another link scores higher
     }
 
     #[test]
@@ -178,8 +178,21 @@ mod tests {
 
         let mut last_selected_idx = Some(1);
         let mut seq_to_conn = HashMap::new();
-        seq_to_conn.insert(100, 1);
-        seq_to_conn.insert(200, 2);
+        let now = now_ms();
+        seq_to_conn.insert(
+            100,
+            SequenceTrackingEntry {
+                conn_id: connections[1].conn_id,
+                timestamp_ms: now,
+            },
+        );
+        seq_to_conn.insert(
+            200,
+            SequenceTrackingEntry {
+                conn_id: connections[2].conn_id,
+                timestamp_ms: now,
+            },
+        );
         let mut seq_order = VecDeque::new();
         seq_order.push_back(100);
         seq_order.push_back(200);
@@ -337,7 +350,8 @@ mod tests {
             .next()
             .unwrap();
 
-        // Test connection with no NAKs - should get bonus
+        conn.connection_established_ms = now_ms() - 15000;
+
         assert_eq!(calculate_quality_multiplier(&conn), 1.2);
 
         // Test connection with recent NAK (< 2 seconds ago) - heavy penalty

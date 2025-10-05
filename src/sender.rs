@@ -21,7 +21,20 @@ use crate::utils::now_ms;
 
 pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
+pub const SEQUENCE_TRACKING_MAX_AGE_MS: u64 = 5000;
+pub const SEQUENCE_MAP_CLEANUP_INTERVAL_MS: u64 = 5000;
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
+
+pub(crate) struct SequenceTrackingEntry {
+    pub(crate) conn_id: u64,
+    pub(crate) timestamp_ms: u64,
+}
+
+impl SequenceTrackingEntry {
+    fn is_expired(&self, current_time_ms: u64) -> bool {
+        current_time_ms.saturating_sub(self.timestamp_ms) > SEQUENCE_TRACKING_MAX_AGE_MS
+    }
+}
 
 pub struct PendingConnectionChanges {
     pub new_ips: Option<Vec<IpAddr>>,
@@ -90,42 +103,17 @@ pub async fn run_sender_with_toggles(
         });
     }
 
-    // Main packet processing loop variables
-    #[allow(unused_variables, unused_mut)]
     let mut recv_buf = vec![0u8; MTU];
-    #[allow(unused_variables, unused_mut)]
-    let mut housekeeping_timer = time::interval(Duration::from_millis(1)); // Frequent timer for periodic tasks
-    #[allow(unused_variables, unused_mut)]
+    let mut housekeeping_timer = time::interval(Duration::from_millis(1));
     let mut status_counter: u64 = 0;
-    #[allow(unused_variables, unused_mut)]
     let mut last_client_addr: Option<SocketAddr> = None;
-    // Sequence → connection index mapping for correct NAK attribution
-    #[allow(unused_variables, unused_mut)]
-    let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
-    #[allow(unused_variables, unused_mut)]
+    let mut seq_to_conn: HashMap<u32, SequenceTrackingEntry> =
+        HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
     let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
-    // Stickiness
-    #[allow(unused_variables, unused_mut)]
-    let mut last_selected_idx: Option<usize> = None;
-    #[allow(unused_variables, unused_mut)]
-    let mut last_switch_time: Option<Instant> = None;
-    // Connection failure tracking
-    #[allow(unused_variables, unused_mut)]
-    let mut all_failed_at: Option<Instant> = None;
-
-    // Pending connection changes (applied safely between processing cycles)
-    #[allow(unused_variables, unused_mut)]
-    let mut pending_changes: Option<PendingConnectionChanges> = None;
-    // Sequence → connection index mapping for correct NAK attribution
-    let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
-    let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
-    // Stickiness
+    let mut last_sequence_cleanup_ms: u64 = 0;
     let mut last_selected_idx: Option<usize> = None;
     let mut last_switch_time: Option<Instant> = None;
-    // Connection failure tracking
     let mut all_failed_at: Option<Instant> = None;
-
-    // Pending connection changes (applied safely between processing cycles)
     let mut pending_changes: Option<PendingConnectionChanges> = None;
 
     // Prepare SIGHUP stream (Unix only)
@@ -136,7 +124,6 @@ pub async fn run_sender_with_toggles(
     // Main loop - run housekeeping frequently like C version
     #[cfg(unix)]
     loop {
-        // Run housekeeping frequently (like C version does every main loop iteration)
         {
             let classic = toggles
                 .classic_mode
@@ -148,33 +135,51 @@ pub async fn run_sender_with_toggles(
                 last_client_addr,
                 &local_listener,
                 &mut seq_to_conn,
+                &mut seq_order,
+                &mut last_sequence_cleanup_ms,
                 classic,
                 &mut all_failed_at,
             )
             .await;
         }
 
+        // Apply pending connection changes immediately (like C srtla_send)
+        // This matches C behavior: SIGHUP sets flag, next loop iteration applies changes
+        if let Some(changes) = pending_changes.take()
+            && let Some(new_ips) = changes.new_ips
+        {
+            info!("applying queued connection changes: {} IPs", new_ips.len());
+            apply_connection_changes(
+                &mut connections,
+                &new_ips,
+                &changes.receiver_host,
+                changes.receiver_port,
+                &mut last_selected_idx,
+                &mut seq_to_conn,
+                &mut seq_order,
+            )
+            .await;
+            info!("connection changes applied successfully");
+        }
+
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
-                handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
+                handle_srt_packet(
+                    res,
+                    &mut recv_buf,
+                    &mut connections,
+                    &mut last_selected_idx,
+                    &mut last_switch_time,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &mut last_client_addr,
+                    &shared_client_addr,
+                    reg.has_connected,
+                    &toggles,
+                )
+                .await;
             }
             _ = housekeeping_timer.tick() => {
-                // Apply any pending connection changes at a safe point
-                if let Some(changes) = pending_changes.take()
-                    && let Some(new_ips) = changes.new_ips {
-                        info!("applying queued connection changes: {} IPs", new_ips.len());
-                        apply_connection_changes(
-                            &mut connections,
-                            &new_ips,
-                            &changes.receiver_host,
-                            changes.receiver_port,
-                            &mut last_selected_idx,
-                            &mut seq_to_conn,
-                             &mut seq_order,
-                        ).await;
-                        info!("connection changes applied successfully");
-                    }
-
                 // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
                 status_counter = status_counter.wrapping_add(1);
                 if status_counter.is_multiple_of(30000) {
@@ -197,7 +202,6 @@ pub async fn run_sender_with_toggles(
 
     #[cfg(not(unix))]
     loop {
-        // Run housekeeping frequently (like C version does every main loop iteration)
         {
             let classic = toggles
                 .classic_mode
@@ -209,34 +213,50 @@ pub async fn run_sender_with_toggles(
                 last_client_addr,
                 &local_listener,
                 &mut seq_to_conn,
+                &mut seq_order,
+                &mut last_sequence_cleanup_ms,
                 classic,
                 &mut all_failed_at,
             )
             .await;
         }
 
+        // Apply pending connection changes immediately (like C srtla_send)
+        if let Some(changes) = pending_changes.take() {
+            if let Some(new_ips) = changes.new_ips {
+                info!("applying queued connection changes: {} IPs", new_ips.len());
+                apply_connection_changes(
+                    &mut connections,
+                    &new_ips,
+                    &changes.receiver_host,
+                    changes.receiver_port,
+                    &mut last_selected_idx,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                )
+                .await;
+                info!("connection changes applied successfully");
+            }
+        }
+
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
-                handle_srt_packet(res, &mut recv_buf, &mut connections, &mut last_selected_idx, &mut last_switch_time, &mut seq_to_conn, &mut seq_order, &mut last_client_addr, &shared_client_addr, &toggles).await;
+                handle_srt_packet(
+                    res,
+                    &mut recv_buf,
+                    &mut connections,
+                    &mut last_selected_idx,
+                    &mut last_switch_time,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &mut last_client_addr,
+                    &shared_client_addr,
+                    reg.has_connected,
+                    &toggles,
+                )
+                .await;
             }
             _ = housekeeping_timer.tick() => {
-                // Apply any pending connection changes at a safe point
-                if let Some(changes) = pending_changes.take() {
-                    if let Some(new_ips) = changes.new_ips {
-                        info!("applying queued connection changes: {} IPs", new_ips.len());
-                        apply_connection_changes(
-                            &mut connections,
-                            &new_ips,
-                            &changes.receiver_host,
-                            changes.receiver_port,
-                            &mut last_selected_idx,
-                            &mut seq_to_conn,
-                            &mut seq_order,
-                        ).await;
-                        info!("connection changes applied successfully");
-                    }
-                }
-
                 // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
                 status_counter = status_counter.wrapping_add(1);
                 if status_counter.is_multiple_of(30000) {
@@ -254,10 +274,11 @@ async fn handle_srt_packet(
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
     last_switch_time: &mut Option<Instant>,
-    seq_to_conn: &mut HashMap<u32, usize>,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
     shared_client_addr: &Arc<Mutex<Option<SocketAddr>>>,
+    registration_complete: bool,
     toggles: &DynamicToggles,
 ) {
     match res {
@@ -267,6 +288,47 @@ async fn handle_srt_packet(
             }
             let pkt = &recv_buf[..n];
             let seq = protocol::get_srt_sequence_number(pkt);
+            if !registration_complete {
+                let sel_idx = if let Some(idx) = last_selected_idx {
+                    if let Some(conn) = connections.get(*idx) {
+                        if conn.connected && !conn.is_timed_out() {
+                            Some(*idx)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    connections
+                        .iter()
+                        .enumerate()
+                        .find(|(_, c)| !c.is_timed_out())
+                        .map(|(i, _)| i)
+                        .or_else(|| {
+                            connections
+                                .first()
+                                .and_then(|c| if !c.is_timed_out() { Some(0) } else { None })
+                        })
+                };
+                if let Some(sel_idx) = sel_idx {
+                    forward_via_connection(
+                        sel_idx,
+                        pkt,
+                        seq,
+                        connections,
+                        last_selected_idx,
+                        last_switch_time,
+                        seq_to_conn,
+                        seq_order,
+                        last_client_addr,
+                        shared_client_addr,
+                        src,
+                    )
+                    .await;
+                }
+                return;
+            }
             // pick best connection (respect dynamic stickiness toggle)
             let enable_stick = toggles
                 .stickiness_enabled
@@ -304,45 +366,20 @@ async fn handle_srt_packet(
                 Instant::now(),
             );
             if let Some(sel_idx) = sel_idx {
-                // Safe access - connection changes only happen between processing cycles
-                if sel_idx < connections.len() {
-                    // record stickiness
-                    if *last_selected_idx != Some(sel_idx) {
-                        if let Some(prev_idx) = *last_selected_idx {
-                            if prev_idx < connections.len() {
-                                debug!(
-                                    "Connection switch: {} → {} (seq: {:?})",
-                                    connections[prev_idx].label, connections[sel_idx].label, seq
-                                );
-                            }
-                        } else {
-                            debug!(
-                                "Initial connection selected: {} (seq: {:?})",
-                                connections[sel_idx].label, seq
-                            );
-                        }
-                        *last_selected_idx = Some(sel_idx);
-                        *last_switch_time = Some(Instant::now());
-                    }
-                    let conn = &mut connections[sel_idx];
-                    if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
-                        warn!(
-                            "{}: sendto() failed, marking for recovery: {}",
-                            conn.label, e
-                        );
-                        conn.mark_for_recovery();
-                    }
-                    if let Some(s) = seq {
-                        // track mapping
-                        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
-                            && let Some(old) = seq_order.pop_front()
-                        {
-                            seq_to_conn.remove(&old);
-                        }
-                        seq_to_conn.insert(s, sel_idx);
-                        seq_order.push_back(s);
-                    }
-                }
+                forward_via_connection(
+                    sel_idx,
+                    pkt,
+                    seq,
+                    connections,
+                    last_selected_idx,
+                    last_switch_time,
+                    seq_to_conn,
+                    seq_order,
+                    last_client_addr,
+                    shared_client_addr,
+                    src,
+                )
+                .await;
             } else {
                 warn!("no available connection to forward packet from {}", src);
             }
@@ -357,16 +394,85 @@ async fn handle_srt_packet(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn forward_via_connection(
+    sel_idx: usize,
+    pkt: &[u8],
+    seq: Option<u32>,
+    connections: &mut [SrtlaConnection],
+    last_selected_idx: &mut Option<usize>,
+    last_switch_time: &mut Option<Instant>,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    last_client_addr: &mut Option<SocketAddr>,
+    shared_client_addr: &Arc<Mutex<Option<SocketAddr>>>,
+    src: SocketAddr,
+) {
+    if sel_idx >= connections.len() {
+        return;
+    }
+    if *last_selected_idx != Some(sel_idx) {
+        if let Some(prev_idx) = *last_selected_idx {
+            if prev_idx < connections.len() {
+                debug!(
+                    "Connection switch: {} → {} (seq: {:?})",
+                    connections[prev_idx].label, connections[sel_idx].label, seq
+                );
+            }
+        } else {
+            debug!(
+                "Initial connection selected: {} (seq: {:?})",
+                connections[sel_idx].label, seq
+            );
+        }
+        *last_selected_idx = Some(sel_idx);
+        *last_switch_time = Some(Instant::now());
+    }
+    let conn = &mut connections[sel_idx];
+    if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
+        warn!(
+            "{}: sendto() failed, marking for recovery: {}",
+            conn.label, e
+        );
+        conn.mark_for_recovery();
+    }
+    if let Some(s) = seq {
+        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
+            && let Some(old) = seq_order.pop_front()
+        {
+            seq_to_conn.remove(&old);
+        }
+        seq_to_conn.insert(
+            s,
+            SequenceTrackingEntry {
+                conn_id: connections[sel_idx].conn_id,
+                timestamp_ms: now_ms(),
+            },
+        );
+        seq_order.push_back(s);
+    }
+    *last_client_addr = Some(src);
+    if let Ok(mut addr_guard) = shared_client_addr.lock() {
+        *addr_guard = Some(src);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
     instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
-    seq_to_conn: &mut HashMap<u32, usize>,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    last_sequence_cleanup_ms: &mut u64,
     classic: bool,
     all_failed_at: &mut Option<Instant>,
 ) -> Result<()> {
+    // If we're waiting on a REG2 response past the timeout, proactively retry REG1
+    let current_ms = now_ms();
+    let _ = reg.clear_pending_if_timed_out(current_ms);
+
     // housekeeping: receive responses, drive registration, send keepalives
     for i in 0..connections.len() {
         let incoming = connections[i].drain_incoming(i, reg, instant_tx).await?;
@@ -379,9 +485,8 @@ async fn handle_housekeeping(
             }
         }
 
-        // Process SRTLA ACKs: first find specific packet, then apply global +1 to all
-        // connections This matches the original implementation's
-        // register_srtla_ack behavior
+        // Process SRTLA ACKs: first find specific packet, then optionally apply
+        // classic-mode global recovery.
         for srtla_ack in incoming.srtla_ack_numbers.iter() {
             // Phase 1: Find the connection that sent this specific packet
             for c in connections.iter_mut() {
@@ -390,22 +495,29 @@ async fn handle_housekeeping(
                 }
             }
 
-            // Phase 2: Apply +1 window increase to ALL active connections
-            for c in connections.iter_mut() {
-                c.handle_srtla_ack_global();
+            // Phase 2: Classic mode mirrors the C implementation by bumping every
+            // active connection's window. Enhanced mode relies on the fine-grained
+            // Bond Bunny logic inside `handle_srtla_ack_specific` and skips the
+            // global +1 to avoid over-inflating other links.
+            if classic {
+                for c in connections.iter_mut() {
+                    c.handle_srtla_ack_global();
+                }
             }
         }
 
-        // NAK attribution to the connection that originally sent the packet
         for nak in incoming.nak_numbers.iter() {
-            if let Some(&idx) = seq_to_conn.get(nak) {
-                if let Some(conn) = connections.get_mut(idx) {
-                    conn.handle_nak(*nak as i32);
+            if let Some(entry) = seq_to_conn.get(nak) {
+                let current_time = now_ms();
+                if !entry.is_expired(current_time) {
+                    if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id)
+                    {
+                        conn.handle_nak(*nak as i32);
+                        continue;
+                    }
                 }
-            } else {
-                // Fallback: attribute to the connection that received the NAK
-                connections[i].handle_nak(*nak as i32);
             }
+            connections[i].handle_nak(*nak as i32);
         }
 
         // Forward responses back to local SRT client
@@ -413,6 +525,40 @@ async fn handle_housekeeping(
             for pkt in incoming.forward_to_client.iter() {
                 let _ = local_listener.send_to(pkt, client).await;
             }
+        }
+
+        // Simple reconnect-on-timeout, then allow reg driver to proceed
+        if connections[i].is_timed_out() {
+            if connections[i].should_attempt_reconnect() {
+                let label = connections[i].label.clone();
+                connections[i].record_reconnect_attempt();
+                warn!(
+                    "{} timed out; resetting connection state for recovery",
+                    label
+                );
+                // Use C-style recovery: reset state but keep socket alive
+                connections[i].mark_for_recovery();
+
+                match reg.pending_reg2_idx() {
+                    Some(idx) if idx == i => {
+                        info!("{} marked for recovery; re-sending REG1", label);
+                        reg.send_reg1_to(i, &mut connections[i]).await;
+                    }
+                    Some(_) => {
+                        debug!(
+                            "{} timed out but another uplink is awaiting REG2; deferring",
+                            label
+                        );
+                    }
+                    None => {
+                        info!("{} marked for recovery; re-sending REG2", label);
+                        reg.send_reg2_to(i, &mut connections[i]).await;
+                    }
+                }
+            } else {
+                debug!("{} timed out but in retry interval", connections[i].label);
+            }
+            continue;
         }
 
         if connections[i].needs_keepalive() {
@@ -424,26 +570,12 @@ async fn handle_housekeeping(
         if !classic {
             connections[i].perform_window_recovery();
         }
-        // Simple reconnect-on-timeout, then allow reg driver to proceed
-        if connections[i].is_timed_out() {
-            if connections[i].should_attempt_reconnect() {
-                connections[i].record_reconnect_attempt();
-                warn!(
-                    "{} timed out; resetting connection state for recovery",
-                    connections[i].label
-                );
-                // Use C-style recovery: reset state but keep socket alive
-                connections[i].mark_for_recovery();
-                info!(
-                    "{} marked for recovery; re-sending REG2",
-                    connections[i].label
-                );
-                reg.trigger_broadcast_reg2(connections).await;
-            } else {
-                debug!("{} timed out but in backoff period", connections[i].label);
-            }
-        }
     }
+
+    // Update active connections count (matches C implementation behavior)
+    // C code resets active_connections=0 then counts non-timed-out connections
+    reg.update_active_connections(connections);
+
     // drive registration (send REG1/REG2 as needed)
     reg.reg_driver_send_if_needed(connections).await;
 
@@ -476,11 +608,56 @@ async fn handle_housekeeping(
         *all_failed_at = None;
     }
 
+    cleanup_expired_sequence_tracking(seq_to_conn, seq_order, last_sequence_cleanup_ms);
+
     Ok(())
 }
 
-/// Calculate quality multiplier for a connection based on NAK history
-/// Returns a multiplier between 0.05 and 1.2
+fn cleanup_expired_sequence_tracking(
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    last_cleanup_ms: &mut u64,
+) {
+    let current_time = now_ms();
+    if current_time.saturating_sub(*last_cleanup_ms) < SEQUENCE_MAP_CLEANUP_INTERVAL_MS {
+        return;
+    }
+    *last_cleanup_ms = current_time;
+
+    let before_size = seq_to_conn.len();
+    let mut removed_count = 0;
+
+    seq_to_conn.retain(|_seq, entry| {
+        if entry.is_expired(current_time) {
+            removed_count += 1;
+            false
+        } else {
+            true
+        }
+    });
+
+    seq_order.retain(|seq| seq_to_conn.contains_key(seq));
+
+    if removed_count > 0 {
+        info!(
+            "Cleaned up {} stale sequence mappings ({} → {}, {:.1}% capacity)",
+            removed_count,
+            before_size,
+            seq_to_conn.len(),
+            (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0
+        );
+    }
+
+    if seq_to_conn.len() > (MAX_SEQUENCE_TRACKING as f64 * 0.8) as usize {
+        warn!(
+            "Sequence tracking at {:.1}% capacity ({}/{}) - consider review",
+            (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0,
+            seq_to_conn.len(),
+            MAX_SEQUENCE_TRACKING
+        );
+    }
+}
+
 pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
     use crate::utils::now_ms;
 
@@ -539,6 +716,9 @@ pub fn select_connection_idx(
         let mut best_score: i32 = -1;
 
         for (i, c) in conns.iter().enumerate() {
+            if c.is_timed_out() {
+                continue;
+            }
             let score = c.get_score();
             if score > best_score {
                 best_score = score;
@@ -554,6 +734,7 @@ pub fn select_connection_idx(
         now.duration_since(ts).as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
             && idx < conns.len()
             && conns[idx].connected
+            && !conns[idx].is_timed_out()
     } else {
         false
     };
@@ -566,6 +747,9 @@ pub fn select_connection_idx(
     let mut best_score: f64 = -1.0;
     let mut second_score: f64 = -1.0;
     for (i, c) in conns.iter().enumerate() {
+        if c.is_timed_out() {
+            continue;
+        }
         let base = c.get_score() as f64;
         let score = if !enable_quality {
             base
@@ -610,8 +794,12 @@ pub fn select_connection_idx(
 
     // Bond Bunny approach: if in stickiness window and last connection is still
     // good, keep it
-    if in_stickiness_window && best_idx == last_idx {
-        return best_idx; // Sticky to the best connection
+    if in_stickiness_window
+        && let Some(idx) = last_idx
+        && idx < conns.len()
+        && !conns[idx].is_timed_out()
+    {
+        return Some(idx);
     }
 
     // Allow switching if better connection found (prevents getting stuck on
@@ -639,13 +827,13 @@ pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     Ok(out)
 }
 
-pub async fn apply_connection_changes(
+pub(crate) async fn apply_connection_changes(
     connections: &mut Vec<SrtlaConnection>,
     new_ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
     last_selected_idx: &mut Option<usize>,
-    seq_to_conn: &mut HashMap<u32, usize>,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
 ) {
     use std::collections::HashSet;
@@ -660,24 +848,17 @@ pub async fn apply_connection_changes(
     let old_len = connections.len();
     connections.retain(|c| desired_labels.contains(&c.label));
 
-    // If connections were removed, reset selection state and clean up sequence
-    // tracking
+    // If connections were removed, reset selection state and remap sequence
+    // tracking to use stable conn_id instead of stale conn_idx
     if connections.len() != old_len {
         info!("removed {} stale connections", old_len - connections.len());
-        *last_selected_idx = None; // Reset selection to prevent index issues
+        *last_selected_idx = None;
 
-        // Clean up sequence tracking for removed connections
-        seq_to_conn.retain(|_, &mut conn_idx| conn_idx < connections.len());
+        // Retain only entries whose conn_id still exists in the connections vector
+        let valid_conn_ids: std::collections::HashSet<u64> =
+            connections.iter().map(|c| c.conn_id).collect();
+        seq_to_conn.retain(|_, entry| valid_conn_ids.contains(&entry.conn_id));
 
-        // Rebuild sequence tracking with correct indices
-        let mut new_seq_to_conn = HashMap::with_capacity(seq_to_conn.len());
-        for (seq, &old_idx) in seq_to_conn.iter() {
-            if old_idx < connections.len() {
-                new_seq_to_conn.insert(*seq, old_idx);
-            }
-        }
-        *seq_to_conn = new_seq_to_conn;
-        // Drop stale sequence IDs from the order queue
         seq_order.retain(|seq| seq_to_conn.contains_key(seq));
     }
 
@@ -726,9 +907,9 @@ pub async fn create_connections_from_ips(
 
 /// Comprehensive status monitoring for connections
 #[cfg_attr(not(unix), allow(dead_code))]
-pub fn log_connection_status(
+pub(crate) fn log_connection_status(
     connections: &[SrtlaConnection],
-    seq_to_conn: &HashMap<u32, usize>,
+    seq_to_conn: &HashMap<u32, SequenceTrackingEntry>,
     seq_order: &VecDeque<u32>,
     last_selected_idx: Option<usize>,
     toggles: &DynamicToggles,
@@ -759,10 +940,10 @@ pub fn log_connection_status(
         toggles.exploration_enabled.load(Ordering::Relaxed)
     );
 
-    // Show sequence tracking info
     info!(
-        "  Sequence tracking: {} mappings, {} in order queue",
+        "  Sequence tracking: {} mappings ({:.1}% capacity), {} in queue",
         seq_to_conn.len(),
+        (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0,
         seq_order.len()
     );
 
@@ -817,11 +998,14 @@ pub fn log_connection_status(
             i, status, conn.label, score_desc, last_recv, conn.window, conn.in_flight_packets
         );
 
-        // Show RTT info if available
         if conn.estimated_rtt_ms > 0.0 {
             info!(
-                "        RTT: {:.1}ms (last measured: {:.1}s ago)",
-                conn.estimated_rtt_ms,
+                "        RTT: smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, stable={} (last: \
+                 {:.1}s ago)",
+                conn.get_smooth_rtt_ms(),
+                conn.get_fast_rtt_ms(),
+                conn.get_rtt_jitter_ms(),
+                conn.is_rtt_stable(),
                 (now_ms().saturating_sub(conn.last_rtt_measurement_ms) as f64) / 1000.0
             );
         }

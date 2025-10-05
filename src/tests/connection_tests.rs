@@ -116,14 +116,11 @@ mod tests {
         // Now handle a NAK for that same packet
         conn.handle_nak(100);
 
-        // Since the packet was found in the log, the connection should NOT be penalized
+        assert!(conn.window < initial_window, "Window should shrink on NAK");
         assert_eq!(
-            conn.window, initial_window,
-            "Window should not be reduced when packet is found in log"
-        );
-        assert_eq!(
-            conn.nak_count, initial_nak_count,
-            "NAK count should not be incremented when packet is found in log"
+            conn.nak_count,
+            initial_nak_count + 1,
+            "NAK count should increment when packet is found"
         );
     }
 
@@ -349,21 +346,19 @@ mod tests {
         // Mark for recovery (C-style)
         conn.mark_for_recovery();
 
-        // Connection should still be connected (unlike mark_disconnected)
-        assert!(conn.connected);
+        // Connection should now be marked disconnected until registration succeeds
+        assert!(!conn.connected);
 
-        // But should be in recovery mode with reset state
-        assert!(conn.is_timed_out()); // Old timestamp should make it appear timed out
-        assert_eq!(conn.window, WINDOW_MIN * WINDOW_MULT);
+        // Should be in recovery mode with reset state
+        assert!(conn.is_timed_out());
+        assert_eq!(conn.window, WINDOW_DEF * WINDOW_MULT);
         assert_eq!(conn.in_flight_packets, 0);
 
-        // Score should still be calculated normally since connected=true, but with
-        // reset window
-        let expected_score = (WINDOW_MIN * WINDOW_MULT) / (0 + 1); // window / (in_flight + 1)
-        assert_eq!(conn.get_score(), expected_score);
+        // Score should now be -1 because the link is considered disconnected until REG3
+        assert_eq!(conn.get_score(), -1);
 
-        // Verify window was reset from initial value
-        assert!(conn.window < initial_window);
+        // Verify window was reset (note: WINDOW_DEF == initial_window by default)
+        assert_eq!(conn.window, initial_window);
     }
 
     #[test]
@@ -412,8 +407,9 @@ mod tests {
         assert!(conn.fast_recovery_mode);
 
         // Test recovery exit condition
-        conn.window = 15000;
-        conn.handle_srt_ack(200);
+        conn.window = 15_000;
+        conn.register_packet(200);
+        conn.handle_srtla_ack_specific(200, false);
 
         assert!(!conn.fast_recovery_mode);
     }

@@ -1,9 +1,9 @@
 use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{Context, Result};
+use smallvec::SmallVec;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
-// mpsc channel for instant forwarding
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -11,15 +11,30 @@ use crate::protocol::*;
 use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
 use crate::utils::now_ms;
 
+const NAK_SEARCH_LIMIT: usize = 64;
+const ACK_SEARCH_LIMIT: usize = 128;
+const NAK_BURST_WINDOW_MS: u64 = 1000;
+const NAK_BURST_LOG_THRESHOLD: i32 = 3;
+const NORMAL_UTILIZATION_THRESHOLD: f64 = 0.85;
+const FAST_UTILIZATION_THRESHOLD: f64 = 0.95;
+const NORMAL_ACKS_REQUIRED: i32 = 4;
+const FAST_ACKS_REQUIRED: i32 = 2;
+const NORMAL_MIN_WAIT_MS: u64 = 2000;
+const FAST_MIN_WAIT_MS: u64 = 500;
+const NORMAL_INCREMENT_WAIT_MS: u64 = 1000;
+const FAST_INCREMENT_WAIT_MS: u64 = 300;
+const FAST_RECOVERY_DISABLE_WINDOW: i32 = 12_000;
+
 pub struct SrtlaIncoming {
-    pub forward_to_client: Vec<Vec<u8>>,
-    pub ack_numbers: Vec<u32>,
-    pub nak_numbers: Vec<u32>,
-    pub srtla_ack_numbers: Vec<u32>,
+    pub forward_to_client: SmallVec<Vec<u8>, 4>,
+    pub ack_numbers: SmallVec<u32, 4>,
+    pub nak_numbers: SmallVec<u32, 4>,
+    pub srtla_ack_numbers: SmallVec<u32, 4>,
     pub read_any: bool,
 }
 
 pub struct SrtlaConnection {
+    pub(crate) conn_id: u64,
     #[cfg(feature = "test-internals")]
     pub socket: UdpSocket,
     #[cfg(not(feature = "test-internals"))]
@@ -81,6 +96,30 @@ pub struct SrtlaConnection {
     #[cfg(not(feature = "test-internals"))]
     pub(crate) last_rtt_measurement_ms: u64,
     #[cfg(feature = "test-internals")]
+    pub smooth_rtt_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) smooth_rtt_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub fast_rtt_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) fast_rtt_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub rtt_jitter_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) rtt_jitter_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub prev_rtt_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) prev_rtt_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub rtt_avg_delta_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) rtt_avg_delta_ms: f64,
+    #[cfg(feature = "test-internals")]
+    pub rtt_min_ms: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) rtt_min_ms: f64,
+    #[cfg(feature = "test-internals")]
     pub estimated_rtt_ms: f64,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) estimated_rtt_ms: f64,
@@ -135,6 +174,9 @@ pub struct SrtlaConnection {
 
 impl SrtlaConnection {
     pub async fn connect_from_ip(ip: IpAddr, host: &str, port: u16) -> Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
         let remote = resolve_remote(host, port).await?;
         let sock = bind_from_ip(ip, 0)?;
         sock.connect(&remote.into())?;
@@ -142,11 +184,12 @@ impl SrtlaConnection {
         std_sock.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(std_sock)?;
         Ok(Self {
+            conn_id: NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed),
             socket,
             remote,
             local_ip: ip,
             label: format!("{}:{} via {}", host, port, ip),
-            connected: true,
+            connected: false,
             window: WINDOW_DEF * WINDOW_MULT,
             in_flight_packets: 0,
             packet_log: [-1; PKT_LOG_SIZE],
@@ -157,6 +200,12 @@ impl SrtlaConnection {
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,
             last_rtt_measurement_ms: 0,
+            smooth_rtt_ms: 0.0,
+            fast_rtt_ms: 0.0,
+            rtt_jitter_ms: 0.0,
+            prev_rtt_ms: 0.0,
+            rtt_avg_delta_ms: 0.0,
+            rtt_min_ms: 200.0,
             estimated_rtt_ms: 0.0,
             nak_count: 0,
             last_nak_time_ms: 0,
@@ -172,18 +221,19 @@ impl SrtlaConnection {
         })
     }
 
+    #[inline]
     pub fn get_score(&self) -> i32 {
         if !self.connected {
             return -1;
         }
-        // Flow control: don't allow sending if at/over window limit
-        let max_in_flight = (self.window / WINDOW_MULT).max(1);
-        if self.in_flight_packets >= max_in_flight {
-            return 0; // Connection is at capacity
-        }
-        self.window / (self.in_flight_packets + 1)
+        // Mirror classic implementations: score is window divided by in-flight load.
+        // Use saturating_add to avoid overflow when the queue is extremely large and
+        // clamp the denominator to at least 1 to prevent division by zero.
+        let denom = self.in_flight_packets.saturating_add(1).max(1);
+        self.window / denom
     }
 
+    #[inline]
     pub async fn send_data_with_tracking(&mut self, data: &[u8], seq: Option<u32>) -> Result<()> {
         self.socket.send(data).await?;
         if let Some(s) = seq {
@@ -220,10 +270,10 @@ impl SrtlaConnection {
     ) -> Result<SrtlaIncoming> {
         let mut buf = [0u8; MTU];
         let mut read_any = false;
-        let mut forward: Vec<Vec<u8>> = Vec::new();
-        let mut acks: Vec<u32> = Vec::new();
-        let mut naks: Vec<u32> = Vec::new();
-        let mut srtla_acks: Vec<u32> = Vec::new();
+        let mut forward: SmallVec<Vec<u8>, 4> = SmallVec::new();
+        let mut acks: SmallVec<u32, 4> = SmallVec::new();
+        let mut naks: SmallVec<u32, 4> = SmallVec::new();
+        let mut srtla_acks: SmallVec<u32, 4> = SmallVec::new();
         loop {
             match self.socket.try_recv(&mut buf) {
                 Ok(n) => {
@@ -231,28 +281,45 @@ impl SrtlaConnection {
                         break;
                     }
                     read_any = true;
-                    self.last_received = Some(Instant::now());
+                    let recv_time = Instant::now();
                     let pt = get_packet_type(&buf[..n]);
                     if let Some(pt) = pt {
                         // registration first
                         if let Some(event) = reg.process_registration_packet(conn_idx, &buf[..n]) {
-                            // Set connection established timestamp when REG3 is received
-                            if matches!(event, RegistrationEvent::Reg3)
-                                && self.connection_established_ms == 0
-                            {
-                                self.connection_established_ms = crate::utils::now_ms();
+                            match event {
+                                RegistrationEvent::RegNgp => {
+                                    reg.try_send_reg1_immediately(conn_idx, self).await;
+                                }
+                                RegistrationEvent::Reg3 => {
+                                    self.connected = true;
+                                    self.last_received = Some(recv_time);
+                                    if self.connection_established_ms == 0 {
+                                        self.connection_established_ms = crate::utils::now_ms();
+                                    }
+                                    self.mark_reconnect_success();
+                                }
+                                RegistrationEvent::RegErr => {
+                                    self.connected = false;
+                                    self.last_received = None;
+                                }
+                                RegistrationEvent::Reg2 => {
+                                    // No state updates required for intermediate registration packets
+                                }
                             }
                             continue;
                         }
+                        self.last_received = Some(recv_time);
                         // Protocol handling
                         if pt == SRT_TYPE_ACK {
                             if let Some(ack) = parse_srt_ack(&buf[..n]) {
                                 acks.push(ack);
                             }
+                            // Create packet once and share it
+                            let ack_packet = buf[..n].to_vec();
                             // Instantly forward ACKs for minimal RTT
-                            let _ = instant_forwarder.send(buf[..n].to_vec());
+                            let _ = instant_forwarder.send(ack_packet.clone());
                             // Also add to regular batch for compatibility
-                            forward.push(buf[..n].to_vec());
+                            forward.push(ack_packet);
                         } else if pt == SRT_TYPE_NAK {
                             let nak_list = parse_srt_nak(&buf[..n]);
                             if !nak_list.is_empty() {
@@ -326,125 +393,61 @@ impl SrtlaConnection {
         let mut ack_send_time_ms: Option<u64> = None;
         let mut remaining_count = 0;
 
-        // Bond Bunny approach: mark acknowledged packets and recount remaining
-        for i in 0..PKT_LOG_SIZE {
+        for i in 0..ACK_SEARCH_LIMIT {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             let val = self.packet_log[idx];
             if val == ack {
-                // Mark this specific packet as acknowledged
                 self.packet_log[idx] = -1;
                 let t = self.packet_send_times_ms[idx];
                 if t != 0 {
                     ack_send_time_ms = Some(t);
                 }
             } else if val > 0 && val < ack {
-                // Cumulative ACK: mark older packets as acknowledged
                 self.packet_log[idx] = -1;
             } else if val > 0 {
-                // Count remaining unacknowledged packets
                 remaining_count += 1;
             }
         }
 
-        // Bond Bunny exact: recalculate in-flight count from scratch
         self.in_flight_packets = remaining_count;
 
-        // RTT from SRT ACK if we have a send timestamp
         if let Some(sent_ms) = ack_send_time_ms {
             let now = now_ms();
             let rtt = now.saturating_sub(sent_ms);
             if rtt > 0 && rtt <= 10_000 {
-                // Capture old RTT estimate before updating
-                let old_rtt_estimate = self.estimated_rtt_ms;
-
-                self.estimated_rtt_ms = if self.estimated_rtt_ms == 0.0 {
-                    rtt as f64
-                } else {
-                    (self.estimated_rtt_ms * 0.875) + (rtt as f64 * 0.125)
-                };
-                self.last_rtt_measurement_ms = now;
-
-                // Log significant RTT changes (>20% difference) using old value
-                let rtt_change_pct = if old_rtt_estimate > 0.0 {
-                    ((rtt as f64 - old_rtt_estimate) / old_rtt_estimate * 100.0).abs()
-                } else {
-                    100.0
-                };
-
-                if rtt_change_pct > 20.0 {
-                    debug!(
-                        "{}: RTT changed significantly: {} ms (was {:.1} ms, +{:.1}%)",
-                        self.label, rtt, old_rtt_estimate, rtt_change_pct
-                    );
-                }
+                self.update_rtt_estimate(rtt);
             }
-        }
-
-        // Window recovery with conservative parameters (aligned with Java defaults)
-        let now = now_ms();
-        if now.saturating_sub(self.last_window_increase_ms) > 200 {
-            let utilization_threshold: f64 = if self.fast_recovery_mode { 0.95 } else { 0.85 };
-            if (self.in_flight_packets as f64)
-                < (self.window as f64 * utilization_threshold / WINDOW_MULT as f64)
-            {
-                self.consecutive_acks_without_nak =
-                    self.consecutive_acks_without_nak.saturating_add(1);
-                let acks_required = if self.fast_recovery_mode { 2 } else { 4 };
-                if self.consecutive_acks_without_nak >= acks_required {
-                    let old = self.window;
-                    self.window += WINDOW_INCR;
-                    if self.window > WINDOW_MAX * WINDOW_MULT {
-                        self.window = WINDOW_MAX * WINDOW_MULT;
-                    }
-                    self.last_window_increase_ms = now;
-                    self.consecutive_acks_without_nak = 0;
-                    if (self.window - old) > 500 {
-                        debug!(
-                            "{}: Major window increase {} → {} (+{})",
-                            self.label,
-                            old,
-                            self.window,
-                            self.window - old
-                        );
-                    }
-                }
-            }
-        }
-        if self.fast_recovery_mode && self.window >= 12_000 {
-            self.fast_recovery_mode = false;
-            debug!(
-                "{}: Disabling FAST RECOVERY MODE - window {}",
-                self.label, self.window
-            );
         }
     }
 
     pub fn handle_nak(&mut self, seq: i32) {
-        for i in 0..PKT_LOG_SIZE.min(64) {
+        let mut found = false;
+        for i in 0..NAK_SEARCH_LIMIT {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             if self.packet_log[idx] == seq {
                 self.packet_log[idx] = -1;
-                return; // Found and processed - don't penalize this connection
+                found = true;
+                break;
             }
         }
 
-        // Track NAK statistics and bursts (matches Java implementation)
+        if !found {
+            debug!("{}: NAK seq {} not found in packet log", self.label, seq);
+        }
+
         self.nak_count = self.nak_count.saturating_add(1);
         let current_time = now_ms();
 
-        // Detect NAK bursts (multiple NAKs within 1 second)
-        if current_time.saturating_sub(self.last_nak_time_ms) < 1000 {
+        if current_time.saturating_sub(self.last_nak_time_ms) < NAK_BURST_WINDOW_MS {
             if self.nak_burst_count == 0 {
-                self.nak_burst_start_time_ms = current_time; // Start of burst
+                self.nak_burst_start_time_ms = self.last_nak_time_ms;
             }
             self.nak_burst_count = self.nak_burst_count.saturating_add(1);
         } else {
-            // End of burst - log if it was significant
-            if self.nak_burst_count >= 3 {
+            if self.nak_burst_count >= NAK_BURST_LOG_THRESHOLD {
                 let burst_duration = if self.nak_burst_start_time_ms > 0 {
                     current_time.saturating_sub(self.nak_burst_start_time_ms)
                 } else {
-                    // Fallback: estimate duration based on NAK count (assume ~100ms per NAK)
                     (self.nak_burst_count as u64) * 100
                 };
                 warn!(
@@ -452,19 +455,16 @@ impl SrtlaConnection {
                     self.label, self.nak_burst_count, burst_duration
                 );
             }
-            // Reset for new burst
             self.nak_burst_count = 1;
-            self.nak_burst_start_time_ms = current_time; // Start new burst
+            self.nak_burst_start_time_ms = current_time;
         }
 
         self.last_nak_time_ms = current_time;
         self.consecutive_acks_without_nak = 0;
 
-        // Decrease window (congestion response) - EXACT C implementation
-        let old = self.window;
+        let old_window = self.window;
         self.window = (self.window - WINDOW_DECR).max(WINDOW_MIN * WINDOW_MULT);
 
-        // Log window reduction for diagnosis (include burst info)
         if self.window <= 3000 {
             let burst_info = if self.nak_burst_count > 1 {
                 format!(" [BURST: {} NAKs]", self.nak_burst_count)
@@ -473,13 +473,13 @@ impl SrtlaConnection {
             };
             warn!(
                 "{}: NAK reduced window {} → {} (seq={}, total_naks={}{})",
-                self.label, old, self.window, seq, self.nak_count, burst_info
+                self.label, old_window, self.window, seq, self.nak_count, burst_info
             );
         }
 
         if self.window <= 2000 && !self.fast_recovery_mode {
             self.fast_recovery_mode = true;
-            self.fast_recovery_start_ms = self.last_nak_time_ms;
+            self.fast_recovery_start_ms = current_time;
             warn!(
                 "{}: Enabling FAST RECOVERY MODE - window {}",
                 self.label, self.window
@@ -494,7 +494,7 @@ impl SrtlaConnection {
         let mut found = false;
 
         // Search backwards through the packet log (most recent first)
-        for i in 0..PKT_LOG_SIZE {
+        for i in 0..ACK_SEARCH_LIMIT {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             if self.packet_log[idx] == seq {
                 found = true;
@@ -528,7 +528,7 @@ impl SrtlaConnection {
         }
 
         if !found {
-            // Not found in packet log
+            debug!("{}: ACK seq {} not found in packet log", self.label, seq);
         }
 
         found
@@ -545,9 +545,9 @@ impl SrtlaConnection {
         if current_time.saturating_sub(self.last_window_increase_ms) > 200 {
             // Utilization thresholds for enhanced mode
             let utilization_threshold = if self.fast_recovery_mode {
-                0.95 // FAST_UTILIZATION_THRESHOLD
+                FAST_UTILIZATION_THRESHOLD
             } else {
-                0.85 // NORMAL_UTILIZATION_THRESHOLD
+                NORMAL_UTILIZATION_THRESHOLD
             };
 
             if (self.in_flight_packets as f64)
@@ -557,7 +557,11 @@ impl SrtlaConnection {
                     self.consecutive_acks_without_nak.saturating_add(1);
 
                 // Conservative recovery - require more ACKs
-                let acks_required = if self.fast_recovery_mode { 2 } else { 4 };
+                let acks_required = if self.fast_recovery_mode {
+                    FAST_ACKS_REQUIRED
+                } else {
+                    NORMAL_ACKS_REQUIRED
+                };
 
                 if self.consecutive_acks_without_nak >= acks_required {
                     self.window += WINDOW_INCR;
@@ -582,6 +586,16 @@ impl SrtlaConnection {
                 self.in_flight_packets,
                 self.consecutive_acks_without_nak,
                 self.fast_recovery_mode
+            );
+        }
+
+        if self.fast_recovery_mode && self.window >= FAST_RECOVERY_DISABLE_WINDOW {
+            self.fast_recovery_mode = false;
+            let recovery_duration = current_time.saturating_sub(self.fast_recovery_start_ms);
+            debug!(
+                "{}: Disabling FAST RECOVERY MODE after enhanced ACK recovery (window={}, \
+                 duration={}ms)",
+                self.label, self.window, recovery_duration
             );
         }
     }
@@ -610,7 +624,105 @@ impl SrtlaConnection {
         }
     }
 
+    fn update_rtt_estimate(&mut self, rtt_ms: u64) {
+        let current_rtt = rtt_ms as f64;
+
+        // Initialize on first measurement
+        if self.smooth_rtt_ms == 0.0 {
+            self.smooth_rtt_ms = current_rtt;
+            self.fast_rtt_ms = current_rtt;
+            self.prev_rtt_ms = current_rtt;
+            self.estimated_rtt_ms = current_rtt;
+            self.last_rtt_measurement_ms = now_ms();
+            return;
+        }
+
+        // Asymmetric smoothing for smooth RTT: fast decrease, slow increase
+        if self.smooth_rtt_ms > current_rtt {
+            self.smooth_rtt_ms = self.smooth_rtt_ms * 0.60 + current_rtt * 0.40;
+        } else {
+            self.smooth_rtt_ms = self.smooth_rtt_ms * 0.96 + current_rtt * 0.04;
+        }
+
+        // Asymmetric smoothing for fast RTT: catches spikes quickly
+        if self.fast_rtt_ms > current_rtt {
+            self.fast_rtt_ms = self.fast_rtt_ms * 0.70 + current_rtt * 0.30;
+        } else {
+            self.fast_rtt_ms = self.fast_rtt_ms * 0.90 + current_rtt * 0.10;
+        }
+
+        // Track RTT change rate
+        let delta_rtt = current_rtt - self.prev_rtt_ms;
+        self.rtt_avg_delta_ms = self.rtt_avg_delta_ms * 0.8 + delta_rtt * 0.2;
+        self.prev_rtt_ms = current_rtt;
+
+        // Track minimum RTT with slow decay, only update when stable
+        self.rtt_min_ms *= 1.001;
+        if current_rtt < self.rtt_min_ms && self.rtt_avg_delta_ms.abs() < 1.0 {
+            self.rtt_min_ms = current_rtt;
+        }
+
+        // Track peak deviation with exponential decay
+        self.rtt_jitter_ms *= 0.99;
+        if delta_rtt.abs() > self.rtt_jitter_ms {
+            self.rtt_jitter_ms = delta_rtt.abs();
+        }
+
+        // Update legacy field for backwards compatibility
+        self.estimated_rtt_ms = self.smooth_rtt_ms;
+        self.last_rtt_measurement_ms = now_ms();
+
+        // Log significant RTT changes for debugging
+        if delta_rtt.abs() > 20.0 || self.rtt_jitter_ms > 50.0 {
+            debug!(
+                "{}: RTT update - raw={:.1}ms, smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, \
+                 delta={:.1}ms, stable={}",
+                self.label,
+                current_rtt,
+                self.smooth_rtt_ms,
+                self.fast_rtt_ms,
+                self.rtt_jitter_ms,
+                self.rtt_avg_delta_ms,
+                self.is_rtt_stable()
+            );
+        }
+    }
+
+    pub fn is_rtt_stable(&self) -> bool {
+        self.rtt_avg_delta_ms.abs() < 1.0
+    }
+
+    pub fn get_smooth_rtt_ms(&self) -> f64 {
+        self.smooth_rtt_ms
+    }
+
+    pub fn get_fast_rtt_ms(&self) -> f64 {
+        self.fast_rtt_ms
+    }
+
+    pub fn get_rtt_jitter_ms(&self) -> f64 {
+        self.rtt_jitter_ms
+    }
+
+    #[allow(dead_code)]
+    pub fn get_rtt_min_ms(&self) -> f64 {
+        self.rtt_min_ms
+    }
+
+    #[allow(dead_code)]
+    pub fn get_rtt_avg_delta_ms(&self) -> f64 {
+        self.rtt_avg_delta_ms
+    }
+
     pub fn needs_rtt_measurement(&self) -> bool {
+        // Stay lightweight during initial registration: defer RTT probing until the
+        // connection has been fully established via REG3. This mirrors the C
+        // implementation, which does not measure RTT until a link is active, and
+        // avoids spamming keepalives while the uplink is still handshaking.
+        if self.connection_established_ms == 0 {
+            return false;
+        }
+
         self.connected
             && !self.waiting_for_keepalive_response
             && (self.last_rtt_measurement_ms == 0
@@ -630,9 +742,12 @@ impl SrtlaConnection {
             let now = now_ms();
             let rtt = now.saturating_sub(ts);
             if rtt <= 10_000 {
-                // Keepalive RTT is informational only; prefer SRT ACK-based RTT for accuracy
-                // still update timestamp to throttle RTT measurements
-                self.last_rtt_measurement_ms = now;
+                self.update_rtt_estimate(rtt);
+                info!(
+                    "{}: RTT from keepalive: {}ms (smooth: {:.1}ms, fast: {:.1}ms, jitter: \
+                     {:.1}ms)",
+                    self.label, rtt, self.smooth_rtt_ms, self.fast_rtt_ms, self.rtt_jitter_ms
+                );
             }
         }
         self.waiting_for_keepalive_response = false;
@@ -652,53 +767,66 @@ impl SrtlaConnection {
 
         let now = now_ms();
         let time_since_last_nak = if self.last_nak_time_ms > 0 {
-            Some(now.saturating_sub(self.last_nak_time_ms))
+            now.saturating_sub(self.last_nak_time_ms)
         } else {
-            None
+            u64::MAX
         };
 
-        // Enhanced mode conservative recovery with fast mode support
-        if let Some(tsn) = time_since_last_nak {
-            // Conservative recovery timing (matches Bond Bunny)
-            let min_wait_time = if self.fast_recovery_mode { 500 } else { 2000 };
-            let increment_wait = if self.fast_recovery_mode { 300 } else { 1000 };
+        let min_wait_time = if self.fast_recovery_mode {
+            FAST_MIN_WAIT_MS
+        } else {
+            NORMAL_MIN_WAIT_MS
+        };
+        let increment_wait = if self.fast_recovery_mode {
+            FAST_INCREMENT_WAIT_MS
+        } else {
+            NORMAL_INCREMENT_WAIT_MS
+        };
 
-            if tsn > min_wait_time
-                && now.saturating_sub(self.last_window_increase_ms) > increment_wait
-            {
-                let old = self.window;
-                let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
+        if time_since_last_nak > min_wait_time
+            && now.saturating_sub(self.last_window_increase_ms) > increment_wait
+        {
+            let old_window = self.window;
+            // Conservative recovery multipliers (using cached values)
+            let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
 
-                // Multi-tier recovery based on time since last NAK (Bond Bunny style)
-                if tsn > 10000 {
-                    // No NAKs for 10+ seconds: moderate recovery
-                    self.window += WINDOW_INCR * 2 * fast_mode_bonus;
-                } else if tsn > 7000 {
-                    // No NAKs for 7+ seconds: slow recovery
-                    self.window += WINDOW_INCR * fast_mode_bonus;
-                } else if tsn > 5000 {
-                    // No NAKs for 5+ seconds: very slow recovery
-                    self.window += WINDOW_INCR * fast_mode_bonus;
-                } else {
-                    // Recent NAKs: minimal recovery
-                    self.window += WINDOW_INCR * fast_mode_bonus;
-                }
+            // More conservative recovery based on how long since last NAK
+            if time_since_last_nak > 10_000 {
+                // No NAKs for 10+ seconds: moderate recovery (was 5s)
+                self.window += WINDOW_INCR * 2 * fast_mode_bonus;
+            } else if time_since_last_nak > 7_000 {
+                // No NAKs for 7+ seconds: slow recovery (was 3s)
+                self.window += WINDOW_INCR * fast_mode_bonus;
+            } else if time_since_last_nak > 5_000 {
+                // No NAKs for 5+ seconds: very slow recovery (was 1.5s)
+                self.window += WINDOW_INCR * fast_mode_bonus;
+            } else {
+                // Recent NAKs: minimal recovery (keep same as before)
+                self.window += WINDOW_INCR * fast_mode_bonus;
+            }
 
-                if self.window > WINDOW_MAX * WINDOW_MULT {
-                    self.window = WINDOW_MAX * WINDOW_MULT;
-                }
-                self.last_window_increase_ms = now;
+            if self.window > WINDOW_MAX * WINDOW_MULT {
+                self.window = WINDOW_MAX * WINDOW_MULT;
+            }
+            self.last_window_increase_ms = now;
 
-                if self.window > old {
-                    debug!(
-                        "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
-                        self.label,
-                        old,
-                        self.window,
-                        (tsn as f64) / 1000.0,
-                        self.fast_recovery_mode
-                    );
-                }
+            if self.window > old_window {
+                debug!(
+                    "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
+                    self.label,
+                    old_window,
+                    self.window,
+                    (time_since_last_nak as f64) / 1000.0,
+                    self.fast_recovery_mode
+                );
+            }
+
+            if self.fast_recovery_mode && self.window >= FAST_RECOVERY_DISABLE_WINDOW {
+                self.fast_recovery_mode = false;
+                debug!(
+                    "{}: Disabling FAST RECOVERY MODE after time-based recovery (window={})",
+                    self.label, self.window
+                );
             }
         }
     }
@@ -715,17 +843,15 @@ impl SrtlaConnection {
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
     pub fn mark_for_recovery(&mut self) {
-        // Use a timestamp from 1970 (like C's last_rcvd = 1) to indicate recovery
-        // needed
-        self.last_received = Instant::now()
-            .checked_sub(std::time::Duration::from_secs(86400))
-            .or_else(|| {
-                Instant::now().checked_sub(std::time::Duration::from_secs(
-                    crate::protocol::CONN_TIMEOUT + 1,
-                ))
-            });
+        self.last_received = None;
+        self.last_keepalive_ms = 0;
+        self.last_keepalive_sent_ms = 0;
+        self.waiting_for_keepalive_response = false;
+        self.connected = false;
         // Reset connection state like C version does
-        self.window = WINDOW_MIN * WINDOW_MULT;
+        // Reset to default window like classic implementation so reconnecting
+        // links can ramp quickly once registration completes.
+        self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
     }
@@ -751,20 +877,28 @@ impl SrtlaConnection {
     }
 
     pub fn should_attempt_reconnect(&self) -> bool {
-        const BASE_RECONNECT_DELAY_MS: u64 = 5000; // 5 seconds
-        const MAX_BACKOFF_DELAY_MS: u64 = 120000; // 2 minutes max
+        const BASE_RECONNECT_DELAY_MS: u64 = 5000;
+        const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
         const MAX_BACKOFF_COUNT: u32 = 5;
 
         let now = now_ms();
 
-        // First attempt is always allowed
+        if self.connection_established_ms == 0 {
+            // Match the C implementation during initial registration by retrying
+            // roughly once per housekeeping pass (~1s cadence).
+            if self.last_reconnect_attempt_ms == 0 {
+                return true;
+            }
+            return now.saturating_sub(self.last_reconnect_attempt_ms) >= 1000;
+        }
+
         if self.last_reconnect_attempt_ms == 0 {
             return true;
         }
 
         let time_since_last_attempt = now.saturating_sub(self.last_reconnect_attempt_ms);
-        let current_backoff_count = self.reconnect_failure_count.min(MAX_BACKOFF_COUNT);
-        let min_interval = BASE_RECONNECT_DELAY_MS * (1u64 << current_backoff_count);
+        let current_backoff = self.reconnect_failure_count.min(MAX_BACKOFF_COUNT);
+        let min_interval = BASE_RECONNECT_DELAY_MS.saturating_mul(1u64 << current_backoff);
         let backoff_delay = min_interval.min(MAX_BACKOFF_DELAY_MS);
 
         time_since_last_attempt >= backoff_delay
@@ -772,15 +906,31 @@ impl SrtlaConnection {
 
     pub fn record_reconnect_attempt(&mut self) {
         self.last_reconnect_attempt_ms = now_ms();
+
+        // For initial registration we keep retry cadence fast and skip backoff
+        if self.connection_established_ms == 0 {
+            debug!(
+                "{}: Initial registration retry scheduled (next attempt in ~1s)",
+                self.label
+            );
+            return;
+        }
+
         self.reconnect_failure_count = self.reconnect_failure_count.saturating_add(1);
 
+        const BASE_RECONNECT_DELAY_MS: u64 = 5000;
+        const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
         const MAX_BACKOFF_COUNT: u32 = 5;
-        let capped_count = self.reconnect_failure_count.min(MAX_BACKOFF_COUNT);
-        let delay_s = 5u64 * (1u64 << capped_count);
+
+        let current_backoff = self.reconnect_failure_count.min(MAX_BACKOFF_COUNT);
+        let min_interval = BASE_RECONNECT_DELAY_MS.saturating_mul(1u64 << current_backoff);
+        let next_delay = min_interval.min(MAX_BACKOFF_DELAY_MS);
 
         info!(
             "{}: Reconnect attempt #{}, next attempt in {}s",
-            self.label, self.reconnect_failure_count, delay_s
+            self.label,
+            self.reconnect_failure_count,
+            next_delay / 1000
         );
     }
 
@@ -811,6 +961,12 @@ impl SrtlaConnection {
         self.consecutive_acks_without_nak = 0;
         self.fast_recovery_mode = false;
         self.last_rtt_measurement_ms = 0;
+        self.smooth_rtt_ms = 0.0;
+        self.fast_rtt_ms = 0.0;
+        self.rtt_jitter_ms = 0.0;
+        self.prev_rtt_ms = 0.0;
+        self.rtt_avg_delta_ms = 0.0;
+        self.rtt_min_ms = 200.0;
         self.estimated_rtt_ms = 0.0;
         self.last_keepalive_ms = 0;
         self.last_keepalive_sent_ms = 0;

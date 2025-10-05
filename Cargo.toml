@@ -1,6 +1,7 @@
 [package]
+resolver = "3"
 name = "srtla_send"
-version = "2.2.1"
+version = "2.3.0"
 edition = "2024"
 description = "SRT transport proxy with link aggregation for connection bonding (sender-side)"
 license = "MIT"
@@ -10,6 +11,7 @@ homepage = "https://github.com/irlserver/srtla_send"
 readme = "README.md"
 keywords = ["srt", "streaming", "bonding", "aggregation", "networking"]
 categories = ["network-programming", "multimedia"]
+rust-version = "1.87"
 
 [dependencies]
 anyhow = "1.0"
@@ -28,6 +30,7 @@ tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
 socket2 = { version = "0.6", features = ["all"] }
 bytes = "1.10.1"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
+smallvec = "=2.0.0-alpha.11"
 
 [features]
 test-internals = []

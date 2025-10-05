@@ -73,8 +73,8 @@ mod tests {
         let handled = reg.process_registration_packet(2, &buf);
         assert!(handled.is_some());
 
-        // Should have incremented active connections and set has_connected
-        assert_eq!(reg.active_connections(), 1);
+        // REG3 should set has_connected flag
+        // Note: active_connections is updated by update_active_connections() during housekeeping
         assert!(reg.has_connected);
     }
 
@@ -94,10 +94,12 @@ mod tests {
         let handled = reg.process_registration_packet(1, &buf);
         assert!(handled.is_some());
 
-        // Should have cleared pending state
+        // Should clear pending state and wait for a new REG_NGP before retrying
+        let after = now_ms();
         assert_eq!(reg.pending_reg2_idx(), None);
         assert_eq!(reg.pending_timeout_at_ms(), 0);
         assert_eq!(reg.reg1_target_idx(), None);
+        assert!(reg.reg1_next_send_at_ms() >= after + REG2_TIMEOUT * 1000);
     }
 
     #[test]
@@ -116,6 +118,10 @@ mod tests {
     async fn test_reg_driver_initial_reg1() {
         let mut reg = SrtlaRegistrationManager::new();
         let mut connections = vec![create_test_connection().await];
+
+        let mut ngp = vec![0u8; 2];
+        ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
+        reg.process_registration_packet(0, &ngp);
 
         // Should send REG1 to first connection when no connections are active
         reg.reg_driver_send_if_needed(&mut connections).await;
@@ -142,6 +148,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reg_driver_waits_for_ngp() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![create_test_connection().await];
+
+        // Without REG_NGP, nothing should happen
+        reg.reg_driver_send_if_needed(&mut connections).await;
+        assert_eq!(reg.pending_reg2_idx(), None);
+
+        let mut ngp = vec![0u8; 2];
+        ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
+        reg.process_registration_packet(0, &ngp);
+
+        reg.reg_driver_send_if_needed(&mut connections).await;
+        assert_eq!(reg.pending_reg2_idx(), Some(0));
+    }
+
+    #[tokio::test]
     async fn test_broadcast_reg2() {
         let mut reg = SrtlaRegistrationManager::new();
         let mut connections = vec![
@@ -158,23 +181,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_trigger_broadcast_reg2() {
+    async fn test_send_reg1_to_sets_pending_state() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut connections = vec![
-            create_test_connection().await,
-            create_test_connection().await,
-        ];
+        let mut conn = create_test_connection().await;
 
-        reg.trigger_broadcast_reg2(&mut connections).await;
+        reg.send_reg1_to(0, &mut conn).await;
 
-        // This test mainly ensures the function doesn't panic
-        // and can be called successfully
+        assert_eq!(reg.pending_reg2_idx(), Some(0));
+        assert_eq!(reg.reg1_target_idx(), Some(0));
+        let now = now_ms();
+        assert!(reg.pending_timeout_at_ms() >= now);
+        assert!(reg.reg1_next_send_at_ms() >= now);
+        assert!(reg.reg1_next_send_at_ms() <= reg.pending_timeout_at_ms());
+    }
+
+    #[tokio::test]
+    async fn test_send_reg2_to_does_not_override_state() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut conn = create_test_connection().await;
+
+        // Pretend we already have pending state for another index
+        reg.set_pending_reg2_idx(Some(1));
+        reg.set_reg1_target_idx(Some(1));
+
+        reg.send_reg2_to(0, &mut conn).await;
+
+        // State should remain unchanged
+        assert_eq!(reg.pending_reg2_idx(), Some(1));
+        assert_eq!(reg.reg1_target_idx(), Some(1));
     }
 
     #[test]
-    fn test_multiple_reg3_connections() {
+    fn test_clear_pending_if_timed_out() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        let start = now_ms();
+        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_timeout_at_ms(start + 10);
+        reg.set_reg1_target_idx(Some(0));
+        reg.set_reg1_next_send_at_ms(start + 1000);
+
+        // Advance time beyond timeout
+        let cleared_time = start + 20;
+        let cleared = reg.clear_pending_if_timed_out(cleared_time);
+
+        assert_eq!(cleared, Some(0));
+        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_timeout_at_ms(), 0);
+        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.reg1_next_send_at_ms(), cleared_time);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_reg3_connections() {
         let mut reg = SrtlaRegistrationManager::new();
         let reg3_packet = vec![0x92, 0x02];
+
+        // Create 3 test connections
+        let connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
 
         // Simulate multiple REG3 responses
         for i in 0..3 {
@@ -182,8 +250,13 @@ mod tests {
             assert!(handled.is_some());
         }
 
-        assert_eq!(reg.active_connections(), 3);
         assert!(reg.has_connected);
+
+        // Update active connections count based on connection states
+        reg.update_active_connections(&connections);
+
+        // All 3 connections should be active (none timed out)
+        assert_eq!(reg.active_connections(), 3);
     }
 
     #[tokio::test]
@@ -203,9 +276,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_registration_state_transitions() {
+    #[tokio::test]
+    async fn test_registration_state_transitions() {
         let mut reg = SrtlaRegistrationManager::new();
+        let connections = vec![create_test_connection().await];
 
         // Initial state
         assert_eq!(reg.active_connections(), 0);
@@ -232,8 +306,11 @@ mod tests {
         let reg3_packet = vec![0x92, 0x02];
         reg.process_registration_packet(0, &reg3_packet);
 
-        assert_eq!(reg.active_connections(), 1);
         assert!(reg.has_connected);
+
+        // Update active connections count based on connection states
+        reg.update_active_connections(&connections);
+        assert_eq!(reg.active_connections(), 1);
     }
 
     #[test]
