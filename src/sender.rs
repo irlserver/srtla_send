@@ -307,7 +307,7 @@ async fn handle_srt_packet(
                         .map(|(i, _)| i)
                         .or_else(|| {
                             connections
-                                .get(0)
+                                .first()
                                 .and_then(|c| if !c.is_timed_out() { Some(0) } else { None })
                         })
                 };

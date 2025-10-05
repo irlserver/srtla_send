@@ -782,15 +782,21 @@ impl SrtlaConnection {
             && now.saturating_sub(self.last_window_increase_ms) > increment_wait
         {
             let old_window = self.window;
+            // Conservative recovery multipliers (using cached values)
             let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
 
+            // More conservative recovery based on how long since last NAK
             if time_since_last_nak > 10_000 {
+                // No NAKs for 10+ seconds: moderate recovery (was 5s)
                 self.window += WINDOW_INCR * 2 * fast_mode_bonus;
             } else if time_since_last_nak > 7_000 {
+                // No NAKs for 7+ seconds: slow recovery (was 3s)
                 self.window += WINDOW_INCR * fast_mode_bonus;
             } else if time_since_last_nak > 5_000 {
+                // No NAKs for 5+ seconds: very slow recovery (was 1.5s)
                 self.window += WINDOW_INCR * fast_mode_bonus;
             } else {
+                // Recent NAKs: minimal recovery (keep same as before)
                 self.window += WINDOW_INCR * fast_mode_bonus;
             }
 
