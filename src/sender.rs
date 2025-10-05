@@ -992,7 +992,8 @@ pub(crate) fn log_connection_status(
 
         if conn.estimated_rtt_ms > 0.0 {
             info!(
-                "        RTT: smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, stable={} (last: {:.1}s ago)",
+                "        RTT: smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, stable={} (last: \
+                 {:.1}s ago)",
                 conn.get_smooth_rtt_ms(),
                 conn.get_fast_rtt_ms(),
                 conn.get_rtt_jitter_ms(),

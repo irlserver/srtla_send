@@ -588,7 +588,8 @@ impl SrtlaConnection {
             self.fast_recovery_mode = false;
             let recovery_duration = current_time.saturating_sub(self.fast_recovery_start_ms);
             debug!(
-                "{}: Disabling FAST RECOVERY MODE after enhanced ACK recovery (window={}, duration={}ms)",
+                "{}: Disabling FAST RECOVERY MODE after enhanced ACK recovery (window={}, \
+                 duration={}ms)",
                 self.label, self.window, recovery_duration
             );
         }
@@ -669,7 +670,8 @@ impl SrtlaConnection {
         // Log significant RTT changes for debugging
         if delta_rtt.abs() > 20.0 || self.rtt_jitter_ms > 50.0 {
             debug!(
-                "{}: RTT update - raw={:.1}ms, smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, delta={:.1}ms, stable={}",
+                "{}: RTT update - raw={:.1}ms, smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, \
+                 delta={:.1}ms, stable={}",
                 self.label,
                 current_rtt,
                 self.smooth_rtt_ms,
@@ -737,7 +739,8 @@ impl SrtlaConnection {
             if rtt <= 10_000 {
                 self.update_rtt_estimate(rtt);
                 info!(
-                    "{}: RTT from keepalive: {}ms (smooth: {:.1}ms, fast: {:.1}ms, jitter: {:.1}ms)",
+                    "{}: RTT from keepalive: {}ms (smooth: {:.1}ms, fast: {:.1}ms, jitter: \
+                     {:.1}ms)",
                     self.label, rtt, self.smooth_rtt_ms, self.fast_rtt_ms, self.rtt_jitter_ms
                 );
             }
