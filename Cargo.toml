@@ -11,7 +11,7 @@ homepage = "https://github.com/irlserver/srtla_send"
 readme = "README.md"
 keywords = ["srt", "streaming", "bonding", "aggregation", "networking"]
 categories = ["network-programming", "multimedia"]
-rust-version = "1.85"
+rust-version = "1.87"
 
 [dependencies]
 anyhow = "1.0"
