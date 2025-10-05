@@ -7,8 +7,8 @@ use tokio::time::Instant;
 
 use crate::connection::SrtlaConnection;
 use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
+use crate::utils::now_ms;
 
-/// Creates a test connection instance for unit testing
 pub async fn create_test_connection() -> SrtlaConnection {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.set_nonblocking(true).unwrap();
@@ -48,11 +48,10 @@ pub async fn create_test_connection() -> SrtlaConnection {
         nak_burst_start_time_ms: 0,
         last_reconnect_attempt_ms: 0,
         reconnect_failure_count: 0,
-        connection_established_ms: 0,
+        connection_established_ms: now_ms(),
     }
 }
 
-/// Creates multiple test connections for testing connection selection
 pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
     let mut connections = Vec::new();
 
@@ -95,7 +94,7 @@ pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
             nak_burst_start_time_ms: 0,
             last_reconnect_attempt_ms: 0,
             reconnect_failure_count: 0,
-            connection_established_ms: 0,
+            connection_established_ms: now_ms(),
         };
         connections.push(conn);
     }
