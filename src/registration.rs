@@ -229,18 +229,20 @@ impl SrtlaRegistrationManager {
 
     pub fn clear_pending_if_timed_out(&mut self, now_ms_value: u64) -> Option<usize> {
         if let Some(idx) = self.pending_reg2_idx
-            && self.pending_timeout_at_ms != 0 && now_ms_value >= self.pending_timeout_at_ms {
-                warn!(
-                    "REG2 wait exceeded {}ms for uplink #{}; clearing pending handshake",
-                    REG2_TIMEOUT * 1000,
-                    idx
-                );
-                self.pending_reg2_idx = None;
-                self.pending_timeout_at_ms = 0;
-                self.reg1_target_idx = None;
-                self.reg1_next_send_at_ms = now_ms_value;
-                return Some(idx);
-            }
+            && self.pending_timeout_at_ms != 0
+            && now_ms_value >= self.pending_timeout_at_ms
+        {
+            warn!(
+                "REG2 wait exceeded {}ms for uplink #{}; clearing pending handshake",
+                REG2_TIMEOUT * 1000,
+                idx
+            );
+            self.pending_reg2_idx = None;
+            self.pending_timeout_at_ms = 0;
+            self.reg1_target_idx = None;
+            self.reg1_next_send_at_ms = now_ms_value;
+            return Some(idx);
+        }
         None
     }
 }

@@ -146,20 +146,21 @@ pub async fn run_sender_with_toggles(
         // Apply pending connection changes immediately (like C srtla_send)
         // This matches C behavior: SIGHUP sets flag, next loop iteration applies changes
         if let Some(changes) = pending_changes.take()
-            && let Some(new_ips) = changes.new_ips {
-                info!("applying queued connection changes: {} IPs", new_ips.len());
-                apply_connection_changes(
-                    &mut connections,
-                    &new_ips,
-                    &changes.receiver_host,
-                    changes.receiver_port,
-                    &mut last_selected_idx,
-                    &mut seq_to_conn,
-                    &mut seq_order,
-                )
-                .await;
-                info!("connection changes applied successfully");
-            }
+            && let Some(new_ips) = changes.new_ips
+        {
+            info!("applying queued connection changes: {} IPs", new_ips.len());
+            apply_connection_changes(
+                &mut connections,
+                &new_ips,
+                &changes.receiver_host,
+                changes.receiver_port,
+                &mut last_selected_idx,
+                &mut seq_to_conn,
+                &mut seq_order,
+            )
+            .await;
+            info!("connection changes applied successfully");
+        }
 
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
@@ -509,10 +510,11 @@ async fn handle_housekeeping(
             if let Some(entry) = seq_to_conn.get(nak) {
                 let current_time = now_ms();
                 if !entry.is_expired(current_time)
-                    && let Some(conn) = connections.get_mut(entry.conn_idx) {
-                        conn.handle_nak(*nak as i32);
-                        continue;
-                    }
+                    && let Some(conn) = connections.get_mut(entry.conn_idx)
+                {
+                    conn.handle_nak(*nak as i32);
+                    continue;
+                }
             }
             connections[i].handle_nak(*nak as i32);
         }
@@ -793,9 +795,11 @@ pub fn select_connection_idx(
     // good, keep it
     if in_stickiness_window
         && let Some(idx) = last_idx
-            && idx < conns.len() && !conns[idx].is_timed_out() {
-                return Some(idx);
-            }
+        && idx < conns.len()
+        && !conns[idx].is_timed_out()
+    {
+        return Some(idx);
+    }
 
     // Allow switching if better connection found (prevents getting stuck on
     // degraded connections)
