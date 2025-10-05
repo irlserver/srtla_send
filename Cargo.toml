@@ -1,4 +1,5 @@
 [package]
+resolver = "3"
 name = "srtla_send"
 version = "2.3.0"
 edition = "2024"
