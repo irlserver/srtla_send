@@ -52,7 +52,9 @@ impl SrtlaRegistrationManager {
         let pkt = create_reg1_packet(&self.srtla_id);
         debug!("queueing REG1 for uplink #{}", conn_idx);
         info!("REG1 → uplink #{} ({} bytes)", conn_idx, pkt.len());
-        let _ = conn.send_srtla_packet(&pkt).await;
+        if let Err(e) = conn.send_srtla_packet(&pkt).await {
+            warn!("Failed to send REG1 to uplink #{}: {:?}", conn_idx, e);
+        }
 
         let now = now_ms();
         self.pending_reg2_idx = Some(conn_idx);
@@ -66,7 +68,9 @@ impl SrtlaRegistrationManager {
         let pkt = create_reg2_packet(&self.srtla_id);
         debug!("queueing REG2 for uplink #{}", conn_idx);
         info!("REG2 → uplink #{} ({} bytes)", conn_idx, pkt.len());
-        let _ = conn.send_srtla_packet(&pkt).await;
+        if let Err(e) = conn.send_srtla_packet(&pkt).await {
+            warn!("Failed to send REG2 to uplink #{}: {:?}", conn_idx, e);
+        }
     }
 
     pub fn process_registration_packet(
@@ -108,7 +112,9 @@ impl SrtlaRegistrationManager {
                 if self.pending_reg2_idx.is_none() && now >= self.reg1_next_send_at_ms {
                     let pkt = create_reg1_packet(&self.srtla_id);
                     info!("REG1 → uplink #{} ({} bytes)", idx, pkt.len());
-                    let _ = connections[idx].send_srtla_packet(&pkt).await;
+                    if let Err(e) = connections[idx].send_srtla_packet(&pkt).await {
+                        warn!("Failed to send REG1 to uplink #{}: {:?}", idx, e);
+                    }
                     self.pending_reg2_idx = Some(idx);
                     self.pending_timeout_at_ms = now + REG2_TIMEOUT * 1000;
                     // throttle retries until next REG_NGP/timeout
