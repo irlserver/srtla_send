@@ -304,7 +304,11 @@ async fn handle_srt_packet(
                         .enumerate()
                         .find(|(_, c)| !c.is_timed_out())
                         .map(|(i, _)| i)
-                        .or(Some(0))
+                        .or_else(|| {
+                            connections
+                                .get(0)
+                                .and_then(|c| if !c.is_timed_out() { Some(0) } else { None })
+                        })
                 };
                 if let Some(sel_idx) = sel_idx {
                     forward_via_connection(
@@ -321,8 +325,8 @@ async fn handle_srt_packet(
                         src,
                     )
                     .await;
-                    return;
                 }
+                return;
             }
             // pick best connection (respect dynamic stickiness toggle)
             let enable_stick = toggles
