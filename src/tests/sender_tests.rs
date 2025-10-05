@@ -164,6 +164,19 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Verifies that apply_connection_changes removes stale connections and cleans related tracking state.
+    ///
+    /// This test ensures that when the set of IPs changes to a subset (plus new addresses), the connections
+    /// vector is pruned accordingly, the last selected index is cleared, and sequence-tracking structures
+    /// (`seq_to_conn` and `seq_order`) are trimmed to reflect remaining tracked sequences.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Arrange: create connections, a reduced new IP list, a last selected index, and sequence tracking.
+    /// // Act: call apply_connection_changes to apply the new IP set.
+    /// // Assert: connections are reduced, last_selected_idx is None, and seq tracking sizes are consistent.
+    /// ```
     #[test]
     fn test_apply_connection_changes_remove_stale() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -341,6 +354,24 @@ mod tests {
         assert!(!explore);
     }
 
+    /// Verifies `calculate_quality_multiplier` produces expected multipliers for different
+    /// connection ages, NAK timings, NAK counts, and NAK burst scenarios.
+    ///
+    /// The test asserts the multiplier behavior for:
+    /// - a long-established connection (bonus),
+    /// - recent NAKs (< 2s, heavy penalty),
+    /// - NAKs 3–5s ago (moderate penalty),
+    /// - NAKs 5–10s ago (light penalty),
+    /// - NAKs >10s ago with zero total NAKs (bonus),
+    /// - NAKs >10s ago with some total NAKs (neutral),
+    /// - burst NAK penalty applied on top of time-based penalty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // This test is run as part of the crate's test suite:
+    /// // cargo test --lib
+    /// ```
     #[test]
     fn test_calculate_quality_multiplier() {
         let rt = tokio::runtime::Runtime::new().unwrap();

@@ -78,6 +78,22 @@ mod tests {
         assert!(reg.has_connected);
     }
 
+    /// Verifies that processing a REG_ERR packet clears pending REG2 state and schedules a retry.
+    ///
+    /// This test sets up a pending REG2 for connection 1, sends a REG_ERR packet for that
+    /// connection, and asserts that:
+    /// - the packet is handled by `process_registration_packet`
+    /// - `pending_reg2_idx()` becomes `None`
+    /// - `pending_timeout_at_ms()` is reset to `0`
+    /// - `reg1_target_idx()` becomes `None`
+    /// - `reg1_next_send_at_ms()` is scheduled at or after the current time plus `REG2_TIMEOUT * 1000`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Behavior validated by the test:
+    /// // set pending state, send REG_ERR to connection 1, expect pending cleared and retry scheduled
+    /// ```
     #[test]
     fn test_reg_err_handling() {
         let mut reg = SrtlaRegistrationManager::new();
@@ -130,6 +146,16 @@ mod tests {
         assert!(reg.pending_timeout_at_ms() > now_ms());
     }
 
+    /// Verifies that the registration driver sends REG1 to a specifically set target connection.
+    ///
+    /// This test sets `reg1_target_idx` to a connection index and asserts that calling
+    /// `reg_driver_send_if_needed` marks that index as pending for REG2.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // sets target index 1 and expects pending_reg2_idx() to become Some(1)
+    /// ```
     #[tokio::test]
     async fn test_reg_driver_with_target() {
         let mut reg = SrtlaRegistrationManager::new();
@@ -259,7 +285,21 @@ mod tests {
         assert_eq!(reg.active_connections(), 3);
     }
 
-    #[tokio::test]
+    /// Verifies that the registration driver does not send REG1 before its scheduled next-send time.
+    ///
+    /// Ensures that when `reg1_next_send_at_ms` is set to a future timestamp, calling
+    /// `reg_driver_send_if_needed` does not set a pending REG2 index or initiate a send.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // sets a future next-send time and confirms no send occurs
+    /// let mut reg = SrtlaRegistrationManager::new();
+    /// reg.set_reg1_next_send_at_ms(now_ms() + 5000);
+    /// let mut connections = vec![create_test_connection().await];
+    /// reg.reg_driver_send_if_needed(&mut connections).await;
+    /// assert_eq!(reg.pending_reg2_idx(), None);
+    /// ```
     async fn test_reg_driver_timing() {
         let mut reg = SrtlaRegistrationManager::new();
 

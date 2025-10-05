@@ -9,6 +9,29 @@ use crate::connection::SrtlaConnection;
 use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
 use crate::utils::now_ms;
 
+/// Create a preconfigured SrtlaConnection bound to a local ephemeral UDP port and targeting 127.0.0.1:8080 for use in tests.
+
+///
+
+/// The returned connection is marked connected and has default/test-friendly initial values for windowing, RTT metrics, packet logs, and timestamps.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// let conn = tokio::runtime::Runtime::new().unwrap().block_on(create_test_connection());
+
+/// assert_eq!(conn.remote.ip().to_string(), "127.0.0.1");
+
+/// assert_eq!(conn.remote.port(), 8080);
+
+/// assert!(conn.connected);
+
+/// ```
 pub async fn create_test_connection() -> SrtlaConnection {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.set_nonblocking(true).unwrap();
@@ -52,6 +75,23 @@ pub async fn create_test_connection() -> SrtlaConnection {
     }
 }
 
+/// Create multiple test SrtlaConnection instances with distinct local addresses and incrementing remote ports.
+///
+/// Each connection is bound to an ephemeral local UDP port on 127.0.0.1, uses a unique local IP (192.168.1.10 + index),
+/// and targets remote port 8080 + index. Connections are pre-initialized with default transport and RTT-related metrics
+/// suitable for unit tests.
+///
+/// # Returns
+///
+/// A `Vec<SrtlaConnection>` containing `count` constructed connections.
+///
+/// # Examples
+///
+/// ```
+/// let rt = tokio::runtime::Runtime::new().unwrap();
+/// let conns = rt.block_on(create_test_connections(2));
+/// assert_eq!(conns.len(), 2);
+/// ```
 pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
     let mut connections = Vec::new();
 

@@ -31,6 +31,19 @@ pub(crate) struct SequenceTrackingEntry {
 }
 
 impl SequenceTrackingEntry {
+    /// Returns whether this entry's timestamp is older than SEQUENCE_TRACKING_MAX_AGE_MS.
+    ///
+    /// The entry is considered expired when `current_time_ms - timestamp_ms > SEQUENCE_TRACKING_MAX_AGE_MS`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let e = SequenceTrackingEntry { conn_idx: 0, timestamp_ms: 1_000 };
+    /// // Exactly at the threshold is not expired
+    /// assert!(!e.is_expired(1_000 + SEQUENCE_TRACKING_MAX_AGE_MS));
+    /// // One millisecond past the threshold is expired
+    /// assert!(e.is_expired(1_000 + SEQUENCE_TRACKING_MAX_AGE_MS + 1));
+    /// ```
     fn is_expired(&self, current_time_ms: u64) -> bool {
         current_time_ms.saturating_sub(self.timestamp_ms) > SEQUENCE_TRACKING_MAX_AGE_MS
     }
@@ -42,6 +55,38 @@ pub struct PendingConnectionChanges {
     pub receiver_port: u16,
 }
 
+/// Start the SRT sender main loop using the provided uplink configuration and runtime toggles.
+///
+/// This binds a local UDP listener, loads uplink IPs from `ips_file`, establishes connections
+/// to the receiver, spawns an instant-ACK forwarder, and runs continuous housekeeping and
+/// packet-forwarding logic until an error or termination occurs. On Unix, a SIGHUP triggers
+/// reloading of the uplink IP list (queued and applied on the next main loop iteration).
+///
+/// # Returns
+///
+/// `Ok(())` on successful startup and execution; `Err` if initialization fails (for example,
+/// reading the IP list, creating uplinks, or binding the local UDP listener).
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use tokio::time;
+///
+/// // Construct toggles appropriately for your program; this example assumes a default.
+/// let toggles = DynamicToggles::default();
+///
+/// // Run the sender in a tokio runtime (no_run to avoid executing in doc tests).
+/// tokio::spawn(async move {
+///     let _ = run_sender_with_toggles(9000, "receiver.example.com", 9001, "/etc/uplinks.txt", toggles).await;
+/// });
+///
+/// // Keep the example alive briefly to illustrate runtime usage.
+/// let mut rt = tokio::runtime::Runtime::new().unwrap();
+/// rt.block_on(async {
+///     time::sleep(Duration::from_millis(10)).await;
+/// });
+/// ```
 pub async fn run_sender_with_toggles(
     local_srt_port: u16,
     receiver_host: &str,
@@ -266,6 +311,57 @@ pub async fn run_sender_with_toggles(
     }
 }
 
+/// Process a received SRT packet and forward it to an appropriate uplink connection.
+///
+/// This function parses a single received packet (or a receive error), selects an uplink
+/// connection according to the current registration state and dynamic toggles, forwards the
+/// packet to the chosen connection, and updates client address and sequence-to-connection
+/// tracking state used for later NAK attribution and cleanup.
+///
+/// The `registration_complete` flag causes the function to use a simplified forwarding
+/// strategy (prefer existing, non-timed-out connection) while registration is in progress.
+/// When registration is complete, the selection honors the toggles (stickiness, quality,
+/// exploration, classic) to choose the best connection via `select_connection_idx`.
+///
+/// Parameters that are not self-explanatory:
+/// - `registration_complete`: when false, use a simpler sender selection path for pre-registration packets.
+/// - `toggles`: runtime toggle flags that influence selection behavior (stickiness, quality, exploration, classic).
+/// - `shared_client_addr`: updated with the latest client SocketAddr so other tasks can forward instant ACKs.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::sync::{Arc, Mutex};
+/// # use std::collections::{HashMap, VecDeque};
+/// # use std::net::SocketAddr;
+/// # use std::time::Instant;
+/// # async fn example() {
+/// #     // The following are placeholders to illustrate usage; real values require actual types from the crate.
+/// #     let res: Result<(usize, SocketAddr), std::io::Error> = Err(std::io::Error::new(std::io::ErrorKind::Other, "noop"));
+/// #     let mut recv_buf = [0u8; 1500];
+/// #     let mut connections: Vec<crate::SrtlaConnection> = Vec::new();
+/// #     let mut last_selected_idx: Option<usize> = None;
+/// #     let mut last_switch_time: Option<Instant> = None;
+/// #     let mut seq_to_conn: HashMap<u32, crate::SequenceTrackingEntry> = HashMap::new();
+/// #     let mut seq_order: VecDeque<u32> = VecDeque::new();
+/// #     let mut last_client_addr: Option<SocketAddr> = None;
+/// #     let shared_client_addr = Arc::new(Mutex::new(None));
+/// #     let toggles = crate::DynamicToggles::default();
+/// #     handle_srt_packet(
+/// #         res,
+/// #         &mut recv_buf,
+/// #         &mut connections,
+/// #         &mut last_selected_idx,
+/// #         &mut last_switch_time,
+/// #         &mut seq_to_conn,
+/// #         &mut seq_order,
+/// #         &mut last_client_addr,
+/// #         &shared_client_addr,
+/// #         false,
+/// #         &toggles,
+/// #     ).await;
+/// # }
+/// ```
 #[allow(clippy::too_many_arguments)]
 async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
@@ -392,6 +488,61 @@ async fn handle_srt_packet(
     }
 }
 
+/// Forwards a packet through a selected uplink connection and updates selection and sequence tracking state.
+///
+/// Updates the last-selected connection and switch timestamp when the selection changes. Attempts to send
+/// `pkt` via the selected connection; on send failure the connection is marked for recovery. If `seq` is
+/// provided, records a mapping from that sequence number to the chosen connection index (with a timestamp),
+/// enforcing the `MAX_SEQUENCE_TRACKING` capacity by evicting the oldest tracked sequence when necessary.
+/// Also updates the per-client last seen address (`last_client_addr`) and the shared client address
+/// (`shared_client_addr`).
+///
+/// # Parameters
+///
+/// - `sel_idx`: index of the connection to use; the function returns immediately if this is out of range.
+/// - `pkt`: the raw packet to forward.
+/// - `seq`: optional SRT sequence number used to attribute future NAKs/ACKs to the chosen connection.
+/// - `connections`: mutable slice of candidate `SrtlaConnection`s; the function sends using `connections[sel_idx]`.
+/// - `last_selected_idx`, `last_switch_time`: updated when the active connection changes.
+/// - `seq_to_conn`, `seq_order`: mutated to record and prune sequence→connection mappings for NAK attribution.
+/// - `last_client_addr`: updated to `src`.
+/// - `shared_client_addr`: an Arc<Mutex<...>> updated with `src` when the lock is available.
+/// - `src`: source socket address of the local SRT client.
+///
+/// # Examples
+///
+/// ```
+/// # use std::sync::{Arc, Mutex};
+/// # use std::collections::{HashMap, VecDeque};
+/// # use std::net::SocketAddr;
+/// # use std::time::Instant;
+/// # use tokio::runtime::Runtime;
+/// # // Minimal invocation that returns early when no connections are present.
+/// # let rt = Runtime::new().unwrap();
+/// # rt.block_on(async {
+/// let mut connections: Vec<crate::sender::SrtlaConnection> = Vec::new();
+/// let mut last_selected_idx = None;
+/// let mut last_switch_time = None;
+/// let mut seq_to_conn: HashMap<u32, crate::sender::SequenceTrackingEntry> = HashMap::new();
+/// let mut seq_order: VecDeque<u32> = VecDeque::new();
+/// let mut last_client_addr = None;
+/// let shared_client_addr = Arc::new(Mutex::new(None));
+/// let src: SocketAddr = "127.0.0.1:10000".parse().unwrap();
+/// crate::sender::forward_via_connection(
+///     0,
+///     b"",
+///     None,
+///     &mut connections,
+///     &mut last_selected_idx,
+///     &mut last_switch_time,
+///     &mut seq_to_conn,
+///     &mut seq_order,
+///     &mut last_client_addr,
+///     &shared_client_addr,
+///     src,
+/// ).await;
+/// # });
+/// ```
 #[allow(clippy::too_many_arguments)]
 async fn forward_via_connection(
     sel_idx: usize,
@@ -455,7 +606,69 @@ async fn forward_via_connection(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Perform periodic housekeeping for uplink connections and registration state.
+///
+/// Processes incoming ACK/NAK/SRTLA messages from each connection, attributes NAKs to
+/// previously recorded sequence-to-connection mappings when not expired, forwards responses
+/// back to the local SRT client, drives the registration state machine (REG1/REG2),
+/// triggers reconnects and recovery for timed-out connections, sends keepalives/RTT probes,
+/// updates the registration manager's view of active connections, and prunes expired
+/// sequence-tracking entries. If all uplinks remain unavailable longer than
+/// GLOBAL_TIMEOUT_MS, an error is returned.
+///
+/// # Parameters
+///
+/// - `connections`: mutable slice of uplink connections to maintain.
+/// - `reg`: registration manager responsible for REG1/REG2 state and active-connection tracking.
+/// - `instant_tx`: channel sender used for forwarding instant ACKs to the local client forwarder.
+/// - `last_client_addr`: last known local SRT client socket address; responses are forwarded there if present.
+/// - `local_listener`: local UDP socket used to send forwarded packets back to the SRT client.
+/// - `seq_to_conn`: mapping from SRT sequence numbers to the connection index and timestamp used for NAK attribution.
+/// - `seq_order`: deque tracking insertion order of sequences for eviction when capacity is reached.
+/// - `last_sequence_cleanup_ms`: last cleanup timestamp for sequence-tracking expiry checks; updated by cleanup routine.
+/// - `classic`: when true, enable legacy/global behaviors (e.g., global SRTLA ACK handling) instead of the enhanced logic.
+/// - `all_failed_at`: optional instant marking when all connections first became unavailable; used to detect prolonged outage and decide when to return an error.
+///
+/// # Returns
+///
+/// `Ok(())` on successful housekeeping; `Err` if all connections have been unavailable longer than GLOBAL_TIMEOUT_MS
+/// (distinguishes between failing to re-establish previously connected uplinks and failing to establish any initial connections).
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::collections::{HashMap, VecDeque};
+/// use std::sync::mpsc::Sender;
+/// use tokio::net::UdpSocket;
+/// # async fn example() -> anyhow::Result<()> {
+///     // Setup placeholders (real initialization omitted)
+///     let mut connections: Vec<crate::SrtlaConnection> = Vec::new();
+///     let mut reg = crate::SrtlaRegistrationManager::new();
+///     let instant_tx: Sender<Vec<u8>> = std::sync::mpsc::channel().0;
+///     let last_client_addr = None;
+///     let local_listener = UdpSocket::bind("0.0.0.0:0").await?;
+///     let mut seq_to_conn: HashMap<u32, crate::SequenceTrackingEntry> = HashMap::new();
+///     let mut seq_order: VecDeque<u32> = VecDeque::new();
+///     let mut last_sequence_cleanup_ms: u64 = 0;
+///     let classic = false;
+///     let mut all_failed_at = None;
+///
+///     // Drive one housekeeping cycle
+///     crate::handle_housekeeping(
+///         &mut connections,
+///         &mut reg,
+///         &instant_tx,
+///         last_client_addr,
+///         &local_listener,
+///         &mut seq_to_conn,
+///         &mut seq_order,
+///         &mut last_sequence_cleanup_ms,
+///         classic,
+///         &mut all_failed_at,
+///     ).await?;
+///     # Ok(())
+/// # }
+/// ```
 async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
@@ -610,6 +823,39 @@ async fn handle_housekeeping(
     Ok(())
 }
 
+/// Removes expired sequence-to-connection mappings and prunes the sequence order list.
+///
+/// This function runs a periodic cleanup: if enough time has elapsed since `last_cleanup_ms`,
+/// it removes entries from `seq_to_conn` whose `timestamp_ms` is older than the configured
+/// expiration window, then filters `seq_order` to only keep sequence numbers still present
+/// in `seq_to_conn`. When removals occur it logs the number cleaned and the resulting capacity
+/// usage; it also warns when the tracking map exceeds 80% of its configured capacity.
+///
+/// Parameters:
+/// - `seq_to_conn`: mutable map from sequence number to `SequenceTrackingEntry` to be pruned.
+/// - `seq_order`: mutable FIFO-like deque of sequence numbers used to track insertion order;
+///   entries for sequences removed from `seq_to_conn` will be dropped from this deque.
+/// - `last_cleanup_ms`: last cleanup timestamp in milliseconds; updated to the current time
+///   when a cleanup runs. If not enough time has passed since this timestamp, the function
+///   returns immediately.
+///
+/// # Examples
+///
+/// ```
+/// # use std::collections::{HashMap, VecDeque};
+/// # use sender::{SequenceTrackingEntry, cleanup_expired_sequence_tracking, MAX_SEQUENCE_TRACKING};
+/// // prepare maps with a single stale and a single fresh entry
+/// let mut seq_to_conn: HashMap<u32, SequenceTrackingEntry> = HashMap::new();
+/// let mut seq_order: VecDeque<u32> = VecDeque::new();
+/// // Insert entries (assume SequenceTrackingEntry::new_for_test is available in tests)
+/// // seq_to_conn.insert(1, stale_entry);
+/// // seq_to_conn.insert(2, fresh_entry);
+/// // seq_order.push_back(1);
+/// // seq_order.push_back(2);
+/// let mut last_cleanup_ms = 0u64;
+/// cleanup_expired_sequence_tracking(&mut seq_to_conn, &mut seq_order, &mut last_cleanup_ms);
+/// // After calling, stale mappings are removed and seq_order only contains remaining sequences.
+/// ```
 fn cleanup_expired_sequence_tracking(
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
@@ -655,6 +901,34 @@ fn cleanup_expired_sequence_tracking(
     }
 }
 
+/// Compute a quality multiplier for a connection used to weight its selection score.
+///
+/// The multiplier favors connections with no recent NAKs and penalizes those with recent or bursty NAK activity,
+/// with a short startup grace period where penalties are softened.
+///
+/// # Returns
+///
+/// `f64` multiplier: values greater than 1.0 boost a connection's effective score, values less than 1.0 reduce it.
+/// Typical range produced by this function is 0.1 (severe penalty) up to 1.2 (bonus for never-seen NAKs).
+///
+/// # Behavior
+///
+/// - During the first 10 seconds after the connection was established, returns `1.2` if the connection has
+///   never seen a NAK, otherwise `0.95` (startup grace period).
+/// - If the connection reports a time-since-last-NAK (`time_since_last_nak_ms()`):
+///   - < 2000 ms => `0.1`
+///   - < 5000 ms => `0.5`
+///   - < 10000 ms => `0.8`
+///   - >= 10000 ms => `1.2` if total NAK count is zero, otherwise `1.0`
+///   - If a NAK burst is detected (`nak_burst_count() > 1`) and the last NAK was within 5000 ms, the multiplier is halved.
+/// - If there is no time-since-last-NAK value but the connection has never seen a NAK, returns `1.2`; otherwise `1.0`.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Given a `conn: SrtlaConnection`, compute its quality multiplier:
+/// // let mult = calculate_quality_multiplier(&conn);
+/// ```
 pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
     use crate::utils::now_ms;
 
@@ -698,6 +972,34 @@ pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
     }
 }
 
+/// Chooses the best uplink connection index according to the configured mode and heuristics.
+///
+/// In `classic` mode this picks the highest `get_score()` among non-timed-out connections. In
+/// enhanced mode it scores connections optionally using quality multipliers, respects a short
+/// stickiness window to avoid rapid switches, and can periodically explore the second-best
+/// connection when exploration is enabled.
+///
+/// # Parameters
+///
+/// - `conns`: slice of available connections to consider (timed-out connections are ignored).
+/// - `last_idx`: previously selected connection index, used for stickiness decisions.
+/// - `last_switch`: timestamp of the last selection change, used to enforce the minimum switch interval.
+/// - `enable_quality`: when `true`, adjust scores by connection quality (NAK-based multipliers).
+/// - `enable_explore`: when `true`, periodically prefer the second-best connection to explore alternatives.
+/// - `classic`: when `true`, use the simple highest-score selection and ignore quality/explore/stickiness.
+/// - `now`: current `Instant` used for stickiness and exploration timing.
+///
+/// # Returns
+///
+/// `Some(index)` of the chosen connection, or `None` if no suitable (non-timed-out) connection is available.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Instant;
+/// let idx = select_connection_idx(&[], None, None, false, false, true, Instant::now());
+/// assert!(idx.is_none());
+/// ```
 pub fn select_connection_idx(
     conns: &[SrtlaConnection],
     last_idx: Option<usize>,
@@ -806,6 +1108,31 @@ pub fn select_connection_idx(
     }
 }
 
+/// Read a newline-separated list of IP addresses from a file, skipping invalid or empty lines.
+///
+/// Each non-empty line is trimmed and parsed as an `IpAddr`; malformed lines are ignored with a warning.
+///
+/// # Examples
+///
+/// ```
+/// use std::net::IpAddr;
+/// use std::fs;
+/// use std::path::PathBuf;
+///
+/// // create a temporary file with a few lines
+/// let mut p = std::env::temp_dir();
+/// p.push("example_ips.txt");
+/// fs::write(&p, "127.0.0.1\ninvalid-ip\n::1\n\n").unwrap();
+///
+/// let ips = tokio::runtime::Runtime::new()
+///     .unwrap()
+///     .block_on(crate::read_ip_list(p.to_str().unwrap()))
+///     .unwrap();
+///
+/// assert!(ips.contains(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+/// assert!(ips.contains(&"::1".parse::<IpAddr>().unwrap()));
+/// fs::remove_file(p).ok();
+/// ```
 pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     let text = std::fs::read_to_string(Path::new(path)).context("read IPs file")?;
     let mut out = Vec::new();
@@ -822,6 +1149,46 @@ pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
     Ok(out)
 }
 
+/// Reconciles the current set of uplink connections with a new list of IPs.
+///
+/// Removes connections whose labels no longer match the desired receiver:port via IP set,
+/// prunes sequence-tracking entries that referenced removed connections, and creates new
+/// connections for IPs that are not already present.
+///
+/// # Parameters
+///
+/// - `connections`: mutable list of existing `SrtlaConnection` objects; entries may be removed or appended.
+/// - `new_ips`: desired uplink IP addresses to enforce.
+/// - `receiver_host`, `receiver_port`: host and port used to construct connection labels ("host:port via ip").
+/// - `last_selected_idx`: reset to `None` if any connections are removed to avoid holding an invalid index.
+/// - `seq_to_conn`: mapping from sequence numbers to `SequenceTrackingEntry`; entries referencing removed connections are pruned.
+/// - `seq_order`: queue of recent sequence numbers; pruned to retain only sequences still present in `seq_to_conn`.
+///
+/// # Examples
+///
+/// ```
+/// # use std::net::IpAddr;
+/// # use std::collections::{HashMap, VecDeque};
+/// # use crate::sender::{apply_connection_changes, SequenceTrackingEntry};
+/// # use crate::SrtlaConnection;
+/// # async fn __example() {
+/// let mut connections: Vec<SrtlaConnection> = Vec::new();
+/// let new_ips: Vec<IpAddr> = vec!["127.0.0.1".parse().unwrap()];
+/// let mut last_selected_idx: Option<usize> = None;
+/// let mut seq_to_conn: HashMap<u32, SequenceTrackingEntry> = HashMap::new();
+/// let mut seq_order: VecDeque<u32> = VecDeque::new();
+///
+/// apply_connection_changes(
+///     &mut connections,
+///     &new_ips,
+///     "example.com",
+///     9000,
+///     &mut last_selected_idx,
+///     &mut seq_to_conn,
+///     &mut seq_order,
+/// ).await;
+/// # }
+/// ```
 pub(crate) async fn apply_connection_changes(
     connections: &mut Vec<SrtlaConnection>,
     new_ips: &[IpAddr],
@@ -897,7 +1264,38 @@ pub async fn create_connections_from_ips(
     connections
 }
 
-/// Comprehensive status monitoring for connections
+/// Log a detailed status report for all uplink connections and the sequence-tracking state.
+///
+/// The report includes:
+/// - Total, active, and timed-out connection counts and percentages.
+/// - Current toggle states (classic, stickiness, quality scoring, exploration).
+/// - Sequence-tracking usage (mapping count, capacity percentage, queue length).
+/// - Packet log utilization across all connections.
+/// - The last selected connection (if any).
+/// - Per-connection details: status, label, score, last receive age, window, in-flight packets,
+///   and RTT metrics when available.
+/// - Warnings when there are no active connections or when fewer than half are active.
+///
+/// Parameters:
+/// - `connections`: slice of current `SrtlaConnection` objects to report on.
+/// - `seq_to_conn`: mapping from SRT sequence numbers to `SequenceTrackingEntry` used for NAK attribution.
+/// - `seq_order`: ordered queue of recently tracked sequence numbers (used for capacity/queue reporting).
+/// - `last_selected_idx`: optionally the index of the last-selected connection.
+/// - `toggles`: runtime feature toggles that affect selection and reporting.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::collections::{HashMap, VecDeque};
+///
+/// // Prepare empty inputs for a simple invocation (real usage passes live connections and toggles).
+/// let connections: Vec<srtla::SrtlaConnection> = Vec::new();
+/// let seq_to_conn: HashMap<u32, srtla::SequenceTrackingEntry> = HashMap::new();
+/// let seq_order: VecDeque<u32> = VecDeque::new();
+/// let toggles = srtla::DynamicToggles::default(); // construct according to your application
+///
+/// srtla::log_connection_status(&connections, &seq_to_conn, &seq_order, None, &toggles);
+/// ```
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn log_connection_status(
     connections: &[SrtlaConnection],

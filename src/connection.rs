@@ -172,6 +172,31 @@ pub struct SrtlaConnection {
 }
 
 impl SrtlaConnection {
+    /// Creates a new SrtlaConnection by binding a UDP socket to the given local IP and connecting it to the resolved remote host:port.
+    ///
+    /// The returned connection is initialized with default congestion and RTT state, a bound and connected UDP socket, and `connected` set to `false`. The connection's `connection_established_ms` remains zero until the REG3 handshake is completed.
+    ///
+    /// # Parameters
+    ///
+    /// - `ip`: local IP address to bind the UDP socket to.
+    /// - `host`: remote hostname (DNS will be resolved).
+    /// - `port`: remote UDP port.
+    ///
+    /// # Returns
+    ///
+    /// An initialized `SrtlaConnection` with a UDP socket bound to `ip` and connected to the resolved remote address.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// use std::net::IpAddr;
+    /// // Replace with a reachable host/ip when actually running the example.
+    /// let local_ip: IpAddr = "0.0.0.0".parse().unwrap();
+    /// let conn = SrtlaConnection::connect_from_ip(local_ip, "example.com", 9000).await.unwrap();
+    /// assert!(!conn.connected);
+    /// # });
+    /// ```
     pub async fn connect_from_ip(ip: IpAddr, host: &str, port: u16) -> Result<Self> {
         let remote = resolve_remote(host, port).await?;
         let sock = bind_from_ip(ip, 0)?;
@@ -216,6 +241,25 @@ impl SrtlaConnection {
         })
     }
 
+    /// Computes a priority score for the connection based on congestion window and current load.
+    ///
+    /// The score is the integer division of the connection window by the in-flight packet load (with the
+    /// load treated as at least 1). If the connection is not established, returns -1.
+    ///
+    /// # Returns
+    ///
+    /// The computed score as `window / max(in_flight_packets + 1, 1)`, or `-1` when the connection is not established.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Equivalent calculation used by `get_score`.
+    /// let window = 100;
+    /// let in_flight = 4;
+    /// let denom = in_flight.saturating_add(1).max(1);
+    /// let score = window / denom;
+    /// assert_eq!(score, 20);
+    /// ```
     #[inline]
     pub fn get_score(&self) -> i32 {
         if !self.connected {
@@ -228,6 +272,28 @@ impl SrtlaConnection {
         self.window / denom
     }
 
+    /// Send the provided bytes to the remote endpoint and, if a sequence number is given, record the packet for tracking.
+    ///
+    /// When `seq` is provided, the sequence number is registered so the connection can track in-flight packets and measure RTTs.
+    ///
+    /// # Parameters
+    ///
+    /// - `data`: bytes to send to the remote.
+    /// - `seq`: optional packet sequence number to register for tracking; if `None`, no tracking entry is recorded.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, `Err(...)` if the underlying socket send fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(conn: &mut crate::SrtlaConnection) -> Result<(), Box<dyn std::error::Error>> {
+    /// conn.send_data_with_tracking(b"payload", Some(42)).await?;
+    /// conn.send_data_with_tracking(b"fire-and-forget", None).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub async fn send_data_with_tracking(&mut self, data: &[u8], seq: Option<u32>) -> Result<()> {
         self.socket.send(data).await?;
@@ -257,6 +323,40 @@ impl SrtlaConnection {
         Ok(())
     }
 
+    /// Drain the connection's UDP socket and collect incoming SRT/SRTLA packets and control events.
+    ///
+    /// Processes all currently available packets from the socket, updating registration and
+    /// connection state, handling keepalive responses, extracting ACK/NAK/SRTLA-ACK sequence
+    /// numbers, and batching packets that should be forwarded to the local SRT client.
+    /// ACK packets are also forwarded immediately via the provided `instant_forwarder`.
+    ///
+    /// # Parameters
+    ///
+    /// - `conn_idx`: Index identifying this connection within the registration manager; used when
+    ///   processing registration events.
+    ///
+    /// # Returns
+    ///
+    /// A `SrtlaIncoming` struct containing:
+    /// - `forward_to_client`: packets to forward to the SRT client,
+    /// - `ack_numbers`: extracted SRT ACK sequence numbers,
+    /// - `nak_numbers`: extracted SRT NAK sequence numbers,
+    /// - `srtla_ack_numbers`: extracted SRTLA ACK sequence numbers,
+    /// - `read_any`: `true` if at least one packet was read, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(conn: &mut crate::connection::SrtlaConnection,
+    /// #                  idx: usize,
+    /// #                  reg: &mut crate::registration::SrtlaRegistrationManager,
+    /// #                  sender: &std::sync::mpsc::Sender<Vec<u8>>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let incoming = conn.drain_incoming(idx, reg, sender).await?;
+    /// if incoming.read_any {
+    ///     // process incoming.forward_to_client, incoming.ack_numbers, etc.
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub async fn drain_incoming(
         &mut self,
         conn_idx: usize,
@@ -384,6 +484,24 @@ impl SrtlaConnection {
         self.in_flight_packets = self.in_flight_packets.saturating_add(1);
     }
 
+    /// Process an SRT ACK sequence number and update connection state.
+    ///
+    /// Marks the matching sent packet as acknowledged, clears any sent-packet
+    /// records with sequence numbers older than the acknowledged sequence,
+    /// updates the in-flight packet count, and, if the original send timestamp
+    /// is available and the measured RTT is within 1–10,000 ms, updates the RTT estimate.
+    ///
+    /// # Parameters
+    ///
+    /// - `ack`: ACK sequence number to apply to the send log.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given a mutable SrtlaConnection `conn` that has previously registered
+    /// // sent packets, report receipt of ACK 42:
+    /// conn.handle_srt_ack(42);
+    /// ```
     pub fn handle_srt_ack(&mut self, ack: i32) {
         let mut ack_send_time_ms: Option<u64> = None;
         let mut remaining_count = 0;
@@ -415,6 +533,24 @@ impl SrtlaConnection {
         }
     }
 
+    /// Handle a received SRT NAK (negative-acknowledgement) for a sent packet.
+    ///
+    /// Updates internal packet tracking, NAK counters and burst detection, and
+    /// reduces the congestion window as a reaction to the reported lost packet.
+    /// If the window falls below a fast-recovery threshold, enables fast recovery mode.
+    ///
+    /// # Parameters
+    ///
+    /// - `seq`: the sequence number reported as lost by the remote peer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Obtain a mutable SrtlaConnection from your connection manager or constructor,
+    /// // then notify it of a missing packet:
+    /// // let mut conn = SrtlaConnection::connect_from_ip(...).await.unwrap();
+    /// // conn.handle_nak(42);
+    /// ```
     pub fn handle_nak(&mut self, seq: i32) {
         let mut found = false;
         for i in 0..NAK_SEARCH_LIMIT {
@@ -482,6 +618,30 @@ impl SrtlaConnection {
         }
     }
 
+    /// Handle a received SRTLA ACK for a specific packet sequence and adjust congestion state.
+    ///
+    /// Searches the recent packet log for `seq`. If found, marks the packet as acknowledged,
+    /// decrements the in-flight packet count, and applies window increase behavior.
+    /// When `classic_mode` is `true` the legacy (C-style) window increment is applied;
+    /// otherwise the enhanced ACK handling path is invoked.
+    ///
+    /// # Parameters
+    ///
+    /// - `seq`: The sequence number to acknowledge.
+    /// - `classic_mode`: If `true`, apply legacy window-increase logic; if `false`, use enhanced handling.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the sequence was found in the packet log and processed, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `conn` is a mutable SrtlaConnection with a recent packet log:
+    /// // let mut conn = ...;
+    /// // let handled = conn.handle_srtla_ack_specific(42, false);
+    /// // assert!(handled || !handled); // demonstrates calling the method
+    /// ```
     pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool) -> bool {
         // Find the specific packet in the log and handle targeted logic
         // This mimics the first phase of the original implementation's
@@ -529,6 +689,16 @@ impl SrtlaConnection {
         found
     }
 
+    /// Performs enhanced ACK-driven congestion window recovery.
+    ///
+    /// Updates the connection's congestion window when sustained ACKs indicate available
+    /// capacity. Uses utilization thresholds and a consecutive-ACKs counter to apply a
+    /// conservative, time-gated window increase; respects fast-recovery mode and caps the
+    /// window to configured maximums. Resets the consecutive-ACKs counter after a
+    /// successful increase and disables fast-recovery mode if the window grows beyond the
+    /// fast-recovery disable threshold.
+    ///
+    /// The `_seq` parameter is unused and present for API symmetry with other ACK handlers.
     fn handle_srtla_ack_enhanced(&mut self, _seq: i32) {
         // Enhanced mode ACK handling with utilization thresholds and consecutive ACK
         // tracking
@@ -595,6 +765,23 @@ impl SrtlaConnection {
         }
     }
 
+    /// Increases the congestion window by one when the connection has recently received data.
+    ///
+    /// If the connection is marked as connected and a receipt timestamp exists, the window
+    /// is incremented by 1 and clamped to WINDOW_MAX * WINDOW_MULT. Large single-step
+    /// increases are logged for visibility.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Given a connected SrtlaConnection that has received data:
+    /// // let mut conn = SrtlaConnection::new(...);
+    /// // conn.connected = true;
+    /// // conn.last_received = Some(std::time::Instant::now());
+    /// // let old = conn.window;
+    /// // conn.handle_srtla_ack_global();
+    /// // assert!(conn.window >= old);
+    /// ```
     pub fn handle_srtla_ack_global(&mut self) {
         // Global +1 window increase for connections that have received data (from
         // original implementation)
@@ -619,6 +806,23 @@ impl SrtlaConnection {
         }
     }
 
+    /// Update the connection's RTT statistics using a new round-trip time measurement.
+    ///
+    /// This updates internal RTT estimates (smooth, fast, min, jitter, average delta,
+    /// and legacy estimated RTT) and records the time of the measurement. May emit
+    /// a debug log when the measured change or jitter is large.
+    ///
+    /// # Parameters
+    ///
+    /// - `rtt_ms`: Measured round-trip time in milliseconds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assume `conn` is a mutable SrtlaConnection obtained from your connection manager.
+    /// // A new RTT measurement (in milliseconds) can be applied like this:
+    /// // conn.update_rtt_estimate(120);
+    /// ```
     fn update_rtt_estimate(&mut self, rtt_ms: u64) {
         let current_rtt = rtt_ms as f64;
 
@@ -683,32 +887,115 @@ impl SrtlaConnection {
         }
     }
 
+    /// Reports whether recent RTT measurements are stable.
+    ///
+    /// The RTT is considered stable when the absolute average RTT delta is less than 1.0 ms.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `conn` is an initialized `SrtlaConnection`:
+    /// // conn.rtt_avg_delta_ms = 0.5;
+    /// // assert!(conn.is_rtt_stable());
+    /// ```
     pub fn is_rtt_stable(&self) -> bool {
         self.rtt_avg_delta_ms.abs() < 1.0
     }
 
+    /// Returns the current smoothed round-trip time estimate in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// The smoothed RTT estimate in milliseconds.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Given a `SrtlaConnection` instance `conn`, read the smoothed RTT:
+    /// let rtt_ms = conn.get_smooth_rtt_ms();
+    /// assert!(rtt_ms >= 0.0);
+    /// ```
     pub fn get_smooth_rtt_ms(&self) -> f64 {
         self.smooth_rtt_ms
     }
 
+    /// Access the connection's fast RTT estimate in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// The current fast RTT estimate in milliseconds.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Given a `SrtlaConnection` instance `conn`, read the fast RTT:
+    /// let _fast_rtt_ms = conn.get_fast_rtt_ms();
+    /// ```
     pub fn get_fast_rtt_ms(&self) -> f64 {
         self.fast_rtt_ms
     }
 
+    /// Returns the current RTT jitter estimate in milliseconds.
+    ///
+    /// The value represents the exponentially-smoothed estimate of round-trip time variability.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // given a SrtlaConnection `conn`
+    /// let jitter_ms = conn.get_rtt_jitter_ms();
+    /// println!("RTT jitter: {} ms", jitter_ms);
+    /// ```
     pub fn get_rtt_jitter_ms(&self) -> f64 {
         self.rtt_jitter_ms
     }
 
+    /// Reports the minimum observed round-trip time (RTT) measurement.
+    ///
+    /// # Returns
+    ///
+    /// The minimum observed RTT in milliseconds.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Given an existing `SrtlaConnection` instance `conn`:
+    /// // let min_rtt = conn.get_rtt_min_ms();
+    /// // println!("min RTT = {} ms", min_rtt);
+    /// ```
     #[allow(dead_code)]
     pub fn get_rtt_min_ms(&self) -> f64 {
         self.rtt_min_ms
     }
 
+    /// Average change between consecutive RTT measurements, expressed in milliseconds.
+    ///
+    /// This value reflects how much RTT has been drifting between samples; positive values
+    /// indicate RTT has been increasing on average, negative values indicate it has been
+    /// decreasing.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use crate::SrtlaConnection;
+    /// let conn = /* obtain SrtlaConnection */ unimplemented!();
+    /// let delta_ms = conn.get_rtt_avg_delta_ms();
+    /// println!("RTT delta (ms): {}", delta_ms);
+    /// ```
     #[allow(dead_code)]
     pub fn get_rtt_avg_delta_ms(&self) -> f64 {
         self.rtt_avg_delta_ms
     }
 
+    /// Determines whether an RTT (round-trip time) measurement should be performed.
+    ///
+    /// Returns `true` when the connection is established (REG3 completed), the connection is
+    /// marked connected, there is not already a pending keepalive response, and either no prior
+    /// RTT measurement exists or the last measurement was more than 3000 ms ago.
+    ///
+    /// # Returns
+    ///
+    /// `true` if an RTT measurement should be performed, `false` otherwise.
     pub fn needs_rtt_measurement(&self) -> bool {
         // Stay lightweight during initial registration: defer RTT probing until the
         // connection has been fully established via REG3. This mirrors the C
@@ -729,6 +1016,17 @@ impl SrtlaConnection {
         self.waiting_for_keepalive_response = true;
     }
 
+    /// Process a received keepalive response and update RTT state if appropriate.
+    ///
+    /// If the connection is currently awaiting a keepalive response, this extracts the
+    /// timestamp from the provided packet payload, computes the round-trip time (RTT),
+    /// and updates the connection's RTT estimate when the measured RTT is 10,000 ms or less.
+    /// In all cases clears the awaiting flag so subsequent responses are ignored until a new
+    /// keepalive is sent.
+    ///
+    /// # Parameters
+    ///
+    /// - `data`: The raw keepalive packet payload to extract the remote timestamp from.
     fn handle_keepalive_response(&mut self, data: &[u8]) {
         if !self.waiting_for_keepalive_response {
             return;
@@ -755,6 +1053,27 @@ impl SrtlaConnection {
                 || now.saturating_sub(self.last_keepalive_ms) >= IDLE_TIME * 1000)
     }
 
+    /// Attempt to recover the congestion window based on elapsed time since the last NAK.
+    ///
+    /// When the connection is established and the window is below the configured maximum,
+    /// this method increases the window at controlled intervals if no NAKs have been observed
+    /// for a configured cooldown. The increase amount and timing depend on whether fast
+    /// recovery mode is active; the method also caps the window and may disable fast recovery
+    /// once a safe threshold is reached.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Example usage: call on a mutable SrtlaConnection to trigger time-based recovery.
+    /// // (This is a usage example; constructing a real `SrtlaConnection` requires the surrounding context.)
+    /// # use crate::SrtlaConnection;
+    /// # unsafe {
+    /// #     // Placeholder conn for demonstration; real code should use a properly-initialized connection.
+    /// #     let mut conn: SrtlaConnection = std::mem::zeroed();
+    /// #     conn.connected = true;
+    /// #     conn.perform_window_recovery();
+    /// # }
+    /// ```
     pub fn perform_window_recovery(&mut self) {
         if !self.connected || self.window >= WINDOW_MAX * WINDOW_MULT {
             return;
@@ -830,7 +1149,21 @@ impl SrtlaConnection {
             }
     }
 
-    /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
+    /// Mark the connection as needing full recovery and reset transient state.
+    ///
+    /// This clears the last-received timestamp, cancels any pending keepalive RTT probe,
+    /// marks the connection as not connected, resets the congestion window and in-flight
+    /// packet tracking, and clears the packet log so the connection can ramp anew after
+    /// a subsequent reconnect/registration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given a mutable `SrtlaConnection` named `conn`
+    /// conn.mark_for_recovery();
+    /// assert!(!conn.connected);
+    /// assert_eq!(conn.in_flight_packets, 0);
+    /// ```
     pub fn mark_for_recovery(&mut self) {
         self.last_received = None;
         self.last_keepalive_ms = 0;
@@ -861,10 +1194,41 @@ impl SrtlaConnection {
         self.nak_burst_count
     }
 
+    /// Returns the millisecond timestamp when REG3 completed and the connection became established.
+    ///
+    /// The value is a Unix-like millisecond timestamp indicating when the connection was marked established; `0` indicates the connection has not yet been established.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Given an existing SrtlaConnection `conn`, read the establishment timestamp:
+    /// let ts_ms = conn.connection_established_ms();
+    /// // `ts_ms == 0` if REG3 has not completed.
+    /// ```
     pub fn connection_established_ms(&self) -> u64 {
         self.connection_established_ms
     }
 
+    /// Determines whether a reconnect attempt should be performed now.
+    ///
+    /// This uses two modes:
+    /// - During initial registration (before REG3), it retries roughly once per housekeeping pass (~1s).
+    /// - After a successful registration, it applies exponential backoff based on the number of consecutive reconnect failures,
+    ///   clamped by a maximum delay and a maximum backoff exponent.
+    ///
+    /// # Returns
+    ///
+    /// `true` if enough time has elapsed to attempt a reconnect, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Assuming `conn` is an instance of `SrtlaConnection`,
+    /// // call `conn.should_attempt_reconnect()` to decide whether to try reconnecting now.
+    /// // This example is illustrative and intentionally marked `no_run`.
+    /// # let conn = /* SrtlaConnection instance */ panic!();
+    /// let _ = conn.should_attempt_reconnect();
+    /// ```
     pub fn should_attempt_reconnect(&self) -> bool {
         const BASE_RECONNECT_DELAY_MS: u64 = 5000;
         const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
@@ -893,6 +1257,21 @@ impl SrtlaConnection {
         time_since_last_attempt >= backoff_delay
     }
 
+    /// Record that a reconnect attempt was made and update backoff bookkeeping.
+    ///
+    /// Updates the connection's `last_reconnect_attempt_ms`. If the connection has not
+    /// completed initial registration (`connection_established_ms == 0`), the method
+    /// leaves the failure counter unchanged to preserve a fast retry cadence. Otherwise
+    /// it increments `reconnect_failure_count` and computes the next backoff delay
+    /// (exponential with upper bounds), which is emitted via logging.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut conn = SrtlaConnection::default(); // assume Default exists for example
+    /// conn.record_reconnect_attempt();
+    /// assert!(conn.last_reconnect_attempt_ms > 0);
+    /// ```
     pub fn record_reconnect_attempt(&mut self) {
         self.last_reconnect_attempt_ms = now_ms();
 
@@ -930,6 +1309,29 @@ impl SrtlaConnection {
         }
     }
 
+    /// Re-establishes the UDP connection to the remote endpoint and reinitializes connection state.
+    ///
+    /// Rebinds a socket from the connection's local IP, connects it to the configured remote address,
+    /// replaces the internal socket, marks the connection as established, and resets congestion-control
+    /// and RTT-related state used for a fresh connection attempt. The timestamp of prior REG3
+    /// establishment is preserved and not cleared by this operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if socket creation, binding, or configuration fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use tokio::runtime::Runtime;
+    /// # fn main() {
+    /// # let rt = Runtime::new().unwrap();
+    /// # rt.block_on(async {
+    /// // `conn` is an existing `SrtlaConnection` value.
+    /// // conn.reconnect().await.unwrap();
+    /// # });
+    /// # }
+    /// ```
     #[allow(dead_code)]
     pub async fn reconnect(&mut self) -> Result<()> {
         let sock = bind_from_ip(self.local_ip, 0)?;

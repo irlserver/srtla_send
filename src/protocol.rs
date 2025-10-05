@@ -39,6 +39,20 @@ pub const WINDOW_INCR: i32 = 30;
 
 pub const PKT_LOG_SIZE: usize = 256;
 
+/// Reads the 16-bit big-endian packet type from the start of a buffer.
+///
+/// Returns `Some(type)` when the buffer contains at least two bytes and those bytes are interpreted
+/// as a big-endian `u16`; returns `None` when the buffer is shorter than two bytes.
+///
+/// # Examples
+///
+/// ```
+/// let buf = [0x12u8, 0x34, 0xFF];
+/// assert_eq!(get_packet_type(&buf), Some(0x1234));
+///
+/// let short: [u8; 1] = [0x00];
+/// assert_eq!(get_packet_type(&short), None);
+/// ```
 #[inline]
 pub fn get_packet_type(buf: &[u8]) -> Option<u16> {
     if buf.len() < 2 {
@@ -47,6 +61,24 @@ pub fn get_packet_type(buf: &[u8]) -> Option<u16> {
     Some(u16::from_be_bytes([buf[0], buf[1]]))
 }
 
+/// Parses an SRT sequence number from the first four bytes of a buffer when the most-significant bit is clear.
+///
+/// # Returns
+///
+/// `Some(sequence_number)` if `buf` contains at least four bytes and the parsed big-endian 32-bit value has its most-significant bit equal to 0, `None` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// let sn: u32 = 12345;
+/// let mut buf = sn.to_be_bytes().to_vec();
+/// // valid when MSB is clear
+/// assert_eq!(crate::get_srt_sequence_number(&buf), Some(12345));
+///
+/// // value with MSB set is treated as invalid
+/// let invalid = (0x8000_0000u32 | 1).to_be_bytes();
+/// assert_eq!(crate::get_srt_sequence_number(&invalid), None);
+/// ```
 #[inline]
 pub fn get_srt_sequence_number(buf: &[u8]) -> Option<u32> {
     if buf.len() < 4 {
@@ -60,6 +92,18 @@ pub fn get_srt_sequence_number(buf: &[u8]) -> Option<u32> {
     }
 }
 
+/// Constructs an SRTLA REG1 packet containing the given 256-byte ID.
+///
+/// The returned packet is exactly SRTLA_TYPE_REG1_LEN bytes long and encodes the REG1 type in the first two bytes followed by the 256-byte identifier.
+///
+/// # Examples
+///
+/// ```
+/// let id = [0u8; SRTLA_ID_LEN];
+/// let pkt = create_reg1_packet(&id);
+/// assert_eq!(pkt.len(), SRTLA_TYPE_REG1_LEN);
+/// assert_eq!(&pkt[2..], &id);
+/// ```
 pub fn create_reg1_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG1_LEN] {
     let mut pkt = [0u8; SRTLA_TYPE_REG1_LEN];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_REG1.to_be_bytes());
@@ -67,6 +111,21 @@ pub fn create_reg1_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG1_LEN] 
     pkt
 }
 
+/// Constructs an SRTLA REG2 packet containing the REG2 type followed by the provided 256-byte ID.
+///
+/// The returned fixed-size array is exactly SRTLA_TYPE_REG2_LEN bytes long, with the first two bytes
+/// set to the big-endian REG2 type and the remaining bytes set to `id`.
+///
+/// # Examples
+///
+/// ```
+/// let id = [0x42u8; SRTLA_ID_LEN];
+/// let pkt = create_reg2_packet(&id);
+/// // First two bytes are the REG2 type
+/// assert_eq!(&pkt[0..2], &SRTLA_TYPE_REG2.to_be_bytes());
+/// // Remaining bytes equal the id
+/// assert_eq!(&pkt[2..], &id);
+/// ```
 pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG2_LEN] {
     let mut pkt = [0u8; SRTLA_TYPE_REG2_LEN];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_REG2.to_be_bytes());
@@ -74,6 +133,19 @@ pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG2_LEN] 
     pkt
 }
 
+/// Constructs an SRTLA KEEPALIVE packet containing the current UTC timestamp.
+///
+/// The packet is 10 bytes: the first two bytes are the KEEPALIVE type in big-endian order,
+/// and the remaining eight bytes are the UTC timestamp in milliseconds encoded as a big-endian u64.
+///
+/// # Examples
+///
+/// ```
+/// let pkt = create_keepalive_packet();
+/// assert_eq!(&pkt[0..2], &SRTLA_TYPE_KEEPALIVE.to_be_bytes());
+/// let ts = u64::from_be_bytes(pkt[2..10].try_into().unwrap());
+/// assert!(ts > 0);
+/// ```
 pub fn create_keepalive_packet() -> [u8; 10] {
     let mut pkt = [0u8; 10];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
@@ -98,6 +170,30 @@ pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
     Some(ts)
 }
 
+/// Builds an SRTLA-format ACK packet containing the provided acknowledgment sequence numbers.
+///
+/// The packet uses a 4-byte header (2-byte SRTLA ACK type in big-endian followed by two zero bytes)
+/// followed by each acknowledgment encoded as a 4-byte big-endian `u32` in sequence.
+///
+/// # Parameters
+///
+/// - `acks`: slice of acknowledgment sequence numbers to include in the packet.
+///
+/// # Returns
+///
+/// A `Vec<u8>` containing the serialized ACK packet bytes.
+///
+/// # Examples
+///
+/// ```
+/// let acks = [1u32, 0xDEADBEEFu32];
+/// let pkt = create_ack_packet(&acks);
+/// assert_eq!(pkt.len(), 4 + 4 * acks.len());
+/// assert_eq!(&pkt[0..2], &SRTLA_TYPE_ACK.to_be_bytes());
+/// assert_eq!(&pkt[2..4], &[0x00, 0x00]);
+/// assert_eq!(&pkt[4..8], &acks[0].to_be_bytes());
+/// assert_eq!(&pkt[8..12], &acks[1].to_be_bytes());
+/// ```
 pub fn create_ack_packet(acks: &[u32]) -> Vec<u8> {
     // Create packets that match the actual SRTLA receiver format (4-byte header)
     let mut pkt = vec![0u8; 4 + 4 * acks.len()];
@@ -111,6 +207,23 @@ pub fn create_ack_packet(acks: &[u32]) -> Vec<u8> {
     pkt
 }
 
+/// Parses an SRT ACK packet and returns the acknowledged sequence number.
+///
+/// Returns `Some(sequence_number)` if `buf` is at least 20 bytes long and its packet type is SRT ACK;
+/// returns `None` otherwise.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// // Build a 20-byte buffer matching the SRT ACK layout (two-byte type, header, then sequence at bytes 16..20)
+/// let mut buf = [0u8; 20];
+/// // set packet type to the SRT ACK value expected by this crate (big-endian)
+/// // buf[0..2] = SRT_TYPE_ACK.to_be_bytes();
+/// let seq: u32 = 0x01020304;
+/// buf[16..20].copy_from_slice(&seq.to_be_bytes());
+///
+/// assert_eq!(crate::parse_srt_ack(&buf), Some(seq));
+/// ```
 #[inline]
 pub fn parse_srt_ack(buf: &[u8]) -> Option<u32> {
     if buf.len() < 20 {
@@ -122,6 +235,33 @@ pub fn parse_srt_ack(buf: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]))
 }
 
+/// Parses an SRT NAK packet and returns the list of missing sequence numbers it encodes.
+///
+/// If `buf` is not a valid SRT NAK packet (length < 8 or wrong packet type), an empty vector is returned.
+/// Single 32-bit sequence identifiers are appended directly. If an identifier has its high bit set,
+/// it denotes an inclusive range: the high bit is cleared to obtain the start, the next 32-bit value is read
+/// as the end, and every sequence number from start through end (wrapping with `wrapping_add`) is appended,
+/// subject to a hard cap of 1000 entries. Malformed trailing/incomplete range pairs terminate parsing.
+///
+/// # Examples
+///
+/// ```
+/// // single id
+/// let mut buf = Vec::new();
+/// buf.extend_from_slice(&SRT_TYPE_NAK.to_be_bytes()); // 2 bytes
+/// buf.extend_from_slice(&0u16.to_be_bytes()); // 2-byte header padding
+/// buf.extend_from_slice(&123u32.to_be_bytes());
+/// assert_eq!(parse_srt_nak(&buf), vec![123]);
+///
+/// // range encoded with high bit set on start
+/// let mut buf = Vec::new();
+/// buf.extend_from_slice(&SRT_TYPE_NAK.to_be_bytes());
+/// buf.extend_from_slice(&0u16.to_be_bytes());
+/// let start = 1u32 | 0x8000_0000;
+/// buf.extend_from_slice(&start.to_be_bytes());
+/// buf.extend_from_slice(&3u32.to_be_bytes());
+/// assert_eq!(parse_srt_nak(&buf), vec![1, 2, 3]);
+/// ```
 #[inline]
 pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
     if buf.len() < 8 {
@@ -154,6 +294,29 @@ pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
     out
 }
 
+/// Parses an SRTLA ACK packet and returns the acknowledged sequence numbers in order.
+///
+/// The function returns an empty vector if `buf` is shorter than 8 bytes or if the packet
+/// type in `buf` is not `SRTLA_TYPE_ACK`.
+///
+/// # Parameters
+///
+/// - `buf`: byte slice containing a candidate SRTLA packet.
+///
+/// # Returns
+///
+/// `Vec<u32>` containing each 32-bit acknowledgement value extracted from the packet; `vec![]`
+/// if the buffer is too short or not an SRTLA ACK packet.
+///
+/// # Examples
+///
+/// ```
+/// let mut buf = vec![0u8; 8];
+/// buf[0..2].copy_from_slice(&SRTLA_TYPE_ACK.to_be_bytes());
+/// // bytes 2..4 are padding; place one ack (1) at bytes 4..8
+/// buf[4..8].copy_from_slice(&1u32.to_be_bytes());
+/// assert_eq!(parse_srtla_ack(&buf), vec![1u32]);
+/// ```
 #[inline]
 pub fn parse_srtla_ack(buf: &[u8]) -> Vec<u32> {
     if buf.len() < 8 {
