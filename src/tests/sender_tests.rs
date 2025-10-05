@@ -182,14 +182,14 @@ mod tests {
         seq_to_conn.insert(
             100,
             SequenceTrackingEntry {
-                conn_idx: 1,
+                conn_id: connections[1].conn_id,
                 timestamp_ms: now,
             },
         );
         seq_to_conn.insert(
             200,
             SequenceTrackingEntry {
-                conn_idx: 2,
+                conn_id: connections[2].conn_id,
                 timestamp_ms: now,
             },
         );

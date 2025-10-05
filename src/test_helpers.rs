@@ -10,12 +10,16 @@ use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
 use crate::utils::now_ms;
 
 pub async fn create_test_connection() -> SrtlaConnection {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
+
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.set_nonblocking(true).unwrap();
     let tokio_socket = UdpSocket::from_std(socket).unwrap();
     let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
     SrtlaConnection {
+        conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
         socket: tokio_socket,
         remote,
         local_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -53,6 +57,9 @@ pub async fn create_test_connection() -> SrtlaConnection {
 }
 
 pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
+
     let mut connections = Vec::new();
 
     for i in 0..count {
@@ -62,6 +69,7 @@ pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
         let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080 + i as u16);
 
         let conn = SrtlaConnection {
+            conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
             socket: tokio_socket,
             remote,
             local_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10 + i as u8)),

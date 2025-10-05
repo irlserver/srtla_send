@@ -34,6 +34,7 @@ pub struct SrtlaIncoming {
 }
 
 pub struct SrtlaConnection {
+    pub(crate) conn_id: u64,
     #[cfg(feature = "test-internals")]
     pub socket: UdpSocket,
     #[cfg(not(feature = "test-internals"))]
@@ -173,6 +174,9 @@ pub struct SrtlaConnection {
 
 impl SrtlaConnection {
     pub async fn connect_from_ip(ip: IpAddr, host: &str, port: u16) -> Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
         let remote = resolve_remote(host, port).await?;
         let sock = bind_from_ip(ip, 0)?;
         sock.connect(&remote.into())?;
@@ -180,6 +184,7 @@ impl SrtlaConnection {
         std_sock.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(std_sock)?;
         Ok(Self {
+            conn_id: NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed),
             socket,
             remote,
             local_ip: ip,

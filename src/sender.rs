@@ -26,7 +26,7 @@ pub const SEQUENCE_MAP_CLEANUP_INTERVAL_MS: u64 = 5000;
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
 pub(crate) struct SequenceTrackingEntry {
-    pub(crate) conn_idx: usize,
+    pub(crate) conn_id: u64,
     pub(crate) timestamp_ms: u64,
 }
 
@@ -444,7 +444,7 @@ async fn forward_via_connection(
         seq_to_conn.insert(
             s,
             SequenceTrackingEntry {
-                conn_idx: sel_idx,
+                conn_id: connections[sel_idx].conn_id,
                 timestamp_ms: now_ms(),
             },
         );
@@ -509,11 +509,12 @@ async fn handle_housekeeping(
         for nak in incoming.nak_numbers.iter() {
             if let Some(entry) = seq_to_conn.get(nak) {
                 let current_time = now_ms();
-                if !entry.is_expired(current_time)
-                    && let Some(conn) = connections.get_mut(entry.conn_idx)
-                {
-                    conn.handle_nak(*nak as i32);
-                    continue;
+                if !entry.is_expired(current_time) {
+                    if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id)
+                    {
+                        conn.handle_nak(*nak as i32);
+                        continue;
+                    }
                 }
             }
             connections[i].handle_nak(*nak as i32);
@@ -847,13 +848,16 @@ pub(crate) async fn apply_connection_changes(
     let old_len = connections.len();
     connections.retain(|c| desired_labels.contains(&c.label));
 
-    // If connections were removed, reset selection state and clean up sequence
-    // tracking
+    // If connections were removed, reset selection state and remap sequence
+    // tracking to use stable conn_id instead of stale conn_idx
     if connections.len() != old_len {
         info!("removed {} stale connections", old_len - connections.len());
         *last_selected_idx = None;
 
-        seq_to_conn.retain(|_, entry| entry.conn_idx < connections.len());
+        // Retain only entries whose conn_id still exists in the connections vector
+        let valid_conn_ids: std::collections::HashSet<u64> =
+            connections.iter().map(|c| c.conn_id).collect();
+        seq_to_conn.retain(|_, entry| valid_conn_ids.contains(&entry.conn_id));
 
         seq_order.retain(|seq| seq_to_conn.contains_key(seq));
     }
