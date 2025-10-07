@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{Context, Result};
@@ -608,10 +609,8 @@ impl SrtlaConnection {
         // received)
         if self.connected && self.last_received.is_some() {
             let old = self.window;
-            self.window += 1;
-            if self.window > WINDOW_MAX * WINDOW_MULT {
-                self.window = WINDOW_MAX * WINDOW_MULT;
-            }
+            self.window = min(self.window + 1, WINDOW_MAX * WINDOW_MULT);
+
             if old < self.window && (self.window - old) > 100 {
                 debug!(
                     "{}: Major window recovery {} → {} (+{})",
@@ -831,7 +830,6 @@ impl SrtlaConnection {
         }
     }
 
-    #[allow(dead_code)]
     pub fn is_timed_out(&self) -> bool {
         !self.connected
             || if let Some(lr) = self.last_received {
