@@ -988,6 +988,7 @@ fn bind_from_ip(ip: IpAddr, port: u16) -> Result<Socket> {
         IpAddr::V6(_) => Domain::IPV6,
     };
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).context("create socket")?;
+    sock.set_nonblocking(true).context("set nonblocking")?;
 
     // Set send buffer size (100MB)
     const SEND_BUF_SIZE: usize = 100 * 1024 * 1024;
