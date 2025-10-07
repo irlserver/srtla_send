@@ -510,10 +510,8 @@ impl SrtlaConnection {
                     // Only increase if in_flight_pkts*WINDOW_MULT > window
                     if self.in_flight_packets * WINDOW_MULT > self.window {
                         let old = self.window;
-                        self.window += WINDOW_INCR - 1; // Note: WINDOW_INCR - 1 in C code
-                        if self.window > WINDOW_MAX * WINDOW_MULT {
-                            self.window = WINDOW_MAX * WINDOW_MULT;
-                        }
+                        // Note: WINDOW_INCR - 1 in C code
+                        self.window = min(self.window + WINDOW_INCR - 1, WINDOW_MAX * WINDOW_MULT);
                         debug!(
                             "{}: SRTLA ACK specific increased window {} → {} (seq={}, \
                              in_flight={}) [CLASSIC]",
@@ -565,10 +563,7 @@ impl SrtlaConnection {
                 };
 
                 if self.consecutive_acks_without_nak >= acks_required {
-                    self.window += WINDOW_INCR;
-                    if self.window > WINDOW_MAX * WINDOW_MULT {
-                        self.window = WINDOW_MAX * WINDOW_MULT;
-                    }
+                    self.window = min(self.window + WINDOW_INCR, WINDOW_MAX * WINDOW_MULT);
                     window_increased = true;
                     self.last_window_increase_ms = current_time;
                     self.consecutive_acks_without_nak = 0; // Reset counter to prevent burst increases
@@ -804,9 +799,7 @@ impl SrtlaConnection {
                 self.window += WINDOW_INCR * fast_mode_bonus;
             }
 
-            if self.window > WINDOW_MAX * WINDOW_MULT {
-                self.window = WINDOW_MAX * WINDOW_MULT;
-            }
+            self.window = min(self.window, WINDOW_MAX * WINDOW_MULT);
             self.last_window_increase_ms = now;
 
             if self.window > old_window {
