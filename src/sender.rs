@@ -495,14 +495,10 @@ async fn handle_housekeeping(
                 }
             }
 
-            // Phase 2: Classic mode mirrors the C implementation by bumping every
-            // active connection's window. Enhanced mode relies on the fine-grained
-            // Bond Bunny logic inside `handle_srtla_ack_specific` and skips the
-            // global +1 to avoid over-inflating other links.
-            if classic {
-                for c in connections.iter_mut() {
-                    c.handle_srtla_ack_global();
-                }
+            // ALWAYS increases window by +1, regardless of whether packet was in our in-flight
+            // This is the Moblin behavior - connection is healthy if receiving ACKs
+            for c in connections.iter_mut() {
+                c.handle_srtla_ack_global();
             }
         }
 
