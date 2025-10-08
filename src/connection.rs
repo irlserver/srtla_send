@@ -768,68 +768,70 @@ impl SrtlaConnection {
 
         let now = now_ms();
         let time_since_last_nak = if self.last_nak_time_ms > 0 {
-            now.saturating_sub(self.last_nak_time_ms)
+            Some(now.saturating_sub(self.last_nak_time_ms))
         } else {
-            u64::MAX
+            None
         };
 
-        if time_since_last_nak > 5000 && self.nak_burst_count > 0 {
-            self.nak_burst_count = 0;
-        }
+        if let Some(tsn) = time_since_last_nak {
+            if tsn > 5000 && self.nak_burst_count > 0 {
+                self.nak_burst_count = 0;
+            }
 
-        let min_wait_time = if self.fast_recovery_mode {
-            FAST_MIN_WAIT_MS
-        } else {
-            NORMAL_MIN_WAIT_MS
-        };
-        let increment_wait = if self.fast_recovery_mode {
-            FAST_INCREMENT_WAIT_MS
-        } else {
-            NORMAL_INCREMENT_WAIT_MS
-        };
-
-        if time_since_last_nak > min_wait_time
-            && now.saturating_sub(self.last_window_increase_ms) > increment_wait
-        {
-            let old_window = self.window;
-            // Conservative recovery multipliers (using cached values)
-            let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
-
-            // More conservative recovery based on how long since last NAK
-            if time_since_last_nak > 10_000 {
-                // No NAKs for 10+ seconds: moderate recovery (was 5s)
-                self.window += WINDOW_INCR * 2 * fast_mode_bonus;
-            } else if time_since_last_nak > 7_000 {
-                // No NAKs for 7+ seconds: slow recovery (was 3s)
-                self.window += WINDOW_INCR * fast_mode_bonus;
-            } else if time_since_last_nak > 5_000 {
-                // No NAKs for 5+ seconds: very slow recovery (was 1.5s)
-                self.window += WINDOW_INCR * fast_mode_bonus;
+            let min_wait_time = if self.fast_recovery_mode {
+                FAST_MIN_WAIT_MS
             } else {
-                // Recent NAKs: minimal recovery (keep same as before)
-                self.window += WINDOW_INCR * fast_mode_bonus;
-            }
+                NORMAL_MIN_WAIT_MS
+            };
+            let increment_wait = if self.fast_recovery_mode {
+                FAST_INCREMENT_WAIT_MS
+            } else {
+                NORMAL_INCREMENT_WAIT_MS
+            };
 
-            self.window = min(self.window, WINDOW_MAX * WINDOW_MULT);
-            self.last_window_increase_ms = now;
+            if tsn > min_wait_time
+                && now.saturating_sub(self.last_window_increase_ms) > increment_wait
+            {
+                let old_window = self.window;
+                // Conservative recovery multipliers (using cached values)
+                let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
 
-            if self.window > old_window {
-                debug!(
-                    "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
-                    self.label,
-                    old_window,
-                    self.window,
-                    (time_since_last_nak as f64) / 1000.0,
-                    self.fast_recovery_mode
-                );
-            }
+                // More conservative recovery based on how long since last NAK
+                if tsn > 10_000 {
+                    // No NAKs for 10+ seconds: moderate recovery (was 5s)
+                    self.window += WINDOW_INCR * 2 * fast_mode_bonus;
+                } else if tsn > 7_000 {
+                    // No NAKs for 7+ seconds: slow recovery (was 3s)
+                    self.window += WINDOW_INCR * fast_mode_bonus;
+                } else if tsn > 5_000 {
+                    // No NAKs for 5+ seconds: very slow recovery (was 1.5s)
+                    self.window += WINDOW_INCR * fast_mode_bonus;
+                } else {
+                    // Recent NAKs: minimal recovery (keep same as before)
+                    self.window += WINDOW_INCR * fast_mode_bonus;
+                }
 
-            if self.fast_recovery_mode && self.window >= FAST_RECOVERY_DISABLE_WINDOW {
-                self.fast_recovery_mode = false;
-                debug!(
-                    "{}: Disabling FAST RECOVERY MODE after time-based recovery (window={})",
-                    self.label, self.window
-                );
+                self.window = min(self.window, WINDOW_MAX * WINDOW_MULT);
+                self.last_window_increase_ms = now;
+
+                if self.window > old_window {
+                    debug!(
+                        "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
+                        self.label,
+                        old_window,
+                        self.window,
+                        (tsn as f64) / 1000.0,
+                        self.fast_recovery_mode
+                    );
+                }
+
+                if self.fast_recovery_mode && self.window >= FAST_RECOVERY_DISABLE_WINDOW {
+                    self.fast_recovery_mode = false;
+                    debug!(
+                        "{}: Disabling FAST RECOVERY MODE after time-based recovery (window={})",
+                        self.label, self.window
+                    );
+                }
             }
         }
     }
