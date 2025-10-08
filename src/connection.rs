@@ -537,10 +537,6 @@ impl SrtlaConnection {
             }
         }
 
-        if !found {
-            debug!("{}: ACK seq {} not found in packet log", self.label, seq);
-        }
-
         found
     }
 
@@ -776,6 +772,10 @@ impl SrtlaConnection {
         } else {
             u64::MAX
         };
+
+        if time_since_last_nak > 5000 && self.nak_burst_count > 0 {
+            self.nak_burst_count = 0;
+        }
 
         let min_wait_time = if self.fast_recovery_mode {
             FAST_MIN_WAIT_MS
