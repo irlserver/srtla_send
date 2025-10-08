@@ -21,3 +21,4 @@ target/
 *.c
 *.h
 bond-bunny-main/
+moblin/
