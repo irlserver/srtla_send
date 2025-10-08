@@ -529,11 +529,15 @@ async fn handle_housekeeping(
                 let label = connections[i].label.clone();
                 connections[i].record_reconnect_attempt();
                 warn!(
-                    "{} timed out; resetting connection state for recovery",
+                    "{} timed out; attempting full socket reconnection",
                     label
                 );
-                // Use C-style recovery: reset state but keep socket alive
-                connections[i].mark_for_recovery();
+                // Perform full socket reconnection
+                if let Err(e) = connections[i].reconnect().await {
+                    warn!("{} failed to reconnect: {}", label, e);
+                    // Fall back to mark_for_recovery if reconnect fails
+                    connections[i].mark_for_recovery();
+                }
 
                 match reg.pending_reg2_idx() {
                     Some(idx) if idx == i => {

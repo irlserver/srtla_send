@@ -932,7 +932,6 @@ impl SrtlaConnection {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn reconnect(&mut self) -> Result<()> {
         let sock = bind_from_ip(self.local_ip, 0)?;
         sock.connect(&self.remote.into())?;
@@ -940,9 +939,9 @@ impl SrtlaConnection {
         std_sock.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(std_sock)?;
         self.socket = socket;
-        self.connected = true;
-        self.last_received = Some(Instant::now());
-        self.window = WINDOW_MIN * WINDOW_MULT;
+        self.connected = false;
+        self.last_received = None;
+        self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
         self.packet_idx = 0;
