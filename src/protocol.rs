@@ -24,7 +24,7 @@ pub const SRTLA_TYPE_REG3_LEN: usize = 2;
 
 pub const MTU: usize = 1500;
 
-pub const CONN_TIMEOUT: u64 = 4; // sec
+pub const CONN_TIMEOUT: u64 = 5; // sec
 pub const REG2_TIMEOUT: u64 = 4; // sec
 pub const REG3_TIMEOUT: u64 = 4; // sec
 pub const GLOBAL_TIMEOUT: u64 = 10; // sec

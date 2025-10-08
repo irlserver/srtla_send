@@ -79,6 +79,12 @@ mod tests {
         let mut conn = rt.block_on(create_test_connection());
         let initial_window = conn.window;
 
+        // Register packets first (simulate sending them)
+        conn.register_packet(100);
+        conn.register_packet(101);
+        conn.register_packet(102);
+        conn.register_packet(103);
+
         // Test single NAK
         conn.handle_nak(100);
         assert_eq!(conn.nak_count, 1);
@@ -400,7 +406,8 @@ mod tests {
 
         assert!(!conn.fast_recovery_mode);
 
-        // Reduce window to trigger fast recovery
+        // Register packet first, then reduce window to trigger fast recovery
+        conn.register_packet(100);
         conn.window = 1500;
         conn.handle_nak(100);
 

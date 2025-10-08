@@ -436,6 +436,8 @@ impl SrtlaConnection {
             debug!("{}: NAK seq {} not found in packet log", self.label, seq);
         }
 
+        // Always track NAK statistics for monitoring, regardless of whether packet was
+        // found in our log (could be attributed to wrong connection or very old)
         self.nak_count = self.nak_count.saturating_add(1);
         let current_time = now_ms();
 
@@ -462,6 +464,15 @@ impl SrtlaConnection {
 
         self.last_nak_time_ms = current_time;
         self.consecutive_acks_without_nak = 0;
+
+        // Only reduce window if we actually sent this packet (matches Belabox/Moblin
+        // behavior). This prevents unfair window reduction from:
+        // - NAKs for packets sent on other connections (before sequence attribution)
+        // - NAKs for very old packets outside our search window
+        // - Spurious/misattributed NAKs from network issues
+        if !found {
+            return;
+        }
 
         let old_window = self.window;
         self.window = (self.window - WINDOW_DECR).max(WINDOW_MIN * WINDOW_MULT);
