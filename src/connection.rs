@@ -427,7 +427,7 @@ impl SrtlaConnection {
         }
     }
 
-    pub fn handle_nak(&mut self, seq: i32) {
+    pub fn handle_nak(&mut self, seq: i32) -> bool {
         let mut found = false;
         for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
@@ -477,7 +477,7 @@ impl SrtlaConnection {
         // - NAKs for very old packets outside our search window
         // - Spurious/misattributed NAKs from network issues
         if !found {
-            return;
+            return false;
         }
 
         let old_window = self.window;
@@ -503,6 +503,8 @@ impl SrtlaConnection {
                 self.label, self.window
             );
         }
+
+        true
     }
 
     pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool) -> bool {
