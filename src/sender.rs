@@ -23,6 +23,8 @@ pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
 pub const SEQUENCE_TRACKING_MAX_AGE_MS: u64 = 5000;
 pub const SEQUENCE_MAP_CLEANUP_INTERVAL_MS: u64 = 5000;
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
+pub const HOUSEKEEPING_INTERVAL_MS: u64 = 5;
+const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
 
 pub(crate) struct SequenceTrackingEntry {
     pub(crate) conn_id: u64,
@@ -105,8 +107,12 @@ pub async fn run_sender_with_toggles(
     }
 
     let mut recv_buf = vec![0u8; MTU];
-    let mut housekeeping_timer = time::interval(Duration::from_millis(1));
-    let mut status_counter: u64 = 0;
+    let mut housekeeping_timer = time::interval_at(
+        Instant::now() + Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
+        Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
+    );
+    housekeeping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut status_elapsed_ms: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
     let mut seq_to_conn: HashMap<u32, SequenceTrackingEntry> =
         HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
@@ -122,46 +128,31 @@ pub async fn run_sender_with_toggles(
     let mut sighup = signal(SignalKind::hangup())?;
 
     // Main loop - run housekeeping frequently like C version
+    // Run housekeeping once before entering the main event loop so we start in a clean state.
+    {
+        let classic = toggles
+            .classic_mode
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Err(err) = handle_housekeeping(
+            &mut connections,
+            &mut reg,
+            &instant_tx,
+            last_client_addr,
+            &local_listener,
+            &mut seq_to_conn,
+            &mut seq_order,
+            &mut last_sequence_cleanup_ms,
+            classic,
+            &mut all_failed_at,
+        )
+        .await
+        {
+            warn!("initial housekeeping failed: {err}");
+        }
+    }
+
     #[cfg(unix)]
     loop {
-        {
-            let classic = toggles
-                .classic_mode
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let _ = handle_housekeeping(
-                &mut connections,
-                &mut reg,
-                &instant_tx,
-                last_client_addr,
-                &local_listener,
-                &mut seq_to_conn,
-                &mut seq_order,
-                &mut last_sequence_cleanup_ms,
-                classic,
-                &mut all_failed_at,
-            )
-            .await;
-        }
-
-        // Apply pending connection changes immediately (like C srtla_send)
-        // This matches C behavior: SIGHUP sets flag, next loop iteration applies changes
-        if let Some(changes) = pending_changes.take()
-            && let Some(new_ips) = changes.new_ips
-        {
-            info!("applying queued connection changes: {} IPs", new_ips.len());
-            apply_connection_changes(
-                &mut connections,
-                &new_ips,
-                &changes.receiver_host,
-                changes.receiver_port,
-                &mut last_selected_idx,
-                &mut seq_to_conn,
-                &mut seq_order,
-            )
-            .await;
-            info!("connection changes applied successfully");
-        }
-
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(
@@ -179,10 +170,44 @@ pub async fn run_sender_with_toggles(
                 .await;
             }
             _ = housekeeping_timer.tick() => {
-                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
-                status_counter = status_counter.wrapping_add(1);
-                if status_counter.is_multiple_of(30000) {
+                let classic = toggles
+                    .classic_mode
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if let Err(err) = handle_housekeeping(
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &mut last_sequence_cleanup_ms,
+                    classic,
+                    &mut all_failed_at,
+                ).await {
+                    warn!("housekeeping failed: {err}");
+                }
+
+                if let Some(changes) = pending_changes.take()
+                    && let Some(new_ips) = changes.new_ips
+                {
+                    info!("applying queued connection changes: {} IPs", new_ips.len());
+                    apply_connection_changes(
+                        &mut connections,
+                        &new_ips,
+                        &changes.receiver_host,
+                        changes.receiver_port,
+                        &mut last_selected_idx,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                    ).await;
+                    info!("connection changes applied successfully");
+                }
+
+                status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
+                if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                    status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
             }
             _ = sighup.recv() => {
@@ -201,43 +226,6 @@ pub async fn run_sender_with_toggles(
 
     #[cfg(not(unix))]
     loop {
-        {
-            let classic = toggles
-                .classic_mode
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let _ = handle_housekeeping(
-                &mut connections,
-                &mut reg,
-                &instant_tx,
-                last_client_addr,
-                &local_listener,
-                &mut seq_to_conn,
-                &mut seq_order,
-                &mut last_sequence_cleanup_ms,
-                classic,
-                &mut all_failed_at,
-            )
-            .await;
-        }
-
-        // Apply pending connection changes immediately (like C srtla_send)
-        if let Some(changes) = pending_changes.take() {
-            if let Some(new_ips) = changes.new_ips {
-                info!("applying queued connection changes: {} IPs", new_ips.len());
-                apply_connection_changes(
-                    &mut connections,
-                    &new_ips,
-                    &changes.receiver_host,
-                    changes.receiver_port,
-                    &mut last_selected_idx,
-                    &mut seq_to_conn,
-                    &mut seq_order,
-                )
-                .await;
-                info!("connection changes applied successfully");
-            }
-        }
-
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(
@@ -255,10 +243,45 @@ pub async fn run_sender_with_toggles(
                 .await;
             }
             _ = housekeeping_timer.tick() => {
-                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
-                status_counter = status_counter.wrapping_add(1);
-                if status_counter.is_multiple_of(30000) {
+                let classic = toggles
+                    .classic_mode
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if let Err(err) = handle_housekeeping(
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &mut last_sequence_cleanup_ms,
+                    classic,
+                    &mut all_failed_at,
+                ).await {
+                    warn!("housekeeping failed: {err}");
+                }
+
+                if let Some(changes) = pending_changes.take()
+                    && let Some(new_ips) = changes.new_ips
+                {
+                    info!("applying queued connection changes: {} IPs", new_ips.len());
+                    apply_connection_changes(
+                        &mut connections,
+                        &new_ips,
+                        &changes.receiver_host,
+                        changes.receiver_port,
+                        &mut last_selected_idx,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                    )
+                    .await;
+                    info!("connection changes applied successfully");
+                }
+
+                status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
+                if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                    status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
             }
         }
@@ -626,13 +649,24 @@ fn cleanup_expired_sequence_tracking(
     seq_order.retain(|seq| seq_to_conn.contains_key(seq));
 
     if removed_count > 0 {
-        info!(
-            "Cleaned up {} stale sequence mappings ({} → {}, {:.1}% capacity)",
-            removed_count,
-            before_size,
-            seq_to_conn.len(),
-            (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0
-        );
+        let utilization = (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0;
+        if utilization >= 75.0 {
+            info!(
+                "Cleaned up {} stale sequence mappings ({} → {}, {:.1}% capacity)",
+                removed_count,
+                before_size,
+                seq_to_conn.len(),
+                utilization
+            );
+        } else {
+            debug!(
+                "Cleaned up {} stale sequence mappings ({} → {}, {:.1}% capacity)",
+                removed_count,
+                before_size,
+                seq_to_conn.len(),
+                utilization
+            );
+        }
     }
 
     if seq_to_conn.len() > (MAX_SEQUENCE_TRACKING as f64 * 0.8) as usize {

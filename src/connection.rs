@@ -330,7 +330,7 @@ impl SrtlaConnection {
                         } else if pt == SRT_TYPE_NAK {
                             let nak_list = parse_srt_nak(&buf[..n]);
                             if !nak_list.is_empty() {
-                                info!(
+                                debug!(
                                     "📦 NAK received from {}: {} sequences",
                                     self.label,
                                     nak_list.len()
