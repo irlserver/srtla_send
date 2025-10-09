@@ -485,17 +485,25 @@ async fn handle_housekeeping(
         }
 
         for nak in incoming.nak_numbers.iter() {
+            let mut handled = false;
             if let Some(entry) = seq_to_conn.get(nak) {
                 let current_time = now_ms();
                 if !entry.is_expired(current_time) {
                     if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id)
                     {
                         conn.handle_nak(*nak as i32);
-                        continue;
+                        handled = true;
                     }
                 }
             }
-            connections[i].handle_nak(*nak as i32);
+
+            if !handled {
+                for conn in connections.iter_mut() {
+                    if conn.handle_nak(*nak as i32) {
+                        break;
+                    }
+                }
+            }
         }
 
         // Forward responses back to local SRT client
