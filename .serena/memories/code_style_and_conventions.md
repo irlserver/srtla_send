@@ -33,7 +33,6 @@ The project uses **Rust nightly** with unstable rustfmt features:
 
 ## Documentation
 
-- **Comments**: NO COMMENTS unless explicitly asked, but NEVER remove existing comments - update them if needed
 - Keep code self-documenting through clear naming
 - Use doc comments for public API when necessary
 
