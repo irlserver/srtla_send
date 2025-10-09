@@ -1,4 +1,3 @@
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -11,13 +10,12 @@ use tokio::net::UdpSocket;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 // mpsc is available in tokio::sync
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-use crate::connection::SrtlaConnection;
+use crate::connection::{SrtlaConnection, SrtlaIncoming};
 use crate::protocol::{self, MTU, PKT_LOG_SIZE};
 use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
@@ -49,66 +47,104 @@ pub struct PendingConnectionChanges {
 
 type ConnectionId = u64;
 
-struct IoWatcher {
+struct ReaderHandle {
     handle: JoinHandle<()>,
-    socket_key: usize,
 }
 
-fn spawn_io_watcher(
+struct UplinkPacket {
     conn_id: ConnectionId,
+    bytes: Vec<u8>,
+}
+
+fn spawn_reader(
+    conn_id: ConnectionId,
+    label: String,
     socket: Arc<UdpSocket>,
-    notify_tx: UnboundedSender<ConnectionId>,
-) -> IoWatcher {
-    let socket_key = Arc::as_ptr(&socket) as usize;
+    packet_tx: UnboundedSender<UplinkPacket>,
+) -> ReaderHandle {
     let handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; MTU];
         loop {
-            match socket.readable().await {
-                Ok(_ready) => {
-                    if notify_tx.send(conn_id).is_err() {
+            match socket.recv_from(&mut buf).await {
+                Ok((n, _)) if n > 0 => {
+                    let mut packet = Vec::with_capacity(n);
+                    packet.extend_from_slice(&buf[..n]);
+                    if packet_tx
+                        .send(UplinkPacket {
+                            conn_id,
+                            bytes: packet,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
-                Err(_) => break,
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("{}: uplink recv error: {}", label, err);
+                    if packet_tx
+                        .send(UplinkPacket {
+                            conn_id,
+                            bytes: Vec::new(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    // Allow brief pause before retrying to avoid tight error loops.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
             }
         }
     });
-    IoWatcher { handle, socket_key }
+    ReaderHandle { handle }
 }
 
-fn ensure_read_watchers(
+fn sync_readers(
     connections: &[SrtlaConnection],
-    watchers: &mut HashMap<ConnectionId, IoWatcher>,
-    notify_tx: &UnboundedSender<ConnectionId>,
+    readers: &mut HashMap<ConnectionId, ReaderHandle>,
+    packet_tx: &UnboundedSender<UplinkPacket>,
 ) {
     let mut active_ids = HashSet::with_capacity(connections.len());
     for conn in connections {
         active_ids.insert(conn.conn_id);
-        let socket_key = Arc::as_ptr(&conn.socket) as usize;
-        match watchers.entry(conn.conn_id) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().socket_key != socket_key {
-                    entry.get().handle.abort();
-                    let watcher =
-                        spawn_io_watcher(conn.conn_id, conn.socket.clone(), notify_tx.clone());
-                    entry.insert(watcher);
-                }
-            }
-            Entry::Vacant(entry) => {
-                let watcher =
-                    spawn_io_watcher(conn.conn_id, conn.socket.clone(), notify_tx.clone());
-                entry.insert(watcher);
-            }
-        }
+        readers.entry(conn.conn_id).or_insert_with(|| {
+            spawn_reader(
+                conn.conn_id,
+                conn.label.clone(),
+                conn.socket.clone(),
+                packet_tx.clone(),
+            )
+        });
     }
 
-    watchers.retain(|conn_id, watcher| {
+    readers.retain(|conn_id, reader| {
         if active_ids.contains(conn_id) {
             true
         } else {
-            watcher.handle.abort();
+            reader.handle.abort();
             false
         }
     });
+}
+
+fn restart_reader_for(
+    conn: &SrtlaConnection,
+    readers: &mut HashMap<ConnectionId, ReaderHandle>,
+    packet_tx: &UnboundedSender<UplinkPacket>,
+) {
+    if let Some(reader) = readers.remove(&conn.conn_id) {
+        reader.handle.abort();
+    }
+    readers.insert(
+        conn.conn_id,
+        spawn_reader(
+            conn.conn_id,
+            conn.label.clone(),
+            conn.socket.clone(),
+            packet_tx.clone(),
+        ),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -122,14 +158,19 @@ async fn process_connection_events(
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     _seq_order: &mut VecDeque<u32>,
     classic: bool,
+    incoming_override: Option<SrtlaIncoming>,
 ) -> Result<()> {
     if idx >= connections.len() {
         return Ok(());
     }
 
-    let incoming = connections[idx]
-        .drain_incoming(idx, reg, instant_tx)
-        .await?;
+    let incoming = if let Some(overridden) = incoming_override {
+        overridden
+    } else {
+        connections[idx]
+            .drain_incoming(idx, reg, instant_tx)
+            .await?
+    };
 
     if !incoming.read_any
         && incoming.ack_numbers.is_empty()
@@ -188,8 +229,8 @@ async fn process_connection_events(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_uplink_notification(
-    conn_id: ConnectionId,
+async fn handle_uplink_packet(
+    packet: UplinkPacket,
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
     instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
@@ -199,45 +240,20 @@ async fn handle_uplink_notification(
     seq_order: &mut VecDeque<u32>,
     toggles: &DynamicToggles,
 ) {
-    if let Some(idx) = connections.iter().position(|c| c.conn_id == conn_id) {
-        let classic = toggles
-            .classic_mode
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if let Err(err) = process_connection_events(
-            idx,
-            connections,
-            reg,
-            instant_tx,
-            last_client_addr,
-            local_listener,
-            seq_to_conn,
-            seq_order,
-            classic,
-        )
-        .await
-        {
-            warn!("failed to process uplink {}: {err}", conn_id);
-        }
+    if packet.bytes.is_empty() {
+        return;
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn drain_uplink_notifications(
-    read_notify_rx: &mut UnboundedReceiver<ConnectionId>,
-    connections: &mut [SrtlaConnection],
-    reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
-    last_client_addr: Option<SocketAddr>,
-    local_listener: &UdpSocket,
-    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
-    seq_order: &mut VecDeque<u32>,
-    toggles: &DynamicToggles,
-) {
-    loop {
-        match read_notify_rx.try_recv() {
-            Ok(conn_id) => {
-                handle_uplink_notification(
-                    conn_id,
+    if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
+        match connections[idx]
+            .process_packet(idx, reg, instant_tx, &packet.bytes)
+            .await
+        {
+            Ok(incoming) => {
+                let classic = toggles
+                    .classic_mode
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if let Err(err) = process_connection_events(
+                    idx,
                     connections,
                     reg,
                     instant_tx,
@@ -245,13 +261,47 @@ async fn drain_uplink_notifications(
                     local_listener,
                     seq_to_conn,
                     seq_order,
-                    toggles,
+                    classic,
+                    Some(incoming),
                 )
-                .await;
+                .await
+                {
+                    warn!("failed to apply uplink {} packet: {err}", packet.conn_id);
+                }
             }
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => break,
+            Err(err) => warn!(
+                "failed to process packet for uplink {}: {}",
+                packet.conn_id, err
+            ),
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drain_packet_queue(
+    packet_rx: &mut UnboundedReceiver<UplinkPacket>,
+    connections: &mut [SrtlaConnection],
+    reg: &mut SrtlaRegistrationManager,
+    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    toggles: &DynamicToggles,
+) {
+    while let Ok(packet) = packet_rx.try_recv() {
+        handle_uplink_packet(
+            packet,
+            connections,
+            reg,
+            instant_tx,
+            last_client_addr,
+            local_listener,
+            seq_to_conn,
+            seq_order,
+            toggles,
+        )
+        .await;
     }
 }
 
@@ -292,9 +342,9 @@ pub async fn run_sender_with_toggles(
 
     reg.start_probing(&mut connections).await;
 
-    let (read_notify_tx, mut read_notify_rx) = unbounded_channel::<ConnectionId>();
-    let mut io_watchers: HashMap<ConnectionId, IoWatcher> = HashMap::new();
-    ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
+    let (packet_tx, mut packet_rx) = unbounded_channel::<UplinkPacket>();
+    let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
+    sync_readers(&connections, &mut reader_handles, &packet_tx);
 
     // Create instant ACK forwarding channel and shared client address
     let (instant_tx, instant_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -357,6 +407,8 @@ pub async fn run_sender_with_toggles(
             &mut last_sequence_cleanup_ms,
             classic,
             &mut all_failed_at,
+            &mut reader_handles,
+            &packet_tx,
         )
         .await
         {
@@ -381,8 +433,8 @@ pub async fn run_sender_with_toggles(
                     &toggles,
                 )
                 .await;
-                drain_uplink_notifications(
-                    &mut read_notify_rx,
+                drain_packet_queue(
+                    &mut packet_rx,
                     &mut connections,
                     &mut reg,
                     &instant_tx,
@@ -394,10 +446,10 @@ pub async fn run_sender_with_toggles(
                 )
                 .await;
             }
-            read_event = read_notify_rx.recv() => {
-                if let Some(conn_id) = read_event {
-                    handle_uplink_notification(
-                        conn_id,
+            packet = packet_rx.recv() => {
+                if let Some(packet) = packet {
+                    handle_uplink_packet(
+                        packet,
                         &mut connections,
                         &mut reg,
                         &instant_tx,
@@ -406,10 +458,9 @@ pub async fn run_sender_with_toggles(
                         &mut seq_to_conn,
                         &mut seq_order,
                         &toggles,
-                    )
-                    .await;
-                    drain_uplink_notifications(
-                        &mut read_notify_rx,
+                    ).await;
+                    drain_packet_queue(
+                        &mut packet_rx,
                         &mut connections,
                         &mut reg,
                         &instant_tx,
@@ -418,8 +469,9 @@ pub async fn run_sender_with_toggles(
                         &mut seq_to_conn,
                         &mut seq_order,
                         &toggles,
-                    )
-                    .await;
+                    ).await;
+                } else {
+                    return Ok(());
                 }
             }
             _ = housekeeping_timer.tick() => {
@@ -434,6 +486,8 @@ pub async fn run_sender_with_toggles(
                     &mut last_sequence_cleanup_ms,
                     classic,
                     &mut all_failed_at,
+                    &mut reader_handles,
+                    &packet_tx,
                 ).await {
                     warn!("housekeeping failed: {err}");
                 }
@@ -452,7 +506,7 @@ pub async fn run_sender_with_toggles(
                         &mut seq_order,
                     ).await;
                     info!("connection changes applied successfully");
-                    ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
+                    sync_readers(&connections, &mut reader_handles, &packet_tx);
                 }
 
                 status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
@@ -461,9 +515,9 @@ pub async fn run_sender_with_toggles(
                     status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
 
-                ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
-                drain_uplink_notifications(
-                    &mut read_notify_rx,
+                sync_readers(&connections, &mut reader_handles, &packet_tx);
+                drain_packet_queue(
+                    &mut packet_rx,
                     &mut connections,
                     &mut reg,
                     &instant_tx,
@@ -485,8 +539,8 @@ pub async fn run_sender_with_toggles(
                     });
                     info!("uplink IP changes queued for next processing cycle");
                 }
-                drain_uplink_notifications(
-                    &mut read_notify_rx,
+                drain_packet_queue(
+                    &mut packet_rx,
                     &mut connections,
                     &mut reg,
                     &instant_tx,
@@ -518,8 +572,8 @@ pub async fn run_sender_with_toggles(
                     &toggles,
                 )
                 .await;
-                drain_uplink_notifications(
-                    &mut read_notify_rx,
+                drain_packet_queue(
+                    &mut packet_rx,
                     &mut connections,
                     &mut reg,
                     &instant_tx,
@@ -531,10 +585,10 @@ pub async fn run_sender_with_toggles(
                 )
                 .await;
             }
-            read_event = read_notify_rx.recv() => {
-                if let Some(conn_id) = read_event {
-                    handle_uplink_notification(
-                        conn_id,
+            packet = packet_rx.recv() => {
+                if let Some(packet) = packet {
+                    handle_uplink_packet(
+                        packet,
                         &mut connections,
                         &mut reg,
                         &instant_tx,
@@ -543,10 +597,9 @@ pub async fn run_sender_with_toggles(
                         &mut seq_to_conn,
                         &mut seq_order,
                         &toggles,
-                    )
-                    .await;
-                    drain_uplink_notifications(
-                        &mut read_notify_rx,
+                    ).await;
+                    drain_packet_queue(
+                        &mut packet_rx,
                         &mut connections,
                         &mut reg,
                         &instant_tx,
@@ -555,8 +608,9 @@ pub async fn run_sender_with_toggles(
                         &mut seq_to_conn,
                         &mut seq_order,
                         &toggles,
-                    )
-                    .await;
+                    ).await;
+                } else {
+                    return Ok(());
                 }
             }
             _ = housekeeping_timer.tick() => {
@@ -571,26 +625,28 @@ pub async fn run_sender_with_toggles(
                     &mut last_sequence_cleanup_ms,
                     classic,
                     &mut all_failed_at,
+                    &mut reader_handles,
+                    &packet_tx,
                 ).await {
-                    warn!("housekeeping failed: {err}");
-                }
+                   warn!("housekeeping failed: {err}");
+               }
 
-                if let Some(changes) = pending_changes.take()
-                    && let Some(new_ips) = changes.new_ips
-                {
-                    info!("applying queued connection changes: {} IPs", new_ips.len());
-                    apply_connection_changes(
-                        &mut connections,
-                        &new_ips,
-                        &changes.receiver_host,
-                        changes.receiver_port,
-                        &mut last_selected_idx,
-                        &mut seq_to_conn,
-                        &mut seq_order,
-                    )
-                    .await;
-                    info!("connection changes applied successfully");
-                    ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
+               if let Some(changes) = pending_changes.take()
+                   && let Some(new_ips) = changes.new_ips
+               {
+                   info!("applying queued connection changes: {} IPs", new_ips.len());
+                   apply_connection_changes(
+                       &mut connections,
+                       &new_ips,
+                       &changes.receiver_host,
+                       changes.receiver_port,
+                       &mut last_selected_idx,
+                       &mut seq_to_conn,
+                       &mut seq_order,
+                   )
+                   .await;
+                   info!("connection changes applied successfully");
+                    sync_readers(&connections, &mut reader_handles, &packet_tx);
                 }
 
                 status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
@@ -599,9 +655,9 @@ pub async fn run_sender_with_toggles(
                     status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
 
-                ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
-                drain_uplink_notifications(
-                    &mut read_notify_rx,
+                sync_readers(&connections, &mut reader_handles, &packet_tx);
+                drain_packet_queue(
+                    &mut packet_rx,
                     &mut connections,
                     &mut reg,
                     &instant_tx,
@@ -795,6 +851,8 @@ async fn handle_housekeeping(
     last_sequence_cleanup_ms: &mut u64,
     classic: bool,
     all_failed_at: &mut Option<Instant>,
+    reader_handles: &mut HashMap<ConnectionId, ReaderHandle>,
+    packet_tx: &UnboundedSender<UplinkPacket>,
 ) -> Result<()> {
     // If we're waiting on a REG2 response past the timeout, proactively retry REG1
     let current_ms = now_ms();
@@ -817,6 +875,8 @@ async fn handle_housekeeping(
                     warn!("{} failed to reconnect: {}", label, e);
                     // Fall back to mark_for_recovery if reconnect fails
                     connections[i].mark_for_recovery();
+                } else {
+                    restart_reader_for(&connections[i], reader_handles, packet_tx);
                 }
 
                 match reg.pending_reg2_idx() {

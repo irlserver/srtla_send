@@ -24,7 +24,9 @@ const FAST_MIN_WAIT_MS: u64 = 500;
 const NORMAL_INCREMENT_WAIT_MS: u64 = 1000;
 const FAST_INCREMENT_WAIT_MS: u64 = 300;
 const FAST_RECOVERY_DISABLE_WINDOW: i32 = 12_000;
+const STARTUP_GRACE_MS: u64 = 1_500;
 
+#[derive(Default)]
 pub struct SrtlaIncoming {
     pub forward_to_client: SmallVec<Vec<u8>, 4>,
     pub ack_numbers: SmallVec<u32, 4>,
@@ -170,6 +172,10 @@ pub struct SrtlaConnection {
     pub connection_established_ms: u64,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) connection_established_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub startup_grace_deadline_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) startup_grace_deadline_ms: u64,
 }
 
 impl SrtlaConnection {
@@ -183,6 +189,7 @@ impl SrtlaConnection {
         let std_sock: std::net::UdpSocket = sock.into();
         std_sock.set_nonblocking(true)?;
         let socket = Arc::new(UdpSocket::from_std(std_sock)?);
+        let startup_deadline = now_ms() + STARTUP_GRACE_MS;
         Ok(Self {
             conn_id: NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed),
             socket,
@@ -218,6 +225,7 @@ impl SrtlaConnection {
             last_reconnect_attempt_ms: 0,
             reconnect_failure_count: 0,
             connection_established_ms: 0, // Will be set when REG3 is received
+            startup_grace_deadline_ms: startup_deadline,
         })
     }
 
@@ -277,94 +285,21 @@ impl SrtlaConnection {
         instant_forwarder: &std::sync::mpsc::Sender<Vec<u8>>,
     ) -> Result<SrtlaIncoming> {
         let mut buf = [0u8; MTU];
-        let mut read_any = false;
-        let mut forward: SmallVec<Vec<u8>, 4> = SmallVec::new();
-        let mut acks: SmallVec<u32, 4> = SmallVec::new();
-        let mut naks: SmallVec<u32, 4> = SmallVec::new();
-        let mut srtla_acks: SmallVec<u32, 4> = SmallVec::new();
+        let mut incoming = SrtlaIncoming::default();
         loop {
             match self.socket.try_recv(&mut buf) {
                 Ok(n) => {
                     if n == 0 {
                         break;
                     }
-                    read_any = true;
-                    let recv_time = Instant::now();
-                    let pt = get_packet_type(&buf[..n]);
-                    if let Some(pt) = pt {
-                        // registration first
-                        if let Some(event) = reg.process_registration_packet(conn_idx, &buf[..n]) {
-                            match event {
-                                RegistrationEvent::RegNgp => {
-                                    reg.try_send_reg1_immediately(conn_idx, self).await;
-                                }
-                                RegistrationEvent::Reg3 => {
-                                    self.connected = true;
-                                    self.last_received = Some(recv_time);
-                                    if self.connection_established_ms == 0 {
-                                        self.connection_established_ms = crate::utils::now_ms();
-                                    }
-                                    self.mark_reconnect_success();
-                                }
-                                RegistrationEvent::RegErr => {
-                                    self.connected = false;
-                                    self.last_received = None;
-                                }
-                                RegistrationEvent::Reg2 => {
-                                    // No state updates required for intermediate registration packets
-                                }
-                            }
-                            continue;
-                        }
-                        self.last_received = Some(recv_time);
-                        // Protocol handling
-                        if pt == SRT_TYPE_ACK {
-                            if let Some(ack) = parse_srt_ack(&buf[..n]) {
-                                acks.push(ack);
-                            }
-                            // Create packet once and share it
-                            let ack_packet = buf[..n].to_vec();
-                            // Instantly forward ACKs for minimal RTT
-                            let _ = instant_forwarder.send(ack_packet.clone());
-                            // Also add to regular batch for compatibility
-                            forward.push(ack_packet);
-                        } else if pt == SRT_TYPE_NAK {
-                            let nak_list = parse_srt_nak(&buf[..n]);
-                            if !nak_list.is_empty() {
-                                debug!(
-                                    "📦 NAK received from {}: {} sequences",
-                                    self.label,
-                                    nak_list.len()
-                                );
-                                for seq in nak_list {
-                                    naks.push(seq);
-                                }
-                            }
-                            // Forward NAKs to SRT client (like C implementation does)
-                            forward.push(buf[..n].to_vec());
-                        } else if pt == SRTLA_TYPE_ACK {
-                            // Collect SRTLA ACK packets for global processing
-                            let ack_list = parse_srtla_ack(&buf[..n]);
-                            if !ack_list.is_empty() {
-                                debug!(
-                                    "🎯 SRTLA ACK received from {}: {} sequences",
-                                    self.label,
-                                    ack_list.len()
-                                );
-                                for seq in ack_list {
-                                    srtla_acks.push(seq);
-                                }
-                            }
-                            // Don't forward SRTLA ACKs to SRT client
-                        } else if pt == SRTLA_TYPE_KEEPALIVE {
-                            // handle keepalive as RTT response
-                            self.handle_keepalive_response(&buf[..n]);
-                        } else {
-                            // Forward other SRT packets (handshake, shutdown, data, other control)
-                            // If control bit (0x8000) is set or data/handshake/shutdown, forward
-                            forward.push(buf[..n].to_vec());
-                        }
-                    }
+                    self.process_packet_internal(
+                        conn_idx,
+                        reg,
+                        instant_forwarder,
+                        &buf[..n],
+                        &mut incoming,
+                    )
+                    .await?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => {
@@ -373,13 +308,97 @@ impl SrtlaConnection {
                 }
             }
         }
-        Ok(SrtlaIncoming {
-            forward_to_client: forward,
-            ack_numbers: acks,
-            nak_numbers: naks,
-            srtla_ack_numbers: srtla_acks,
-            read_any,
-        })
+        Ok(incoming)
+    }
+
+    pub async fn process_packet(
+        &mut self,
+        conn_idx: usize,
+        reg: &mut SrtlaRegistrationManager,
+        instant_forwarder: &std::sync::mpsc::Sender<Vec<u8>>,
+        data: &[u8],
+    ) -> Result<SrtlaIncoming> {
+        let mut incoming = SrtlaIncoming::default();
+        self.process_packet_internal(conn_idx, reg, instant_forwarder, data, &mut incoming)
+            .await?;
+        Ok(incoming)
+    }
+
+    async fn process_packet_internal(
+        &mut self,
+        conn_idx: usize,
+        reg: &mut SrtlaRegistrationManager,
+        instant_forwarder: &std::sync::mpsc::Sender<Vec<u8>>,
+        data: &[u8],
+        incoming: &mut SrtlaIncoming,
+    ) -> Result<()> {
+        incoming.read_any = true;
+        let recv_time = Instant::now();
+        let pt = get_packet_type(data);
+        if let Some(pt) = pt {
+            if let Some(event) = reg.process_registration_packet(conn_idx, data) {
+                match event {
+                    RegistrationEvent::RegNgp => {
+                        reg.try_send_reg1_immediately(conn_idx, self).await;
+                    }
+                    RegistrationEvent::Reg3 => {
+                        self.connected = true;
+                        self.last_received = Some(recv_time);
+                        if self.connection_established_ms == 0 {
+                            self.connection_established_ms = crate::utils::now_ms();
+                        }
+                        self.mark_reconnect_success();
+                    }
+                    RegistrationEvent::RegErr => {
+                        self.connected = false;
+                        self.last_received = None;
+                    }
+                    RegistrationEvent::Reg2 => {}
+                }
+                return Ok(());
+            }
+
+            self.last_received = Some(recv_time);
+
+            if pt == SRT_TYPE_ACK {
+                if let Some(ack) = parse_srt_ack(data) {
+                    incoming.ack_numbers.push(ack);
+                }
+                let ack_packet = data.to_vec();
+                let _ = instant_forwarder.send(ack_packet.clone());
+                incoming.forward_to_client.push(ack_packet);
+            } else if pt == SRT_TYPE_NAK {
+                let nak_list = parse_srt_nak(data);
+                if !nak_list.is_empty() {
+                    debug!(
+                        "📦 NAK received from {}: {} sequences",
+                        self.label,
+                        nak_list.len()
+                    );
+                    for seq in nak_list {
+                        incoming.nak_numbers.push(seq);
+                    }
+                }
+                incoming.forward_to_client.push(data.to_vec());
+            } else if pt == SRTLA_TYPE_ACK {
+                let ack_list = parse_srtla_ack(data);
+                if !ack_list.is_empty() {
+                    debug!(
+                        "🎯 SRTLA ACK received from {}: {} sequences",
+                        self.label,
+                        ack_list.len()
+                    );
+                    for seq in ack_list {
+                        incoming.srtla_ack_numbers.push(seq);
+                    }
+                }
+            } else if pt == SRTLA_TYPE_KEEPALIVE {
+                self.handle_keepalive_response(data);
+            } else {
+                incoming.forward_to_client.push(data.to_vec());
+            }
+        }
+        Ok(())
     }
 
     pub fn register_packet(&mut self, seq: i32) {
@@ -846,6 +865,10 @@ impl SrtlaConnection {
     }
 
     pub fn is_timed_out(&self) -> bool {
+        let now = now_ms();
+        if self.connection_established_ms == 0 && now <= self.startup_grace_deadline_ms {
+            return false;
+        }
         !self.connected
             || if let Some(lr) = self.last_received {
                 lr.elapsed().as_secs() >= CONN_TIMEOUT
@@ -867,6 +890,7 @@ impl SrtlaConnection {
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
+        self.startup_grace_deadline_ms = now_ms() + STARTUP_GRACE_MS;
     }
 
     pub fn time_since_last_nak_ms(&self) -> Option<u64> {
@@ -897,6 +921,9 @@ impl SrtlaConnection {
         let now = now_ms();
 
         if self.connection_established_ms == 0 {
+            if now <= self.startup_grace_deadline_ms {
+                return false;
+            }
             // Match the C implementation during initial registration by retrying
             // roughly once per housekeeping pass (~1s cadence).
             if self.last_reconnect_attempt_ms == 0 {
@@ -962,7 +989,7 @@ impl SrtlaConnection {
         let socket = UdpSocket::from_std(std_sock)?;
         self.socket = Arc::new(socket);
         self.connected = false;
-        self.last_received = None;
+        self.last_received = Some(Instant::now());
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
@@ -990,6 +1017,7 @@ impl SrtlaConnection {
         // Don't reset connection_established_ms for reconnections - only set when REG3
         // is received
         self.mark_reconnect_success();
+        self.startup_grace_deadline_ms = now_ms() + STARTUP_GRACE_MS;
         Ok(())
     }
 }

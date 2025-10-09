@@ -54,6 +54,7 @@ pub async fn create_test_connection() -> SrtlaConnection {
         last_reconnect_attempt_ms: 0,
         reconnect_failure_count: 0,
         connection_established_ms: now_ms(),
+        startup_grace_deadline_ms: now_ms(),
     }
 }
 
@@ -104,6 +105,7 @@ pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
             last_reconnect_attempt_ms: 0,
             reconnect_failure_count: 0,
             connection_established_ms: now_ms(),
+            startup_grace_deadline_ms: now_ms(),
         };
         connections.push(conn);
     }
