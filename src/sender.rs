@@ -19,7 +19,6 @@ use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
 use crate::utils::now_ms;
 
-pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
 pub const SEQUENCE_TRACKING_MAX_AGE_MS: u64 = 5000;
 pub const SEQUENCE_MAP_CLEANUP_INTERVAL_MS: u64 = 5000;
@@ -112,7 +111,6 @@ pub async fn run_sender_with_toggles(
     let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
     let mut last_sequence_cleanup_ms: u64 = 0;
     let mut last_selected_idx: Option<usize> = None;
-    let mut last_switch_time: Option<Instant> = None;
     let mut all_failed_at: Option<Instant> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
 
@@ -169,7 +167,6 @@ pub async fn run_sender_with_toggles(
                     &mut recv_buf,
                     &mut connections,
                     &mut last_selected_idx,
-                    &mut last_switch_time,
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_client_addr,
@@ -246,7 +243,6 @@ pub async fn run_sender_with_toggles(
                     &mut recv_buf,
                     &mut connections,
                     &mut last_selected_idx,
-                    &mut last_switch_time,
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_client_addr,
@@ -273,7 +269,6 @@ async fn handle_srt_packet(
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
-    last_switch_time: &mut Option<Instant>,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
@@ -318,7 +313,6 @@ async fn handle_srt_packet(
                         seq,
                         connections,
                         last_selected_idx,
-                        last_switch_time,
                         seq_to_conn,
                         seq_order,
                         last_client_addr,
@@ -329,10 +323,6 @@ async fn handle_srt_packet(
                 }
                 return;
             }
-            // pick best connection (respect dynamic stickiness toggle)
-            let enable_stick = toggles
-                .stickiness_enabled
-                .load(std::sync::atomic::Ordering::Relaxed);
             let enable_quality = toggles
                 .quality_scoring_enabled
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -343,23 +333,12 @@ async fn handle_srt_packet(
                 .classic_mode
                 .load(std::sync::atomic::Ordering::Relaxed);
 
-            // Classic mode overrides all other toggles
-            let effective_enable_stick = enable_stick && !classic;
             let effective_enable_quality = enable_quality && !classic;
             let effective_enable_explore = enable_explore && !classic;
 
             let sel_idx = select_connection_idx(
                 connections,
-                if effective_enable_stick {
-                    *last_selected_idx
-                } else {
-                    None
-                },
-                if effective_enable_stick {
-                    *last_switch_time
-                } else {
-                    None
-                },
+                *last_selected_idx,
                 effective_enable_quality,
                 effective_enable_explore,
                 classic,
@@ -372,7 +351,6 @@ async fn handle_srt_packet(
                     seq,
                     connections,
                     last_selected_idx,
-                    last_switch_time,
                     seq_to_conn,
                     seq_order,
                     last_client_addr,
@@ -400,7 +378,6 @@ async fn forward_via_connection(
     seq: Option<u32>,
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
-    last_switch_time: &mut Option<Instant>,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
@@ -425,7 +402,6 @@ async fn forward_via_connection(
             );
         }
         *last_selected_idx = Some(sel_idx);
-        *last_switch_time = Some(Instant::now());
     }
     let conn = &mut connections[sel_idx];
     if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
@@ -528,10 +504,7 @@ async fn handle_housekeeping(
             if connections[i].should_attempt_reconnect() {
                 let label = connections[i].label.clone();
                 connections[i].record_reconnect_attempt();
-                warn!(
-                    "{} timed out; attempting full socket reconnection",
-                    label
-                );
+                warn!("{} timed out; attempting full socket reconnection", label);
                 // Perform full socket reconnection
                 if let Err(e) = connections[i].reconnect().await {
                     warn!("{} failed to reconnect: {}", label, e);
@@ -703,8 +676,7 @@ pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
 
 pub fn select_connection_idx(
     conns: &[SrtlaConnection],
-    last_idx: Option<usize>,
-    last_switch: Option<Instant>,
+    _last_idx: Option<usize>,
     enable_quality: bool,
     enable_explore: bool,
     classic: bool,
@@ -728,16 +700,6 @@ pub fn select_connection_idx(
         return best_idx;
     }
 
-    // Enhanced mode: Bond Bunny approach - calculate scores first, then apply
-    // stickiness Check if we're in stickiness window
-    let in_stickiness_window = if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
-        now.duration_since(ts).as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
-            && idx < conns.len()
-            && conns[idx].connected
-            && !conns[idx].is_timed_out()
-    } else {
-        false
-    };
     // Exploration window: simple periodic exploration of second-best
     // Use elapsed time since program start for consistent periodic behavior
     let explore_now = enable_explore && (now.elapsed().as_millis() % 5000) < 300;
@@ -790,16 +752,6 @@ pub fn select_connection_idx(
             second_score = score;
             second_idx = Some(i);
         }
-    }
-
-    // Bond Bunny approach: if in stickiness window and last connection is still
-    // good, keep it
-    if in_stickiness_window
-        && let Some(idx) = last_idx
-        && idx < conns.len()
-        && !conns[idx].is_timed_out()
-    {
-        return Some(idx);
     }
 
     // Allow switching if better connection found (prevents getting stuck on
@@ -933,9 +885,8 @@ pub(crate) fn log_connection_status(
 
     // Show toggle states
     info!(
-        "  Toggles: classic={}, stickiness={}, quality={}, exploration={}",
+        "  Toggles: classic={}, quality={}, exploration={}",
         toggles.classic_mode.load(Ordering::Relaxed),
-        toggles.stickiness_enabled.load(Ordering::Relaxed),
         toggles.quality_scoring_enabled.load(Ordering::Relaxed),
         toggles.exploration_enabled.load(Ordering::Relaxed)
     );

@@ -24,7 +24,7 @@ The burst NAK penalty logic, quality scoring, and connection exploration feature
 - SRT ACK and NAK handling (with correct NAK attribution to sending uplink)
 - Burst NAK penalty: Extra quality penalty for connections experiencing packet loss bursts
 - Keepalives with RTT measurement and time-based window recovery
-- Stickiness-aware path selection: score = window / (in_flight + 1)
+- Dynamic path selection: score = window / (in_flight + 1)
 - Live IP list reload on Unix via SIGHUP
 - Runtime toggles via stdin (no restart required)
 
@@ -103,7 +103,6 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 
 - `--control-socket <PATH>`: Unix domain socket path for remote toggle control (e.g., `/tmp/srtla.sock`)
 - `--classic`: Enable classic mode (disables all enhancements)
-- `--no-stickiness`: Disable connection stickiness
 - `--no-quality`: Disable quality scoring
 - `--exploration`: Enable connection exploration
 - `-v, --version`: Print version and exit
@@ -134,8 +133,8 @@ RUST_LOG=info ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 
 **With initial toggle states:**
 
 ```bash
-# Start with classic mode disabled
-./target/release/srtla_send --no-stickiness 6000 rec.example.com 5000 ./uplinks.txt
+# Start with quality scoring disabled
+./target/release/srtla_send --no-quality 6000 rec.example.com 5000 ./uplinks.txt
 ```
 
 **Basic example with logging:**
@@ -192,14 +191,12 @@ Both methods support the same commands in two formats:
 **Traditional format:**
 
 - `classic on|off` - Enable/disable classic mode (disables all enhancements)
-- `stick on|off` - Enable/disable connection stickiness
 - `quality on|off` - Enable/disable quality scoring
 - `explore on|off` - Enable/disable connection exploration
 
 **Alternative format:**
 
 - `classic=true|false`
-- `stickiness=true|false`
 - `quality=true|false`
 - `exploration=true|false`
 
@@ -217,9 +214,7 @@ These toggles affect how the system selects the best connection for sending data
 
 **Connection Exploration** (`explore`): 10% of the time picks the 2nd best network. Every ~5 seconds explores for ~500ms to discover better alternatives.
 
-**Connection Stickiness** (`stick`): Prevents frequent network switches. Uses selected network for at least 500ms to maintain stability.
-
-These affect selection behavior in real time. By default, quality-based scoring and connection stickiness is enabled.
+These affect selection behavior in real time. By default, quality-based scoring is enabled.
 
 ## IP List Reload (Unix only)
 
@@ -252,7 +247,7 @@ Normal registration:
 ### Implementation Details
 
 - For each IP in `BIND_IPS_FILE`, the sender binds a UDP socket and connects to `SRTLA_HOST:SRTLA_PORT`.
-- Incoming SRT UDP packets are read on `SRT_LISTEN_PORT` and forwarded over the currently selected uplink based on the score `window / (in_flight + 1)`, with a minimum switch interval for stickiness.
+- Incoming SRT UDP packets are read on `SRT_LISTEN_PORT` and forwarded over the currently selected uplink based on the score `window / (in_flight + 1)`.
 - ACKs are applied to all uplinks to reduce in-flight counts; NAKs are attributed to the uplink that originally sent the sequence (tracked), falling back to the receiver uplink if unknown.
 - **Burst NAK Detection**: The system tracks NAK bursts (multiple NAKs within 1 second) per connection. When quality scoring is enabled, connections with recent NAK bursts (>1 NAK in burst, within last 5 seconds) receive an additional 0.5x penalty multiplier to their quality score, helping avoid connections experiencing packet loss issues.
 - Keepalives are sent when idle, and periodically for RTT measurement; the RTT is smoothed. Window recovery is conservative and time-based when there are no recent NAKs.

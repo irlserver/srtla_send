@@ -23,7 +23,7 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 - SRT ACK and NAK handling with correct NAK attribution to sending uplink
 - Burst NAK penalty for connections experiencing packet loss bursts
 - Keepalives with RTT measurement and time-based window recovery
-- Stickiness-aware path selection: score = window / (in_flight + 1)
+- Dynamic path selection: score = window / (in_flight + 1)
 - Live IP list reload via SIGHUP (Unix)
 - Runtime toggles via stdin (no restart required)
 
@@ -83,7 +83,7 @@ rustfmt.toml        - Formatting configuration
 - `protocol`: SRTLA protocol constants and structures
 - `registration`: Registration manager for SRTLA connection setup
 - `sender`: Main packet forwarding logic, connection selection algorithm
-- `toggles`: Runtime toggle system for classic mode, stickiness, quality, exploration
+- `toggles`: Runtime toggle system for classic mode, quality, exploration
 - `utils`: Common utilities (now_ms, etc.)
 
 ### Test Organization

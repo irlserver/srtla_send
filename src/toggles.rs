@@ -11,7 +11,6 @@ use tracing::{info, warn};
 #[derive(Clone)]
 pub struct DynamicToggles {
     pub classic_mode: Arc<AtomicBool>,
-    pub stickiness_enabled: Arc<AtomicBool>,
     pub quality_scoring_enabled: Arc<AtomicBool>,
     pub exploration_enabled: Arc<AtomicBool>,
 }
@@ -27,21 +26,14 @@ impl DynamicToggles {
     pub fn new() -> Self {
         Self {
             classic_mode: Arc::new(AtomicBool::new(false)),
-            stickiness_enabled: Arc::new(AtomicBool::new(true)),
             quality_scoring_enabled: Arc::new(AtomicBool::new(true)),
             exploration_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub fn from_cli(
-        classic: bool,
-        no_stickiness: bool,
-        no_quality: bool,
-        exploration: bool,
-    ) -> Self {
+    pub fn from_cli(classic: bool, no_quality: bool, exploration: bool) -> Self {
         Self {
             classic_mode: Arc::new(AtomicBool::new(classic)),
-            stickiness_enabled: Arc::new(AtomicBool::new(!no_stickiness)),
             quality_scoring_enabled: Arc::new(AtomicBool::new(!no_quality)),
             exploration_enabled: Arc::new(AtomicBool::new(exploration)),
         }
@@ -82,14 +74,6 @@ pub fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
             toggles.classic_mode.store(false, Ordering::Relaxed);
             info!("🔧 Classic mode: OFF");
         }
-        "stick on" | "stickiness=true" => {
-            toggles.stickiness_enabled.store(true, Ordering::Relaxed);
-            info!("🔧 Stickiness: ON");
-        }
-        "stick off" | "stickiness=false" => {
-            toggles.stickiness_enabled.store(false, Ordering::Relaxed);
-            info!("🔧 Stickiness: OFF");
-        }
         "quality on" | "quality=true" => {
             toggles
                 .quality_scoring_enabled
@@ -117,10 +101,6 @@ pub fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
                 toggles.classic_mode.load(Ordering::Relaxed)
             );
             info!(
-                "  Stickiness: {}",
-                toggles.stickiness_enabled.load(Ordering::Relaxed)
-            );
-            info!(
                 "  Quality scoring: {}",
                 toggles.quality_scoring_enabled.load(Ordering::Relaxed)
             );
@@ -129,7 +109,7 @@ pub fn apply_cmd(toggles: &DynamicToggles, cmd: &str) {
                 toggles.exploration_enabled.load(Ordering::Relaxed)
             );
         }
-        "" => {} // ignore empty lines
+        "" => {}
         _ => warn!("❌ Unknown command: {}", cmd),
     }
 }

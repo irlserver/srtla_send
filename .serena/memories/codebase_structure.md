@@ -37,7 +37,7 @@ rustfmt.toml        - Formatting configuration
 - `protocol`: SRTLA protocol constants and structures
 - `registration`: Registration manager for SRTLA connection setup
 - `sender`: Main packet forwarding logic, connection selection algorithm
-- `toggles`: Runtime toggle system for classic mode, stickiness, quality, exploration
+- `toggles`: Runtime toggle system for classic mode, quality, exploration
 - `utils`: Common utilities (now_ms, etc.)
 
 ## Test Organization

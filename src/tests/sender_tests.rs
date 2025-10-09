@@ -7,7 +7,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use tempfile::NamedTempFile;
-    use tokio::time::{Duration, Instant};
+    use tokio::time::Instant;
 
     use crate::sender::*;
     use crate::test_helpers::create_test_connections;
@@ -25,46 +25,8 @@ mod tests {
         connections[2].in_flight_packets = 10; // Lowest score
 
         let selected =
-            select_connection_idx(&connections, None, None, false, false, true, Instant::now());
+            select_connection_idx(&connections, None, false, false, true, Instant::now());
         assert_eq!(selected, Some(1));
-    }
-
-    #[test]
-    fn test_select_connection_idx_stickiness() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-
-        // Make connection 2 the best by giving it higher window
-        connections[2].window = connections[0].window + 100;
-
-        // Test stickiness - should stick to current selection within interval
-        // when it's also the best connection (Bond Bunny behavior)
-        let recent_switch = Some(Instant::now());
-        let last_idx = Some(2);
-
-        let selected = select_connection_idx(
-            &connections,
-            last_idx,
-            recent_switch,
-            false,
-            false,
-            false,
-            Instant::now(),
-        );
-        assert_eq!(selected, Some(2)); // Sticks because it's both recent AND best
-
-        // Test that it switches away when the last selection is not the best
-        let last_idx_not_best = Some(1); // Connection 1 is not the best
-        let selected_no_stick = select_connection_idx(
-            &connections,
-            last_idx_not_best,
-            recent_switch,
-            false,
-            false,
-            false,
-            Instant::now(),
-        );
-        assert_eq!(selected_no_stick, Some(1)); // Holds stickiness even if another link scores higher
     }
 
     #[test]
@@ -83,18 +45,8 @@ mod tests {
         connections[2].nak_count = 3;
         connections[2].last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
 
-        // Old switch time to allow new selection
-        let old_switch = Some(Instant::now() - Duration::from_millis(MIN_SWITCH_INTERVAL_MS + 100));
-
-        let selected = select_connection_idx(
-            &connections,
-            None,
-            old_switch,
-            true, // enable quality
-            false,
-            false,
-            Instant::now(),
-        );
+        let selected =
+            select_connection_idx(&connections, None, true, false, false, Instant::now());
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -115,15 +67,8 @@ mod tests {
         connections[1].nak_burst_count = 1;
         connections[1].last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
 
-        let selected = select_connection_idx(
-            &connections,
-            None,
-            Some(Instant::now() - Duration::from_secs(1)),
-            true, // enable quality
-            false,
-            false,
-            Instant::now(),
-        );
+        let selected =
+            select_connection_idx(&connections, None, true, false, false, Instant::now());
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -235,13 +180,13 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert!(MIN_SWITCH_INTERVAL_MS > 0);
         assert!(MAX_SEQUENCE_TRACKING > 0);
         assert!(GLOBAL_TIMEOUT_MS > 0);
 
-        assert!(MIN_SWITCH_INTERVAL_MS <= 1000); // Should be reasonable
-        assert!(MAX_SEQUENCE_TRACKING >= 1000); // Should handle decent throughput
-        assert!(GLOBAL_TIMEOUT_MS >= 5000); // Should allow time for connections
+        // Should handle decent throughput
+        assert!(MAX_SEQUENCE_TRACKING >= 1000);
+        // Should allow time for connections
+        assert!(GLOBAL_TIMEOUT_MS >= 5000);
     }
 
     #[tokio::test]
@@ -290,15 +235,8 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(
-            &connections,
-            None,
-            None,
-            false,
-            false,
-            false,
-            Instant::now(),
-        );
+        let selected =
+            select_connection_idx(&connections, None, false, false, false, Instant::now());
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -309,17 +247,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let connections = rt.block_on(create_test_connections(3));
 
-        // Test exploration - this is time-dependent so we just test that it doesn't
-        // panic
-        let _selected = select_connection_idx(
-            &connections,
-            None,
-            Some(Instant::now() - Duration::from_secs(1)),
-            false,
-            true, // enable exploration
-            false,
-            Instant::now(),
-        );
+        // Test exploration - this is time-dependent so we just test that it doesn't panic
+        let _selected =
+            select_connection_idx(&connections, None, false, true, false, Instant::now());
 
         // The result depends on timing, but should not panic
     }
@@ -330,13 +260,11 @@ mod tests {
 
         // Test that toggles can be read atomically
         let classic = toggles.classic_mode.load(Ordering::Relaxed);
-        let stick = toggles.stickiness_enabled.load(Ordering::Relaxed);
         let quality = toggles.quality_scoring_enabled.load(Ordering::Relaxed);
         let explore = toggles.exploration_enabled.load(Ordering::Relaxed);
 
         // Default values from DynamicToggles::new()
         assert!(!classic);
-        assert!(stick);
         assert!(quality);
         assert!(!explore);
     }
