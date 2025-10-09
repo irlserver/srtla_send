@@ -459,4 +459,23 @@ impl SrtlaRegistrationManager {
     pub(crate) fn set_broadcast_reg2_pending(&mut self, value: bool) {
         self.broadcast_reg2_pending = value;
     }
+
+    pub(crate) fn probe_results_count(&self) -> usize {
+        self.probe_results.len()
+    }
+
+    pub(crate) fn simulate_probe_result(&mut self, conn_idx: usize, rtt_ms: u64) {
+        use crate::utils::now_ms;
+        let now = now_ms();
+        self.probe_results.push(ProbeResult {
+            conn_idx,
+            probe_sent_ms: now.saturating_sub(rtt_ms),
+            rtt_ms: Some(rtt_ms),
+        });
+    }
+
+    pub(crate) fn set_probing_state_waiting(&mut self) {
+        self.probing_state = ProbingState::WaitingForProbes;
+        self.pending_timeout_at_ms = now_ms() + 2000;
+    }
 }
