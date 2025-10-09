@@ -239,9 +239,9 @@ impl SrtlaRegistrationManager {
 
     pub fn update_active_connections(&mut self, connections: &[SrtlaConnection]) {
         // Match C/Bond Bunny implementation: recalculate from scratch each housekeeping cycle
-        // C code (line 653): active_connections = 0; then counts non-timed-out connections
         // Bond Bunny (line 235): activeConnections = 0; then counts CONNECTED state connections
-        let new_count = connections.iter().filter(|c| !c.is_timed_out()).count();
+        // We count connections that are actually connected (received REG3), not just within grace period
+        let new_count = connections.iter().filter(|c| c.connected).count();
 
         // Log any changes in connection count
         if new_count != self.active_connections {
@@ -291,11 +291,15 @@ impl SrtlaRegistrationManager {
 
         for (idx, conn) in connections.iter_mut().enumerate() {
             match conn.send_probe_reg2(&self.probe_id).await {
-                Ok(_) => {
-                    debug!("Probe REG2 sent to connection #{}", idx);
+                Ok(sent_ms) => {
+                    debug!(
+                        "Probe REG2 sent to connection #{} at T+{}ms",
+                        idx,
+                        sent_ms.saturating_sub(probe_start_ms)
+                    );
                     self.probe_results.push(ProbeResult {
                         conn_idx: idx,
-                        probe_sent_ms: probe_start_ms,
+                        probe_sent_ms: sent_ms,
                         rtt_ms: None,
                     });
                 }
@@ -307,7 +311,7 @@ impl SrtlaRegistrationManager {
 
         if !self.probe_results.is_empty() {
             self.probing_state = ProbingState::WaitingForProbes;
-            self.pending_timeout_at_ms = probe_start_ms + 2000;
+            self.pending_timeout_at_ms = now_ms() + 2000;
             info!(
                 "Waiting for probe responses from {} connections",
                 self.probe_results.len()
@@ -407,6 +411,12 @@ impl SrtlaRegistrationManager {
 
 // no extra trait needed; driver directly awaits on `send_srtla_packet`
 
+impl SrtlaRegistrationManager {
+    pub fn get_selected_connection_idx(&self) -> Option<usize> {
+        self.reg1_target_idx
+    }
+}
+
 // Test-only accessor methods for controlled field access
 #[cfg(test)]
 #[allow(dead_code)]
@@ -431,6 +441,10 @@ impl SrtlaRegistrationManager {
         self.reg1_target_idx
     }
 
+    pub(crate) fn set_reg1_target_idx(&mut self, value: Option<usize>) {
+        self.reg1_target_idx = value;
+    }
+
     pub(crate) fn reg1_next_send_at_ms(&self) -> u64 {
         self.reg1_next_send_at_ms
     }
@@ -446,10 +460,6 @@ impl SrtlaRegistrationManager {
 
     pub(crate) fn set_pending_timeout_at_ms(&mut self, value: u64) {
         self.pending_timeout_at_ms = value;
-    }
-
-    pub(crate) fn set_reg1_target_idx(&mut self, value: Option<usize>) {
-        self.reg1_target_idx = value;
     }
 
     pub(crate) fn set_reg1_next_send_at_ms(&mut self, value: u64) {

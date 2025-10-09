@@ -270,12 +270,14 @@ impl SrtlaConnection {
         Ok(())
     }
 
-    pub async fn send_probe_reg2(&mut self, probe_id: &[u8; SRTLA_ID_LEN]) -> Result<()> {
+    pub async fn send_probe_reg2(&mut self, probe_id: &[u8; SRTLA_ID_LEN]) -> Result<u64> {
         let pkt = create_reg2_packet(probe_id);
+        let sent_at = now_ms();
         self.socket.send(&pkt).await?;
-        self.last_keepalive_sent_ms = now_ms();
+        self.last_keepalive_sent_ms = sent_at;
         self.waiting_for_keepalive_response = true;
-        Ok(())
+        self.startup_grace_deadline_ms = sent_at + STARTUP_GRACE_MS;
+        Ok(sent_at)
     }
 
     pub async fn drain_incoming(

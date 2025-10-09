@@ -859,30 +859,43 @@ async fn handle_housekeeping(
     let _ = reg.clear_pending_if_timed_out(current_ms);
 
     if reg.is_probing() {
+        let was_probing = true;
         reg.check_probing_complete();
+        // If probing just completed, reset grace period for the selected connection
+        if !reg.is_probing() && was_probing {
+            if let Some(idx) = reg.get_selected_connection_idx() {
+                if let Some(conn) = connections.get_mut(idx) {
+                    conn.startup_grace_deadline_ms = current_ms + 1500;
+                    debug!(
+                        "{}: Reset grace period after being selected for initial registration",
+                        conn.label
+                    );
+                }
+            }
+        }
     }
 
     // housekeeping: drive registration, send keepalives
-    for i in 0..connections.len() {
+    for (i, conn) in connections.iter_mut().enumerate() {
         // Simple reconnect-on-timeout, then allow reg driver to proceed
-        if connections[i].is_timed_out() {
-            if connections[i].should_attempt_reconnect() {
-                let label = connections[i].label.clone();
-                connections[i].record_reconnect_attempt();
+        if conn.is_timed_out() {
+            if conn.should_attempt_reconnect() {
+                let label = conn.label.clone();
+                conn.record_reconnect_attempt();
                 warn!("{} timed out; attempting full socket reconnection", label);
                 // Perform full socket reconnection
-                if let Err(e) = connections[i].reconnect().await {
+                if let Err(e) = conn.reconnect().await {
                     warn!("{} failed to reconnect: {}", label, e);
                     // Fall back to mark_for_recovery if reconnect fails
-                    connections[i].mark_for_recovery();
+                    conn.mark_for_recovery();
                 } else {
-                    restart_reader_for(&connections[i], reader_handles, packet_tx);
+                    restart_reader_for(conn, reader_handles, packet_tx);
                 }
 
                 match reg.pending_reg2_idx() {
                     Some(idx) if idx == i => {
                         info!("{} marked for recovery; re-sending REG1", label);
-                        reg.send_reg1_to(i, &mut connections[i]).await;
+                        reg.send_reg1_to(i, conn).await;
                     }
                     Some(_) => {
                         debug!(
@@ -892,23 +905,23 @@ async fn handle_housekeeping(
                     }
                     None => {
                         info!("{} marked for recovery; re-sending REG2", label);
-                        reg.send_reg2_to(i, &mut connections[i]).await;
+                        reg.send_reg2_to(i, conn).await;
                     }
                 }
             } else {
-                debug!("{} timed out but in retry interval", connections[i].label);
+                debug!("{} timed out but in retry interval", conn.label);
             }
             continue;
         }
 
-        if connections[i].needs_keepalive() {
-            let _ = connections[i].send_keepalive().await;
+        if conn.needs_keepalive() {
+            let _ = conn.send_keepalive().await;
         }
-        if connections[i].needs_rtt_measurement() {
-            let _ = connections[i].send_keepalive().await;
+        if conn.needs_rtt_measurement() {
+            let _ = conn.send_keepalive().await;
         }
         if !classic {
-            connections[i].perform_window_recovery();
+            conn.perform_window_recovery();
         }
     }
 
