@@ -263,6 +263,14 @@ impl SrtlaConnection {
         Ok(())
     }
 
+    pub async fn send_probe_reg2(&mut self, probe_id: &[u8; SRTLA_ID_LEN]) -> Result<()> {
+        let pkt = create_reg2_packet(probe_id);
+        self.socket.send(&pkt).await?;
+        self.last_keepalive_sent_ms = now_ms();
+        self.waiting_for_keepalive_response = true;
+        Ok(())
+    }
+
     pub async fn drain_incoming(
         &mut self,
         conn_idx: usize,

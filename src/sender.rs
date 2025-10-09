@@ -76,6 +76,8 @@ pub async fn run_sender_with_toggles(
 
     let mut reg = SrtlaRegistrationManager::new();
 
+    reg.start_probing(&mut connections).await;
+
     // Create instant ACK forwarding channel and shared client address
     let (instant_tx, instant_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let shared_client_addr = Arc::new(Mutex::new(None::<SocketAddr>));
@@ -448,6 +450,10 @@ async fn handle_housekeeping(
     // If we're waiting on a REG2 response past the timeout, proactively retry REG1
     let current_ms = now_ms();
     let _ = reg.clear_pending_if_timed_out(current_ms);
+
+    if reg.is_probing() {
+        reg.check_probing_complete();
+    }
 
     // housekeeping: receive responses, drive registration, send keepalives
     for i in 0..connections.len() {
