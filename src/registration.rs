@@ -313,8 +313,12 @@ impl SrtlaRegistrationManager {
                 self.probe_results.len()
             );
         } else {
-            warn!("No connections available for probing");
+            warn!("No connections available for probing - using first connection as fallback");
             self.probing_state = ProbingState::Complete;
+            if !connections.is_empty() {
+                self.reg1_target_idx = Some(0);
+                self.reg1_next_send_at_ms = probe_start_ms;
+            }
         }
     }
 
