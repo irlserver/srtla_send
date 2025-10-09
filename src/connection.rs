@@ -12,8 +12,6 @@ use crate::protocol::*;
 use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
 use crate::utils::now_ms;
 
-const NAK_SEARCH_LIMIT: usize = 64;
-const ACK_SEARCH_LIMIT: usize = 128;
 const NAK_BURST_WINDOW_MS: u64 = 1000;
 const NAK_BURST_LOG_THRESHOLD: i32 = 3;
 const NORMAL_UTILIZATION_THRESHOLD: f64 = 0.85;
@@ -402,7 +400,7 @@ impl SrtlaConnection {
         let mut ack_send_time_ms: Option<u64> = None;
         let mut remaining_count = 0;
 
-        for i in 0..ACK_SEARCH_LIMIT {
+        for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             let val = self.packet_log[idx];
             if val == ack {
@@ -431,7 +429,7 @@ impl SrtlaConnection {
 
     pub fn handle_nak(&mut self, seq: i32) {
         let mut found = false;
-        for i in 0..NAK_SEARCH_LIMIT {
+        for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             if self.packet_log[idx] == seq {
                 self.packet_log[idx] = -1;
@@ -514,7 +512,7 @@ impl SrtlaConnection {
         let mut found = false;
 
         // Search backwards through the packet log (most recent first)
-        for i in 0..ACK_SEARCH_LIMIT {
+        for i in 0..PKT_LOG_SIZE {
             let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
             if self.packet_log[idx] == seq {
                 found = true;
