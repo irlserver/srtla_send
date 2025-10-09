@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use smallvec::SmallVec;
@@ -35,9 +36,9 @@ pub struct SrtlaIncoming {
 pub struct SrtlaConnection {
     pub(crate) conn_id: u64,
     #[cfg(feature = "test-internals")]
-    pub socket: UdpSocket,
+    pub socket: Arc<UdpSocket>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) socket: UdpSocket,
+    pub(crate) socket: Arc<UdpSocket>,
     #[allow(dead_code)]
     #[cfg(feature = "test-internals")]
     pub remote: SocketAddr,
@@ -181,7 +182,7 @@ impl SrtlaConnection {
         sock.connect(&remote.into())?;
         let std_sock: std::net::UdpSocket = sock.into();
         std_sock.set_nonblocking(true)?;
-        let socket = UdpSocket::from_std(std_sock)?;
+        let socket = Arc::new(UdpSocket::from_std(std_sock)?);
         Ok(Self {
             conn_id: NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed),
             socket,
@@ -959,7 +960,7 @@ impl SrtlaConnection {
         let std_sock: std::net::UdpSocket = sock.into();
         std_sock.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(std_sock)?;
-        self.socket = socket;
+        self.socket = Arc::new(socket);
         self.connected = false;
         self.last_received = None;
         self.window = WINDOW_DEF * WINDOW_MULT;

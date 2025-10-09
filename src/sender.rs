@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
@@ -10,6 +11,9 @@ use tokio::net::UdpSocket;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 // mpsc is available in tokio::sync
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task::JoinHandle;
 use tokio::time::{self, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -41,6 +45,214 @@ pub struct PendingConnectionChanges {
     pub new_ips: Option<Vec<IpAddr>>,
     pub receiver_host: String,
     pub receiver_port: u16,
+}
+
+type ConnectionId = u64;
+
+struct IoWatcher {
+    handle: JoinHandle<()>,
+    socket_key: usize,
+}
+
+fn spawn_io_watcher(
+    conn_id: ConnectionId,
+    socket: Arc<UdpSocket>,
+    notify_tx: UnboundedSender<ConnectionId>,
+) -> IoWatcher {
+    let socket_key = Arc::as_ptr(&socket) as usize;
+    let handle = tokio::spawn(async move {
+        loop {
+            match socket.readable().await {
+                Ok(_ready) => {
+                    if notify_tx.send(conn_id).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    IoWatcher { handle, socket_key }
+}
+
+fn ensure_read_watchers(
+    connections: &[SrtlaConnection],
+    watchers: &mut HashMap<ConnectionId, IoWatcher>,
+    notify_tx: &UnboundedSender<ConnectionId>,
+) {
+    let mut active_ids = HashSet::with_capacity(connections.len());
+    for conn in connections {
+        active_ids.insert(conn.conn_id);
+        let socket_key = Arc::as_ptr(&conn.socket) as usize;
+        match watchers.entry(conn.conn_id) {
+            Entry::Occupied(mut entry) => {
+                if entry.get().socket_key != socket_key {
+                    entry.get().handle.abort();
+                    let watcher =
+                        spawn_io_watcher(conn.conn_id, conn.socket.clone(), notify_tx.clone());
+                    entry.insert(watcher);
+                }
+            }
+            Entry::Vacant(entry) => {
+                let watcher =
+                    spawn_io_watcher(conn.conn_id, conn.socket.clone(), notify_tx.clone());
+                entry.insert(watcher);
+            }
+        }
+    }
+
+    watchers.retain(|conn_id, watcher| {
+        if active_ids.contains(conn_id) {
+            true
+        } else {
+            watcher.handle.abort();
+            false
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_connection_events(
+    idx: usize,
+    connections: &mut [SrtlaConnection],
+    reg: &mut SrtlaRegistrationManager,
+    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    _seq_order: &mut VecDeque<u32>,
+    classic: bool,
+) -> Result<()> {
+    if idx >= connections.len() {
+        return Ok(());
+    }
+
+    let incoming = connections[idx]
+        .drain_incoming(idx, reg, instant_tx)
+        .await?;
+
+    if !incoming.read_any
+        && incoming.ack_numbers.is_empty()
+        && incoming.nak_numbers.is_empty()
+        && incoming.srtla_ack_numbers.is_empty()
+        && incoming.forward_to_client.is_empty()
+    {
+        return Ok(());
+    }
+
+    for ack in incoming.ack_numbers.iter() {
+        for c in connections.iter_mut() {
+            c.handle_srt_ack(*ack as i32);
+        }
+    }
+
+    for srtla_ack in incoming.srtla_ack_numbers.iter() {
+        for c in connections.iter_mut() {
+            if c.handle_srtla_ack_specific(*srtla_ack as i32, classic) {
+                break;
+            }
+        }
+        for c in connections.iter_mut() {
+            c.handle_srtla_ack_global();
+        }
+    }
+
+    for nak in incoming.nak_numbers.iter() {
+        let mut handled = false;
+        if let Some(entry) = seq_to_conn.get(nak) {
+            let current_time = now_ms();
+            if !entry.is_expired(current_time) {
+                if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id) {
+                    conn.handle_nak(*nak as i32);
+                    handled = true;
+                }
+            }
+        }
+
+        if !handled {
+            for conn in connections.iter_mut() {
+                if conn.handle_nak(*nak as i32) {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(client) = last_client_addr {
+        for pkt in incoming.forward_to_client.iter() {
+            let _ = local_listener.send_to(pkt, client).await;
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_uplink_notification(
+    conn_id: ConnectionId,
+    connections: &mut [SrtlaConnection],
+    reg: &mut SrtlaRegistrationManager,
+    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    toggles: &DynamicToggles,
+) {
+    if let Some(idx) = connections.iter().position(|c| c.conn_id == conn_id) {
+        let classic = toggles
+            .classic_mode
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Err(err) = process_connection_events(
+            idx,
+            connections,
+            reg,
+            instant_tx,
+            last_client_addr,
+            local_listener,
+            seq_to_conn,
+            seq_order,
+            classic,
+        )
+        .await
+        {
+            warn!("failed to process uplink {}: {err}", conn_id);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drain_uplink_notifications(
+    read_notify_rx: &mut UnboundedReceiver<ConnectionId>,
+    connections: &mut [SrtlaConnection],
+    reg: &mut SrtlaRegistrationManager,
+    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    toggles: &DynamicToggles,
+) {
+    loop {
+        match read_notify_rx.try_recv() {
+            Ok(conn_id) => {
+                handle_uplink_notification(
+                    conn_id,
+                    connections,
+                    reg,
+                    instant_tx,
+                    last_client_addr,
+                    local_listener,
+                    seq_to_conn,
+                    seq_order,
+                    toggles,
+                )
+                .await;
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
 }
 
 pub async fn run_sender_with_toggles(
@@ -79,6 +291,10 @@ pub async fn run_sender_with_toggles(
     let mut reg = SrtlaRegistrationManager::new();
 
     reg.start_probing(&mut connections).await;
+
+    let (read_notify_tx, mut read_notify_rx) = unbounded_channel::<ConnectionId>();
+    let mut io_watchers: HashMap<ConnectionId, IoWatcher> = HashMap::new();
+    ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
 
     // Create instant ACK forwarding channel and shared client address
     let (instant_tx, instant_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -136,9 +352,6 @@ pub async fn run_sender_with_toggles(
         if let Err(err) = handle_housekeeping(
             &mut connections,
             &mut reg,
-            &instant_tx,
-            last_client_addr,
-            &local_listener,
             &mut seq_to_conn,
             &mut seq_order,
             &mut last_sequence_cleanup_ms,
@@ -168,6 +381,46 @@ pub async fn run_sender_with_toggles(
                     &toggles,
                 )
                 .await;
+                drain_uplink_notifications(
+                    &mut read_notify_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
+            }
+            read_event = read_notify_rx.recv() => {
+                if let Some(conn_id) = read_event {
+                    handle_uplink_notification(
+                        conn_id,
+                        &mut connections,
+                        &mut reg,
+                        &instant_tx,
+                        last_client_addr,
+                        &local_listener,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                        &toggles,
+                    )
+                    .await;
+                    drain_uplink_notifications(
+                        &mut read_notify_rx,
+                        &mut connections,
+                        &mut reg,
+                        &instant_tx,
+                        last_client_addr,
+                        &local_listener,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                        &toggles,
+                    )
+                    .await;
+                }
             }
             _ = housekeeping_timer.tick() => {
                 let classic = toggles
@@ -176,9 +429,6 @@ pub async fn run_sender_with_toggles(
                 if let Err(err) = handle_housekeeping(
                     &mut connections,
                     &mut reg,
-                    &instant_tx,
-                    last_client_addr,
-                    &local_listener,
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_sequence_cleanup_ms,
@@ -202,6 +452,7 @@ pub async fn run_sender_with_toggles(
                         &mut seq_order,
                     ).await;
                     info!("connection changes applied successfully");
+                    ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
                 }
 
                 status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
@@ -209,6 +460,20 @@ pub async fn run_sender_with_toggles(
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                     status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
+
+                ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
+                drain_uplink_notifications(
+                    &mut read_notify_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
             }
             _ = sighup.recv() => {
                 info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
@@ -220,6 +485,18 @@ pub async fn run_sender_with_toggles(
                     });
                     info!("uplink IP changes queued for next processing cycle");
                 }
+                drain_uplink_notifications(
+                    &mut read_notify_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
             }
         }
     }
@@ -241,6 +518,46 @@ pub async fn run_sender_with_toggles(
                     &toggles,
                 )
                 .await;
+                drain_uplink_notifications(
+                    &mut read_notify_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
+            }
+            read_event = read_notify_rx.recv() => {
+                if let Some(conn_id) = read_event {
+                    handle_uplink_notification(
+                        conn_id,
+                        &mut connections,
+                        &mut reg,
+                        &instant_tx,
+                        last_client_addr,
+                        &local_listener,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                        &toggles,
+                    )
+                    .await;
+                    drain_uplink_notifications(
+                        &mut read_notify_rx,
+                        &mut connections,
+                        &mut reg,
+                        &instant_tx,
+                        last_client_addr,
+                        &local_listener,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                        &toggles,
+                    )
+                    .await;
+                }
             }
             _ = housekeeping_timer.tick() => {
                 let classic = toggles
@@ -249,9 +566,6 @@ pub async fn run_sender_with_toggles(
                 if let Err(err) = handle_housekeeping(
                     &mut connections,
                     &mut reg,
-                    &instant_tx,
-                    last_client_addr,
-                    &local_listener,
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_sequence_cleanup_ms,
@@ -276,6 +590,7 @@ pub async fn run_sender_with_toggles(
                     )
                     .await;
                     info!("connection changes applied successfully");
+                    ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
                 }
 
                 status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
@@ -283,6 +598,20 @@ pub async fn run_sender_with_toggles(
                     log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
                     status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
+
+                ensure_read_watchers(&connections, &mut io_watchers, &read_notify_tx);
+                drain_uplink_notifications(
+                    &mut read_notify_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
             }
         }
     }
@@ -461,9 +790,6 @@ async fn forward_via_connection(
 async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
-    last_client_addr: Option<SocketAddr>,
-    local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_sequence_cleanup_ms: &mut u64,
@@ -478,64 +804,8 @@ async fn handle_housekeeping(
         reg.check_probing_complete();
     }
 
-    // housekeeping: receive responses, drive registration, send keepalives
+    // housekeeping: drive registration, send keepalives
     for i in 0..connections.len() {
-        let incoming = connections[i].drain_incoming(i, reg, instant_tx).await?;
-        if incoming.read_any { /* timestamps updated inside */ }
-
-        // Apply ACKs to all connections like Java
-        for ack in incoming.ack_numbers.iter() {
-            for c in connections.iter_mut() {
-                c.handle_srt_ack(*ack as i32);
-            }
-        }
-
-        // Process SRTLA ACKs: first find specific packet, then optionally apply
-        // classic-mode global recovery.
-        for srtla_ack in incoming.srtla_ack_numbers.iter() {
-            // Phase 1: Find the connection that sent this specific packet
-            for c in connections.iter_mut() {
-                if c.handle_srtla_ack_specific(*srtla_ack as i32, classic) {
-                    break;
-                }
-            }
-
-            // ALWAYS increases window by +1, regardless of whether packet was in our in-flight
-            // This is the Moblin behavior - connection is healthy if receiving ACKs
-            for c in connections.iter_mut() {
-                c.handle_srtla_ack_global();
-            }
-        }
-
-        for nak in incoming.nak_numbers.iter() {
-            let mut handled = false;
-            if let Some(entry) = seq_to_conn.get(nak) {
-                let current_time = now_ms();
-                if !entry.is_expired(current_time) {
-                    if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id)
-                    {
-                        conn.handle_nak(*nak as i32);
-                        handled = true;
-                    }
-                }
-            }
-
-            if !handled {
-                for conn in connections.iter_mut() {
-                    if conn.handle_nak(*nak as i32) {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Forward responses back to local SRT client
-        if let Some(client) = last_client_addr {
-            for pkt in incoming.forward_to_client.iter() {
-                let _ = local_listener.send_to(pkt, client).await;
-            }
-        }
-
         // Simple reconnect-on-timeout, then allow reg driver to proceed
         if connections[i].is_timed_out() {
             if connections[i].should_attempt_reconnect() {

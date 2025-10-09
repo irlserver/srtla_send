@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
@@ -20,7 +21,7 @@ pub async fn create_test_connection() -> SrtlaConnection {
 
     SrtlaConnection {
         conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
-        socket: tokio_socket,
+        socket: Arc::new(tokio_socket),
         remote,
         local_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         label: "test-connection".to_string(),
@@ -70,7 +71,7 @@ pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
 
         let conn = SrtlaConnection {
             conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
-            socket: tokio_socket,
+            socket: Arc::new(tokio_socket),
             remote,
             local_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10 + i as u8)),
             label: format!("test-connection-{}", i),
