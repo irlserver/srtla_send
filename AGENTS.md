@@ -15,9 +15,11 @@ The burst NAK penalty logic, quality scoring, and connection exploration feature
 ## Project Overview
 
 ### Purpose
+
 SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SRT transport proxy with link aggregation for connection bonding that can transport SRT traffic over multiple network links for capacity aggregation and redundancy. The intended application is bonding mobile modems for live streaming.
 
 ### Key Features
+
 - Multi-uplink bonding using local source IPs
 - Registration flow (REG1/REG2/REG3) with ID propagation
 - SRT ACK and NAK handling with correct NAK attribution to sending uplink
@@ -28,6 +30,7 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 - Runtime toggles via stdin (no restart required)
 
 ### Tech Stack
+
 - **Language**: Rust (Edition 2024, requires nightly toolchain)
 - **Minimum Rust Version**: 1.87
 - **Async Runtime**: Tokio (multi-threaded runtime with macros, net, time, io-util, signal)
@@ -37,16 +40,19 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 - **Other dependencies**: anyhow (error handling), rand, bytes, chrono, smallvec
 
 ### Build Profiles
+
 - `dev`: opt-level = 1
 - `release-debug`: release with debug symbols, thin LTO
 - `release-lto`: full fat LTO, stripped symbols
 
 ### Version
+
 Current version: 2.3.0
 
 ## Codebase Structure
 
 ### Directory Layout
+
 ```
 src/
   tests/
@@ -79,6 +85,7 @@ rustfmt.toml        - Formatting configuration
 ```
 
 ### Module Organization
+
 - `connection`: SrtlaConnection struct, bind/resolve utilities, incoming packet handling
 - `protocol`: SRTLA protocol constants and structures
 - `registration`: Registration manager for SRTLA connection setup
@@ -87,7 +94,9 @@ rustfmt.toml        - Formatting configuration
 - `utils`: Common utilities (now_ms, etc.)
 
 ### Test Organization
+
 Tests are located in `src/tests/`:
+
 - Unit tests: In-module tests for individual components
 - Integration tests: Cross-module tests
 - End-to-end tests: Full system tests
@@ -97,7 +106,9 @@ Tests are located in `src/tests/`:
 ## Code Style and Conventions
 
 ### Formatting Configuration (rustfmt.toml)
+
 The project uses **Rust nightly** with unstable rustfmt features:
+
 - Edition: 2024
 - `unstable_features = true`
 - `wrap_comments = false`
@@ -111,12 +122,14 @@ The project uses **Rust nightly** with unstable rustfmt features:
 - `use_try_shorthand = true`
 
 ### Naming Conventions
+
 - Constants: `SCREAMING_SNAKE_CASE` (e.g., `NAK_SEARCH_LIMIT`, `MIN_SWITCH_INTERVAL_MS`)
 - Structs: `PascalCase` (e.g., `SrtlaConnection`, `SequenceTrackingEntry`)
 - Functions: `snake_case` (e.g., `handle_srt_packet`, `select_connection_idx`)
 - Modules: `snake_case`
 
 ### Code Patterns
+
 - **Error Handling**: Uses `anyhow::Result` for most error propagation
 - **Visibility**: Uses conditional compilation with `#[cfg(feature = "test-internals")]` to expose internal fields for testing
 - **Imports**: Grouped as std → external → crate, with module-level granularity
@@ -124,11 +137,13 @@ The project uses **Rust nightly** with unstable rustfmt features:
 - **Async**: Heavy use of Tokio for async networking and timers
 
 ### Documentation
-- **Comments**: NO COMMENTS unless explicitly asked
+
+- **Comments**: NO COMMENTS unless explicitly asked, but NEVER remove existing comments - update them if needed
 - Keep code self-documenting through clear naming
 - Use doc comments for public API when necessary
 
 ### Important Constraints
+
 - **Requires Rust nightly** due to unstable rustfmt features
 - All formatting must pass `cargo fmt --all -- --check`
 - All code must pass clippy with `-D warnings` (warnings as errors)
@@ -136,6 +151,7 @@ The project uses **Rust nightly** with unstable rustfmt features:
 ## Development Commands
 
 ### Building
+
 ```bash
 # Standard build
 cargo build
@@ -151,6 +167,7 @@ cargo build --profile release-lto
 ```
 
 ### Testing
+
 ```bash
 # Run all tests (requires nightly, with test-internals)
 cargo test --features test-internals
@@ -172,6 +189,7 @@ cargo test --lib
 ```
 
 ### Formatting
+
 ```bash
 # Format code (requires nightly)
 cargo fmt --all
@@ -181,6 +199,7 @@ cargo fmt --all -- --check
 ```
 
 ### Linting
+
 ```bash
 # Run clippy (warnings as errors)
 cargo clippy -- -D warnings
@@ -193,6 +212,7 @@ cargo check --release
 ```
 
 ### Security
+
 ```bash
 # Install cargo-audit (first time only)
 cargo install cargo-audit
@@ -202,6 +222,7 @@ cargo audit
 ```
 
 ### Running
+
 ```bash
 # Run with logging
 RUST_LOG=info cargo run -- 6000 rec.example.com 5000 ./uplinks.txt
@@ -218,27 +239,34 @@ RUST_LOG=debug cargo run -- 6000 rec.example.com 5000 ./uplinks.txt
 When a coding task is completed, the following steps MUST be performed:
 
 ### 1. Format Code
+
 ```bash
 cargo fmt --all
 ```
+
 Verify it passes with:
+
 ```bash
 cargo fmt --all -- --check
 ```
 
 ### 2. Run Clippy
+
 ```bash
 cargo clippy -- -D warnings
 ```
+
 All clippy warnings must be resolved (treated as errors).
 
 ### 3. Check Compilation
+
 ```bash
 cargo check
 cargo check --release
 ```
 
 ### 4. Run Tests
+
 ```bash
 # Run all tests with test-internals feature
 cargo test --features test-internals --verbose
@@ -248,11 +276,13 @@ cargo test --lib --verbose
 ```
 
 ### 5. Build Verification
+
 ```bash
 cargo build --release
 ```
 
 ### Important Notes
+
 - **NEVER commit changes unless explicitly asked by the user**
 - All steps must pass before considering the task complete
 - Tests require the `test-internals` feature for full coverage
