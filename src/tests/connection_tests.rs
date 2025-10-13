@@ -89,7 +89,7 @@ mod tests {
         conn.handle_nak(100);
         assert_eq!(conn.nak_count, 1);
         assert!(conn.window < initial_window);
-        assert_eq!(conn.nak_burst_count, 1);
+        assert_eq!(conn.nak_burst_count, 0);
 
         // Test NAK burst detection
         let current_time = now_ms();
@@ -128,6 +128,119 @@ mod tests {
             initial_nak_count + 1,
             "NAK count should increment when packet is found"
         );
+    }
+
+    #[test]
+    fn test_nak_burst_timing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        for i in 100..110 {
+            conn.register_packet(i);
+        }
+
+        conn.handle_nak(100);
+        assert_eq!(conn.nak_burst_count, 0);
+        assert_eq!(conn.nak_count, 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        conn.handle_nak(101);
+        assert_eq!(conn.nak_burst_count, 2);
+        assert_eq!(conn.nak_count, 2);
+
+        conn.handle_nak(102);
+        assert_eq!(conn.nak_burst_count, 3);
+        assert_eq!(conn.nak_count, 3);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        conn.handle_nak(103);
+        assert_eq!(conn.nak_burst_count, 0);
+        assert_eq!(conn.nak_count, 4);
+    }
+
+    #[test]
+    fn test_nak_burst_reset_on_timeout() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        for i in 100..110 {
+            conn.register_packet(i);
+        }
+
+        conn.handle_nak(100);
+        conn.handle_nak(101);
+        conn.handle_nak(102);
+        assert_eq!(conn.nak_burst_count, 3);
+
+        conn.perform_window_recovery();
+        assert_eq!(conn.nak_burst_count, 3);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        conn.perform_window_recovery();
+        assert_eq!(conn.nak_burst_count, 0);
+        assert_eq!(conn.nak_burst_start_time_ms, 0);
+    }
+
+    #[test]
+    fn test_nak_not_found_doesnt_affect_stats() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        conn.register_packet(100);
+
+        let initial_nak_count = conn.nak_count;
+        let initial_burst_count = conn.nak_burst_count;
+        let initial_window = conn.window;
+
+        let found = conn.handle_nak(999);
+        assert!(!found);
+        assert_eq!(conn.nak_count, initial_nak_count);
+        assert_eq!(conn.nak_burst_count, initial_burst_count);
+        assert_eq!(conn.window, initial_window);
+    }
+
+    #[test]
+    fn test_nak_burst_warning_threshold() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        for i in 100..110 {
+            conn.register_packet(i);
+        }
+
+        conn.handle_nak(100);
+        conn.handle_nak(101);
+        assert_eq!(conn.nak_burst_count, 2);
+
+        conn.handle_nak(102);
+        assert_eq!(conn.nak_burst_count, 3);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        conn.handle_nak(103);
+        assert_eq!(conn.nak_burst_count, 0);
+    }
+
+    #[test]
+    fn test_nak_burst_reconnect_reset() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        for i in 100..105 {
+            conn.register_packet(i);
+        }
+
+        conn.handle_nak(100);
+        conn.handle_nak(101);
+        conn.handle_nak(102);
+        assert_eq!(conn.nak_burst_count, 3);
+        assert!(conn.nak_burst_start_time_ms > 0);
+
+        rt.block_on(conn.reconnect()).unwrap();
+
+        assert_eq!(conn.nak_burst_count, 0);
+        assert_eq!(conn.nak_burst_start_time_ms, 0);
+        assert_eq!(conn.nak_count, 0);
+        assert_eq!(conn.last_nak_time_ms, 0);
     }
 
     #[test]
@@ -376,9 +489,10 @@ mod tests {
         assert_eq!(conn.nak_burst_count(), 0);
         assert_eq!(conn.time_since_last_nak_ms(), None);
 
+        conn.register_packet(100);
         conn.handle_nak(100);
         assert_eq!(conn.total_nak_count(), 1);
-        assert_eq!(conn.nak_burst_count(), 1);
+        assert_eq!(conn.nak_burst_count(), 0);
         assert!(conn.time_since_last_nak_ms().is_some());
 
         let time_since = conn.time_since_last_nak_ms().unwrap();

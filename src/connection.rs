@@ -461,46 +461,35 @@ impl SrtlaConnection {
         }
 
         if !found {
-            debug!("{}: NAK seq {} not found in packet log", self.label, seq);
+            return false;
         }
 
-        // Always track NAK statistics for monitoring, regardless of whether packet was
-        // found in our log (could be attributed to wrong connection or very old)
         self.nak_count = self.nak_count.saturating_add(1);
         let current_time = now_ms();
 
-        if current_time.saturating_sub(self.last_nak_time_ms) < NAK_BURST_WINDOW_MS {
+        let time_since_last_nak = current_time.saturating_sub(self.last_nak_time_ms);
+
+        if self.last_nak_time_ms > 0 && time_since_last_nak < NAK_BURST_WINDOW_MS {
             if self.nak_burst_count == 0 {
+                self.nak_burst_count = 2;
                 self.nak_burst_start_time_ms = self.last_nak_time_ms;
+            } else {
+                self.nak_burst_count = self.nak_burst_count.saturating_add(1);
             }
-            self.nak_burst_count = self.nak_burst_count.saturating_add(1);
         } else {
             if self.nak_burst_count >= NAK_BURST_LOG_THRESHOLD {
-                let burst_duration = if self.nak_burst_start_time_ms > 0 {
-                    current_time.saturating_sub(self.nak_burst_start_time_ms)
-                } else {
-                    (self.nak_burst_count as u64) * 100
-                };
+                let burst_duration = current_time.saturating_sub(self.nak_burst_start_time_ms);
                 warn!(
                     "{}: NAK burst ended - {} NAKs in {}ms",
                     self.label, self.nak_burst_count, burst_duration
                 );
             }
-            self.nak_burst_count = 1;
-            self.nak_burst_start_time_ms = current_time;
+            self.nak_burst_count = 0;
+            self.nak_burst_start_time_ms = 0;
         }
 
         self.last_nak_time_ms = current_time;
         self.consecutive_acks_without_nak = 0;
-
-        // Only reduce window if we actually sent this packet (matches Belabox/Moblin
-        // behavior). This prevents unfair window reduction from:
-        // - NAKs for packets sent on other connections (before sequence attribution)
-        // - NAKs for very old packets outside our search window
-        // - Spurious/misattributed NAKs from network issues
-        if !found {
-            return false;
-        }
 
         let old_window = self.window;
         self.window = (self.window - WINDOW_DECR).max(WINDOW_MIN * WINDOW_MULT);
@@ -804,8 +793,9 @@ impl SrtlaConnection {
         };
 
         if let Some(tsn) = time_since_last_nak {
-            if tsn > 5000 && self.nak_burst_count > 0 {
+            if tsn >= NAK_BURST_WINDOW_MS && self.nak_burst_count > 0 {
                 self.nak_burst_count = 0;
+                self.nak_burst_start_time_ms = 0;
             }
 
             let min_wait_time = if self.fast_recovery_mode {
@@ -998,6 +988,8 @@ impl SrtlaConnection {
         self.packet_idx = 0;
         self.nak_count = 0;
         self.last_nak_time_ms = 0;
+        self.nak_burst_count = 0;
+        self.nak_burst_start_time_ms = 0;
         self.last_window_increase_ms = 0;
         self.consecutive_acks_without_nak = 0;
         self.fast_recovery_mode = false;

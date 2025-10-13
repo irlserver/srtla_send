@@ -64,7 +64,7 @@ mod tests {
 
         // Connection 1: Same NAK count but no burst
         connections[1].nak_count = 5;
-        connections[1].nak_burst_count = 1;
+        connections[1].nak_burst_count = 0;
         connections[1].last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
 
         let selected =
@@ -72,6 +72,44 @@ mod tests {
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
+    }
+
+    #[test]
+    fn test_nak_attribution_to_correct_connection() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        connections[0].register_packet(100);
+        connections[1].register_packet(200);
+        connections[2].register_packet(300);
+
+        let initial_counts = [
+            connections[0].nak_count,
+            connections[1].nak_count,
+            connections[2].nak_count,
+        ];
+
+        let found_0 = connections[0].handle_nak(100);
+        assert!(found_0);
+        assert_eq!(connections[0].nak_count, initial_counts[0] + 1);
+        assert_eq!(connections[1].nak_count, initial_counts[1]);
+        assert_eq!(connections[2].nak_count, initial_counts[2]);
+
+        let found_1 = connections[1].handle_nak(200);
+        assert!(found_1);
+        assert_eq!(connections[0].nak_count, initial_counts[0] + 1);
+        assert_eq!(connections[1].nak_count, initial_counts[1] + 1);
+        assert_eq!(connections[2].nak_count, initial_counts[2]);
+
+        let not_found_0 = connections[0].handle_nak(999);
+        let not_found_1 = connections[1].handle_nak(999);
+        let not_found_2 = connections[2].handle_nak(999);
+        assert!(!not_found_0);
+        assert!(!not_found_1);
+        assert!(!not_found_2);
+        assert_eq!(connections[0].nak_count, initial_counts[0] + 1);
+        assert_eq!(connections[1].nak_count, initial_counts[1] + 1);
+        assert_eq!(connections[2].nak_count, initial_counts[2]);
     }
 
     #[tokio::test]
