@@ -121,7 +121,7 @@ mod tests {
 
         assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_ACK));
         let parsed_acks = parse_srtla_ack(&pkt);
-        assert_eq!(parsed_acks, vec![100, 200, 300]);
+        assert_eq!(parsed_acks.as_slice(), &[100, 200, 300]);
     }
 
     #[test]
@@ -147,7 +147,7 @@ mod tests {
         buf[4..8].copy_from_slice(&500u32.to_be_bytes());
 
         let naks = parse_srt_nak(&buf);
-        assert_eq!(naks, vec![500]);
+        assert_eq!(naks.as_slice(), &[500]);
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod tests {
         buf[8..12].copy_from_slice(&103u32.to_be_bytes());
 
         let naks = parse_srt_nak(&buf);
-        assert_eq!(naks, vec![100, 101, 102, 103]);
+        assert_eq!(naks.as_slice(), &[100, 101, 102, 103]);
     }
 
     #[test]
@@ -177,7 +177,7 @@ mod tests {
         buf[12..16].copy_from_slice(&102u32.to_be_bytes());
 
         let naks = parse_srt_nak(&buf);
-        assert_eq!(naks, vec![50, 100, 101, 102]);
+        assert_eq!(naks.as_slice(), &[50, 100, 101, 102]);
     }
 
     #[test]
@@ -185,10 +185,10 @@ mod tests {
         // Wrong packet type
         let mut buf = vec![0u8; 8];
         buf[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
-        assert_eq!(parse_srt_nak(&buf), vec![]);
+        assert!(parse_srt_nak(&buf).is_empty());
 
         // Buffer too short
-        assert_eq!(parse_srt_nak(&[0x80, 0x03, 0x00]), vec![]);
+        assert!(parse_srt_nak(&[0x80, 0x03, 0x00]).is_empty());
     }
 
     #[test]
@@ -207,20 +207,20 @@ mod tests {
         }
 
         let parsed = parse_srtla_ack(&pkt);
-        assert_eq!(parsed, vec![1000, 2000, 3000]);
+        assert_eq!(parsed.as_slice(), &[1000, 2000, 3000]);
 
         // Test empty ACK packet (4-byte header, no sequences)
         let empty_pkt = vec![0x91, 0x00, 0x00, 0x00];
         let parsed_empty = parse_srtla_ack(&empty_pkt);
-        assert_eq!(parsed_empty, vec![]);
+        assert_eq!(parsed_empty.as_slice(), &[]);
 
         // Test invalid packet type
         let mut invalid = pkt.clone();
         invalid[0] = 0x80;
-        assert_eq!(parse_srtla_ack(&invalid), vec![]);
+        assert!(parse_srtla_ack(&invalid).is_empty());
 
         // Test buffer too short (less than 8 bytes for 4-byte header format)
-        assert_eq!(parse_srtla_ack(&[0x91, 0x00, 0x00]), vec![]);
+        assert!(parse_srtla_ack(&[0x91, 0x00, 0x00]).is_empty());
     }
 
     #[test]

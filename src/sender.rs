@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
+use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
@@ -40,7 +41,7 @@ impl SequenceTrackingEntry {
 }
 
 pub struct PendingConnectionChanges {
-    pub new_ips: Option<Vec<IpAddr>>,
+    pub new_ips: Option<SmallVec<IpAddr, 4>>,
     pub receiver_host: String,
     pub receiver_port: u16,
 }
@@ -53,7 +54,7 @@ struct ReaderHandle {
 
 struct UplinkPacket {
     conn_id: ConnectionId,
-    bytes: Vec<u8>,
+    bytes: SmallVec<u8, 64>,
 }
 
 fn spawn_reader(
@@ -67,8 +68,7 @@ fn spawn_reader(
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((n, _)) if n > 0 => {
-                    let mut packet = Vec::with_capacity(n);
-                    packet.extend_from_slice(&buf[..n]);
+                    let packet = SmallVec::from_slice(&buf[..n]);
                     if packet_tx
                         .send(UplinkPacket {
                             conn_id,
@@ -85,7 +85,7 @@ fn spawn_reader(
                     if packet_tx
                         .send(UplinkPacket {
                             conn_id,
-                            bytes: Vec::new(),
+                            bytes: SmallVec::new(),
                         })
                         .is_err()
                     {
@@ -152,7 +152,7 @@ async fn process_connection_events(
     idx: usize,
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
@@ -233,7 +233,7 @@ async fn handle_uplink_packet(
     packet: UplinkPacket,
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
@@ -282,7 +282,7 @@ async fn drain_packet_queue(
     packet_rx: &mut UnboundedReceiver<UplinkPacket>,
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
+    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
@@ -321,7 +321,7 @@ pub async fn run_sender_with_toggles(
         "uplink IPs loaded: {}",
         ips.iter()
             .map(|i| i.to_string())
-            .collect::<Vec<_>>()
+            .collect::<SmallVec<_, 4>>()
             .join(", ")
     );
     if ips.is_empty() {
@@ -347,7 +347,7 @@ pub async fn run_sender_with_toggles(
     sync_readers(&connections, &mut reader_handles, &packet_tx);
 
     // Create instant ACK forwarding channel and shared client address
-    let (instant_tx, instant_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (instant_tx, instant_rx) = std::sync::mpsc::channel::<SmallVec<u8, 64>>();
     let shared_client_addr = Arc::new(Mutex::new(None::<SocketAddr>));
 
     // Wrap local_listener in Arc for sharing
@@ -1154,9 +1154,9 @@ pub fn select_connection_idx(
     }
 }
 
-pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
+pub async fn read_ip_list(path: &str) -> Result<SmallVec<IpAddr, 4>> {
     let text = std::fs::read_to_string(Path::new(path)).context("read IPs file")?;
-    let mut out = Vec::new();
+    let mut out = SmallVec::new();
     for line in text.lines() {
         let l = line.trim();
         if l.is_empty() {
@@ -1171,7 +1171,7 @@ pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
 }
 
 pub(crate) async fn apply_connection_changes(
-    connections: &mut Vec<SrtlaConnection>,
+    connections: &mut SmallVec<SrtlaConnection, 4>,
     new_ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
@@ -1206,7 +1206,7 @@ pub(crate) async fn apply_connection_changes(
     }
 
     // Add new connections
-    let new_ips_needed: Vec<IpAddr> = new_ips
+    let new_ips_needed: SmallVec<IpAddr, 4> = new_ips
         .iter()
         .copied()
         .filter(|ip| {
@@ -1231,8 +1231,8 @@ pub async fn create_connections_from_ips(
     ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
-) -> Vec<SrtlaConnection> {
-    let mut connections = Vec::new();
+) -> SmallVec<SrtlaConnection, 4> {
+    let mut connections = SmallVec::new();
     for ip in ips {
         match SrtlaConnection::connect_from_ip(*ip, receiver_host, receiver_port).await {
             Ok(conn) => {

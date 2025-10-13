@@ -6,6 +6,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::Ordering;
 
+    use smallvec::SmallVec;
     use tempfile::NamedTempFile;
     use tokio::time::Instant;
 
@@ -206,7 +207,7 @@ mod tests {
     #[test]
     fn test_pending_connection_changes() {
         let changes = PendingConnectionChanges {
-            new_ips: Some(vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))]),
+            new_ips: Some(SmallVec::from_vec(vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))])),
             receiver_host: "test-host".to_string(),
             receiver_port: 9090,
         };

@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 
+use smallvec::SmallVec;
 use tempfile::NamedTempFile;
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, timeout};
@@ -171,7 +172,7 @@ async fn test_ack_nak_sequence_handling() {
     use crate::protocol::*;
 
     // Test sequence of ACKs and NAKs
-    let sequences = vec![100u32, 101, 102, 103, 104, 105];
+    let sequences: SmallVec<u32, 4> = SmallVec::from_vec(vec![100u32, 101, 102, 103, 104, 105]);
 
     // Create SRTLA ACK packet
     let ack_packet = create_ack_packet(&sequences);
@@ -195,7 +196,7 @@ async fn test_ack_nak_sequence_handling() {
     nak_packet.extend_from_slice(&400u32.to_be_bytes());
 
     let parsed_naks = parse_srt_nak(&nak_packet);
-    let expected_naks = vec![200, 300, 301, 302, 303, 400];
+    let expected_naks: SmallVec<u32, 4> = SmallVec::from_vec(vec![200, 300, 301, 302, 303, 400]);
     assert_eq!(parsed_naks, expected_naks);
 }
 
@@ -205,7 +206,7 @@ async fn test_packet_size_limits() {
 
     // Test that we don't create packets larger than MTU
     let max_acks = (MTU - 2) / 4; // Maximum ACKs that fit in MTU
-    let large_ack_list: Vec<u32> = (0..max_acks as u32).collect();
+    let large_ack_list: SmallVec<u32, 4> = (0..max_acks as u32).collect();
 
     let packet = create_ack_packet(&large_ack_list);
     assert!(packet.len() <= MTU, "ACK packet should not exceed MTU");

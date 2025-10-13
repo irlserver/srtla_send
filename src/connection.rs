@@ -28,7 +28,7 @@ const STARTUP_GRACE_MS: u64 = 1_500;
 
 #[derive(Default)]
 pub struct SrtlaIncoming {
-    pub forward_to_client: SmallVec<Vec<u8>, 4>,
+    pub forward_to_client: SmallVec<SmallVec<u8, 64>, 4>,
     pub ack_numbers: SmallVec<u32, 4>,
     pub nak_numbers: SmallVec<u32, 4>,
     pub srtla_ack_numbers: SmallVec<u32, 4>,
@@ -284,7 +284,7 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
-        instant_forwarder: &std::sync::mpsc::Sender<Vec<u8>>,
+        instant_forwarder: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
     ) -> Result<SrtlaIncoming> {
         let mut buf = [0u8; MTU];
         let mut incoming = SrtlaIncoming::default();
@@ -317,7 +317,7 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
-        instant_forwarder: &std::sync::mpsc::Sender<Vec<u8>>,
+        instant_forwarder: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
         data: &[u8],
     ) -> Result<SrtlaIncoming> {
         let mut incoming = SrtlaIncoming::default();
@@ -330,7 +330,7 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
-        instant_forwarder: &std::sync::mpsc::Sender<Vec<u8>>,
+        instant_forwarder: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
         data: &[u8],
         incoming: &mut SrtlaIncoming,
     ) -> Result<()> {
@@ -366,7 +366,7 @@ impl SrtlaConnection {
                 if let Some(ack) = parse_srt_ack(data) {
                     incoming.ack_numbers.push(ack);
                 }
-                let ack_packet = data.to_vec();
+                let ack_packet = SmallVec::from_slice(data);
                 let _ = instant_forwarder.send(ack_packet.clone());
                 incoming.forward_to_client.push(ack_packet);
             } else if pt == SRT_TYPE_NAK {
@@ -381,7 +381,7 @@ impl SrtlaConnection {
                         incoming.nak_numbers.push(seq);
                     }
                 }
-                incoming.forward_to_client.push(data.to_vec());
+                incoming.forward_to_client.push(SmallVec::from_slice(data));
             } else if pt == SRTLA_TYPE_ACK {
                 let ack_list = parse_srtla_ack(data);
                 if !ack_list.is_empty() {
@@ -397,7 +397,7 @@ impl SrtlaConnection {
             } else if pt == SRTLA_TYPE_KEEPALIVE {
                 self.handle_keepalive_response(data);
             } else {
-                incoming.forward_to_client.push(data.to_vec());
+                incoming.forward_to_client.push(SmallVec::from_slice(data));
             }
         }
         Ok(())

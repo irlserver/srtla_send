@@ -1,4 +1,5 @@
 use rand::RngCore;
+use smallvec::SmallVec;
 use tracing::{debug, info, warn};
 
 use crate::connection::SrtlaConnection;
@@ -24,7 +25,7 @@ pub struct SrtlaRegistrationManager {
     reg1_next_send_at_ms: u64,
     probing_state: ProbingState,
     probe_id: [u8; SRTLA_ID_LEN],
-    probe_results: Vec<ProbeResult>,
+    probe_results: SmallVec<ProbeResult, 4>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +67,7 @@ impl SrtlaRegistrationManager {
             reg1_next_send_at_ms: 0,
             probing_state: ProbingState::NotStarted,
             probe_id,
-            probe_results: Vec::new(),
+            probe_results: SmallVec::new(),
         }
     }
 

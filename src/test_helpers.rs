@@ -3,6 +3,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
@@ -58,11 +59,11 @@ pub async fn create_test_connection() -> SrtlaConnection {
     }
 }
 
-pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
+pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
-    let mut connections = Vec::new();
+    let mut connections = SmallVec::new();
 
     for i in 0..count {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
