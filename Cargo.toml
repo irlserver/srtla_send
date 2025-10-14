@@ -1,7 +1,7 @@
 [package]
 resolver = "3"
 name = "srtla_send"
-version = "2.3.0"
+version = "2.5.0"
 edition = "2024"
 description = "SRT transport proxy with link aggregation for connection bonding (sender-side)"
 license = "MIT"
