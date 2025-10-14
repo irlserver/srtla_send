@@ -857,18 +857,15 @@ impl SrtlaConnection {
     }
 
     pub fn is_timed_out(&self) -> bool {
-        let now = now_ms();
-        if self.connection_established_ms == 0 && now <= self.startup_grace_deadline_ms {
-            return false;
+        if !self.connected {
+            return true;
         }
-        !self.connected
-            || if let Some(lr) = self.last_received {
-                lr.elapsed().as_secs() >= CONN_TIMEOUT
-            } else {
-                true
-            }
+        if let Some(lr) = self.last_received {
+            lr.elapsed().as_secs() >= CONN_TIMEOUT
+        } else {
+            false
+        }
     }
-
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
     pub fn mark_for_recovery(&mut self) {
         self.last_received = None;
