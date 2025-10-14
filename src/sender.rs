@@ -26,7 +26,7 @@ pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
 pub const SEQUENCE_TRACKING_MAX_AGE_MS: u64 = 5000;
 pub const SEQUENCE_MAP_CLEANUP_INTERVAL_MS: u64 = 5000;
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
-pub const HOUSEKEEPING_INTERVAL_MS: u64 = 5;
+pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
 const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
 
 pub(crate) struct SequenceTrackingEntry {
