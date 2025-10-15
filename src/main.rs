@@ -38,19 +38,14 @@ struct Cli {
     #[arg(required_unless_present = "print_version")]
     ips_file: Option<String>,
 
-    // Toggle control options
     /// Unix domain socket path for remote toggle control (e.g.,
     /// /tmp/srtla.sock)
     #[arg(long = "control-socket")]
     control_socket: Option<String>,
 
-    // Initial toggle states
     /// Enable classic mode (disables all enhancements)
     #[arg(long = "classic")]
     classic: bool,
-    /// Disable connection stickiness
-    #[arg(long = "no-stickiness")]
-    no_stickiness: bool,
     /// Disable quality scoring
     #[arg(long = "no-quality")]
     no_quality: bool,
@@ -89,13 +84,8 @@ async fn main() -> Result<()> {
     let receiver_port = args.receiver_port.expect("required");
     let ips_file = args.ips_file.as_deref().expect("required");
 
-    // Create toggles with CLI initial values
-    let toggles = toggles::DynamicToggles::from_cli(
-        args.classic,
-        args.no_stickiness,
-        args.no_quality,
-        args.exploration,
-    );
+    let toggles =
+        toggles::DynamicToggles::from_cli(args.classic, args.no_quality, args.exploration);
 
     // Start toggle listener (stdin or Unix socket)
     toggles::spawn_toggle_listener(toggles.clone(), args.control_socket);

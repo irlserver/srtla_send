@@ -321,4 +321,147 @@ mod tests {
         let all_same = ids.windows(2).all(|w| w[0] == w[1]);
         assert!(!all_same, "All generated IDs were identical unexpectedly");
     }
+
+    #[tokio::test]
+    async fn test_probing_fallback_when_send_fails() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
+
+        assert_eq!(reg.reg1_target_idx(), None);
+
+        reg.start_probing(&mut connections).await;
+
+        assert_eq!(reg.reg1_target_idx(), Some(0));
+        assert!(!reg.is_probing());
+    }
+
+    #[tokio::test]
+    async fn test_probing_skipped_when_active_connections() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![create_test_connection().await];
+
+        connections[0].connected = true;
+        connections[0].last_received = Some(tokio::time::Instant::now());
+        reg.update_active_connections(&connections);
+
+        let initial_target = reg.reg1_target_idx();
+        reg.start_probing(&mut connections).await;
+
+        assert_eq!(reg.reg1_target_idx(), initial_target);
+        assert!(!reg.is_probing());
+    }
+
+    #[test]
+    fn test_probe_response_tracking() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        reg.set_probing_state_waiting();
+        reg.simulate_probe_result(0, 100);
+        reg.simulate_probe_result(1, 200);
+
+        assert_eq!(reg.probe_results_count(), 2);
+    }
+
+    #[test]
+    fn test_check_probing_complete_selects_lowest_rtt() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        reg.set_probing_state_waiting();
+        reg.simulate_probe_result(0, 150);
+        reg.simulate_probe_result(1, 50);
+        reg.simulate_probe_result(2, 200);
+
+        let completed = reg.check_probing_complete();
+
+        assert!(completed);
+        assert_eq!(reg.reg1_target_idx(), Some(1));
+        assert!(!reg.is_probing());
+    }
+
+    #[test]
+    fn test_check_probing_timeout_selects_best_available() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        reg.set_probing_state_waiting();
+        reg.simulate_probe_result(0, 100);
+
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+
+        let completed = reg.check_probing_complete();
+
+        assert!(completed);
+        assert_eq!(reg.reg1_target_idx(), Some(0));
+        assert!(!reg.is_probing());
+    }
+
+    #[test]
+    fn test_check_probing_no_responses_uses_fallback() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        reg.set_probing_state_waiting();
+
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+
+        let completed = reg.check_probing_complete();
+
+        assert!(completed);
+        assert_eq!(reg.reg1_target_idx(), Some(0));
+        assert!(!reg.is_probing());
+    }
+
+    #[test]
+    fn test_handle_probe_response_records_rtt() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        reg.set_probing_state_waiting();
+        reg.simulate_probe_result(0, 0);
+        reg.simulate_probe_result(1, 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        reg.handle_probe_response(0);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        reg.handle_probe_response(1);
+
+        let completed = reg.check_probing_complete();
+
+        assert!(completed);
+        assert_eq!(reg.reg1_target_idx(), Some(0));
+    }
+
+    #[test]
+    fn test_reg_ngp_during_probing_handled_as_probe_response() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        reg.set_probing_state_waiting();
+        reg.simulate_probe_result(0, 0);
+
+        let ngp_packet = [0x92, 0x11, 0x00, 0x00];
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        reg.process_registration_packet(0, &ngp_packet);
+
+        assert!(reg.is_probing());
+        assert_eq!(reg.probe_results_count(), 1);
+    }
+
+    #[test]
+    fn test_reg_ngp_after_probing_updates_target() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        reg.set_probing_state_waiting();
+        reg.simulate_probe_result(0, 100);
+        reg.check_probing_complete();
+
+        assert!(!reg.is_probing());
+        assert_eq!(reg.reg1_target_idx(), Some(0));
+
+        let ngp_packet = [0x92, 0x11, 0x00, 0x00];
+        reg.process_registration_packet(1, &ngp_packet);
+
+        assert_eq!(reg.reg1_target_idx(), Some(1));
+    }
 }

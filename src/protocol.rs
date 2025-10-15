@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use smallvec::SmallVec;
+
 pub const SRTLA_TYPE_KEEPALIVE: u16 = 0x9000;
 pub const SRTLA_TYPE_ACK: u16 = 0x9100;
 pub const SRTLA_TYPE_REG1: u16 = 0x9200;
@@ -24,7 +26,7 @@ pub const SRTLA_TYPE_REG3_LEN: usize = 2;
 
 pub const MTU: usize = 1500;
 
-pub const CONN_TIMEOUT: u64 = 4; // sec
+pub const CONN_TIMEOUT: u64 = 5; // sec
 pub const REG2_TIMEOUT: u64 = 4; // sec
 pub const REG3_TIMEOUT: u64 = 4; // sec
 pub const GLOBAL_TIMEOUT: u64 = 10; // sec
@@ -98,9 +100,9 @@ pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
     Some(ts)
 }
 
-pub fn create_ack_packet(acks: &[u32]) -> Vec<u8> {
+pub fn create_ack_packet(acks: &[u32]) -> SmallVec<u8, 64> {
     // Create packets that match the actual SRTLA receiver format (4-byte header)
-    let mut pkt = vec![0u8; 4 + 4 * acks.len()];
+    let mut pkt = SmallVec::from_vec(vec![0u8; 4 + 4 * acks.len()]);
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_ACK.to_be_bytes());
     pkt[2] = 0x00; // Padding (matching receiver behavior)
     pkt[3] = 0x00; // Padding (matching receiver behavior)
@@ -123,14 +125,14 @@ pub fn parse_srt_ack(buf: &[u8]) -> Option<u32> {
 }
 
 #[inline]
-pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
+pub fn parse_srt_nak(buf: &[u8]) -> SmallVec<u32, 4> {
     if buf.len() < 8 {
-        return vec![];
+        return SmallVec::new();
     }
     if get_packet_type(buf) != Some(SRT_TYPE_NAK) {
-        return vec![];
+        return SmallVec::new();
     }
-    let mut out = Vec::new();
+    let mut out = SmallVec::new();
     let mut i = 4usize;
     while i + 3 < buf.len() {
         let mut id = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
@@ -155,14 +157,14 @@ pub fn parse_srt_nak(buf: &[u8]) -> Vec<u32> {
 }
 
 #[inline]
-pub fn parse_srtla_ack(buf: &[u8]) -> Vec<u32> {
+pub fn parse_srtla_ack(buf: &[u8]) -> SmallVec<u32, 4> {
     if buf.len() < 8 {
-        return vec![];
+        return SmallVec::new();
     }
     if get_packet_type(buf) != Some(SRTLA_TYPE_ACK) {
-        return vec![];
+        return SmallVec::new();
     }
-    let mut out = Vec::new();
+    let mut out = SmallVec::new();
 
     // Match original C implementation behavior: skip first 4 bytes, not 2
     // The C code does: uint32_t *acks = (uint32_t *)buf; for (int i = 1; ...)

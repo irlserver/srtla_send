@@ -1,7 +1,9 @@
 #![cfg(test)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
+use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
@@ -20,7 +22,7 @@ pub async fn create_test_connection() -> SrtlaConnection {
 
     SrtlaConnection {
         conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
-        socket: tokio_socket,
+        socket: Arc::new(tokio_socket),
         remote,
         local_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         label: "test-connection".to_string(),
@@ -53,14 +55,15 @@ pub async fn create_test_connection() -> SrtlaConnection {
         last_reconnect_attempt_ms: 0,
         reconnect_failure_count: 0,
         connection_established_ms: now_ms(),
+        startup_grace_deadline_ms: now_ms(),
     }
 }
 
-pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
+pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
-    let mut connections = Vec::new();
+    let mut connections = SmallVec::new();
 
     for i in 0..count {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -70,7 +73,7 @@ pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
 
         let conn = SrtlaConnection {
             conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
-            socket: tokio_socket,
+            socket: Arc::new(tokio_socket),
             remote,
             local_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10 + i as u8)),
             label: format!("test-connection-{}", i),
@@ -103,6 +106,7 @@ pub async fn create_test_connections(count: usize) -> Vec<SrtlaConnection> {
             last_reconnect_attempt_ms: 0,
             reconnect_failure_count: 0,
             connection_established_ms: now_ms(),
+            startup_grace_deadline_ms: now_ms(),
         };
         connections.push(conn);
     }

@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+use smallvec::SmallVec;
+
 use crate::protocol::*;
 
 #[tokio::test]
@@ -45,7 +47,7 @@ async fn test_srt_ack_nak_parsing() {
     nak_packet[4..8].copy_from_slice(&12345u32.to_be_bytes());
 
     let naks = parse_srt_nak(&nak_packet);
-    assert_eq!(naks, vec![12345]);
+    assert_eq!(naks.as_slice(), &[12345]);
 
     // Test SRT NAK packet parsing - range NAK
     let mut range_nak_packet = vec![0u8; 12];
@@ -55,7 +57,7 @@ async fn test_srt_ack_nak_parsing() {
     range_nak_packet[8..12].copy_from_slice(&1003u32.to_be_bytes());
 
     let range_naks = parse_srt_nak(&range_nak_packet);
-    assert_eq!(range_naks, vec![1000, 1001, 1002, 1003]);
+    assert_eq!(range_naks.as_slice(), &[1000, 1001, 1002, 1003]);
 }
 
 #[tokio::test]
@@ -66,7 +68,7 @@ async fn test_srtla_ack_roundtrip() {
     assert_eq!(get_packet_type(&ack_packet), Some(SRTLA_TYPE_ACK));
 
     let parsed_acks = parse_srtla_ack(&ack_packet);
-    assert_eq!(parsed_acks, original_acks);
+    assert_eq!(parsed_acks.as_slice(), original_acks.as_slice());
 }
 
 #[tokio::test]
@@ -155,10 +157,10 @@ fn test_malformed_packet_handling() {
 
     // Test handling of malformed NAK packets
     let short_nak = [0x80, 0x03, 0x00, 0x00]; // Too short for any NAK data
-    assert_eq!(parse_srt_nak(&short_nak), vec![]);
+    assert!(parse_srt_nak(&short_nak).is_empty());
 
     let wrong_type = [0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x12, 0x34]; // ACK, not NAK
-    assert_eq!(parse_srt_nak(&wrong_type), vec![]);
+    assert!(parse_srt_nak(&wrong_type).is_empty());
 }
 
 #[test]
@@ -188,7 +190,7 @@ fn test_keepalive_timestamp_edge_cases() {
 
 #[tokio::test]
 async fn test_empty_ack_packet() {
-    let empty_acks: Vec<u32> = vec![];
+    let empty_acks: SmallVec<u32, 4> = SmallVec::new();
     let packet = create_ack_packet(&empty_acks);
 
     assert_eq!(packet.len(), 4); // Packet type + padding

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
@@ -6,24 +6,28 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
+use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 // mpsc is available in tokio::sync
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task::JoinHandle;
 use tokio::time::{self, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-use crate::connection::SrtlaConnection;
+use crate::connection::{SrtlaConnection, SrtlaIncoming};
 use crate::protocol::{self, MTU, PKT_LOG_SIZE};
 use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
 use crate::utils::now_ms;
 
-pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 pub const MAX_SEQUENCE_TRACKING: usize = 10_000;
 pub const SEQUENCE_TRACKING_MAX_AGE_MS: u64 = 5000;
 pub const SEQUENCE_MAP_CLEANUP_INTERVAL_MS: u64 = 5000;
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
+pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
+const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
 
 pub(crate) struct SequenceTrackingEntry {
     pub(crate) conn_id: u64,
@@ -37,9 +41,268 @@ impl SequenceTrackingEntry {
 }
 
 pub struct PendingConnectionChanges {
-    pub new_ips: Option<Vec<IpAddr>>,
+    pub new_ips: Option<SmallVec<IpAddr, 4>>,
     pub receiver_host: String,
     pub receiver_port: u16,
+}
+
+type ConnectionId = u64;
+
+struct ReaderHandle {
+    handle: JoinHandle<()>,
+}
+
+struct UplinkPacket {
+    conn_id: ConnectionId,
+    bytes: SmallVec<u8, 64>,
+}
+
+fn spawn_reader(
+    conn_id: ConnectionId,
+    label: String,
+    socket: Arc<UdpSocket>,
+    packet_tx: UnboundedSender<UplinkPacket>,
+) -> ReaderHandle {
+    let handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; MTU];
+        loop {
+            match socket.recv_from(&mut buf).await {
+                Ok((n, _)) if n > 0 => {
+                    let packet = SmallVec::from_slice(&buf[..n]);
+                    if packet_tx
+                        .send(UplinkPacket {
+                            conn_id,
+                            bytes: packet,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("{}: uplink recv error: {}", label, err);
+                    if packet_tx
+                        .send(UplinkPacket {
+                            conn_id,
+                            bytes: SmallVec::new(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    // Allow brief pause before retrying to avoid tight error loops.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+    });
+    ReaderHandle { handle }
+}
+
+fn sync_readers(
+    connections: &[SrtlaConnection],
+    readers: &mut HashMap<ConnectionId, ReaderHandle>,
+    packet_tx: &UnboundedSender<UplinkPacket>,
+) {
+    let mut active_ids = HashSet::with_capacity(connections.len());
+    for conn in connections {
+        active_ids.insert(conn.conn_id);
+        readers.entry(conn.conn_id).or_insert_with(|| {
+            spawn_reader(
+                conn.conn_id,
+                conn.label.clone(),
+                conn.socket.clone(),
+                packet_tx.clone(),
+            )
+        });
+    }
+
+    readers.retain(|conn_id, reader| {
+        if active_ids.contains(conn_id) {
+            true
+        } else {
+            reader.handle.abort();
+            false
+        }
+    });
+}
+
+fn restart_reader_for(
+    conn: &SrtlaConnection,
+    readers: &mut HashMap<ConnectionId, ReaderHandle>,
+    packet_tx: &UnboundedSender<UplinkPacket>,
+) {
+    if let Some(reader) = readers.remove(&conn.conn_id) {
+        reader.handle.abort();
+    }
+    readers.insert(
+        conn.conn_id,
+        spawn_reader(
+            conn.conn_id,
+            conn.label.clone(),
+            conn.socket.clone(),
+            packet_tx.clone(),
+        ),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_connection_events(
+    idx: usize,
+    connections: &mut [SrtlaConnection],
+    reg: &mut SrtlaRegistrationManager,
+    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    _seq_order: &mut VecDeque<u32>,
+    classic: bool,
+    incoming_override: Option<SrtlaIncoming>,
+) -> Result<()> {
+    if idx >= connections.len() {
+        return Ok(());
+    }
+
+    let incoming = if let Some(overridden) = incoming_override {
+        overridden
+    } else {
+        connections[idx]
+            .drain_incoming(idx, reg, instant_tx)
+            .await?
+    };
+
+    if !incoming.read_any
+        && incoming.ack_numbers.is_empty()
+        && incoming.nak_numbers.is_empty()
+        && incoming.srtla_ack_numbers.is_empty()
+        && incoming.forward_to_client.is_empty()
+    {
+        return Ok(());
+    }
+
+    for ack in incoming.ack_numbers.iter() {
+        for c in connections.iter_mut() {
+            c.handle_srt_ack(*ack as i32);
+        }
+    }
+
+    for srtla_ack in incoming.srtla_ack_numbers.iter() {
+        for c in connections.iter_mut() {
+            if c.handle_srtla_ack_specific(*srtla_ack as i32, classic) {
+                break;
+            }
+        }
+        for c in connections.iter_mut() {
+            c.handle_srtla_ack_global();
+        }
+    }
+
+    for nak in incoming.nak_numbers.iter() {
+        let mut handled = false;
+        if let Some(entry) = seq_to_conn.get(nak) {
+            let current_time = now_ms();
+            if !entry.is_expired(current_time) {
+                if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id) {
+                    conn.handle_nak(*nak as i32);
+                    handled = true;
+                }
+            }
+        }
+
+        if !handled {
+            for conn in connections.iter_mut() {
+                if conn.handle_nak(*nak as i32) {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(client) = last_client_addr {
+        for pkt in incoming.forward_to_client.iter() {
+            let _ = local_listener.send_to(pkt, client).await;
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_uplink_packet(
+    packet: UplinkPacket,
+    connections: &mut [SrtlaConnection],
+    reg: &mut SrtlaRegistrationManager,
+    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    toggles: &DynamicToggles,
+) {
+    if packet.bytes.is_empty() {
+        return;
+    }
+    if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
+        match connections[idx]
+            .process_packet(idx, reg, instant_tx, &packet.bytes)
+            .await
+        {
+            Ok(incoming) => {
+                let classic = toggles
+                    .classic_mode
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if let Err(err) = process_connection_events(
+                    idx,
+                    connections,
+                    reg,
+                    instant_tx,
+                    last_client_addr,
+                    local_listener,
+                    seq_to_conn,
+                    seq_order,
+                    classic,
+                    Some(incoming),
+                )
+                .await
+                {
+                    warn!("failed to apply uplink {} packet: {err}", packet.conn_id);
+                }
+            }
+            Err(err) => warn!(
+                "failed to process packet for uplink {}: {}",
+                packet.conn_id, err
+            ),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drain_packet_queue(
+    packet_rx: &mut UnboundedReceiver<UplinkPacket>,
+    connections: &mut [SrtlaConnection],
+    reg: &mut SrtlaRegistrationManager,
+    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    toggles: &DynamicToggles,
+) {
+    while let Ok(packet) = packet_rx.try_recv() {
+        handle_uplink_packet(
+            packet,
+            connections,
+            reg,
+            instant_tx,
+            last_client_addr,
+            local_listener,
+            seq_to_conn,
+            seq_order,
+            toggles,
+        )
+        .await;
+    }
 }
 
 pub async fn run_sender_with_toggles(
@@ -58,7 +321,7 @@ pub async fn run_sender_with_toggles(
         "uplink IPs loaded: {}",
         ips.iter()
             .map(|i| i.to_string())
-            .collect::<Vec<_>>()
+            .collect::<SmallVec<_, 4>>()
             .join(", ")
     );
     if ips.is_empty() {
@@ -77,8 +340,14 @@ pub async fn run_sender_with_toggles(
 
     let mut reg = SrtlaRegistrationManager::new();
 
+    reg.start_probing(&mut connections).await;
+
+    let (packet_tx, mut packet_rx) = unbounded_channel::<UplinkPacket>();
+    let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
+    sync_readers(&connections, &mut reader_handles, &packet_tx);
+
     // Create instant ACK forwarding channel and shared client address
-    let (instant_tx, instant_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (instant_tx, instant_rx) = std::sync::mpsc::channel::<SmallVec<u8, 64>>();
     let shared_client_addr = Arc::new(Mutex::new(None::<SocketAddr>));
 
     // Wrap local_listener in Arc for sharing
@@ -104,15 +373,18 @@ pub async fn run_sender_with_toggles(
     }
 
     let mut recv_buf = vec![0u8; MTU];
-    let mut housekeeping_timer = time::interval(Duration::from_millis(1));
-    let mut status_counter: u64 = 0;
+    let mut housekeeping_timer = time::interval_at(
+        Instant::now() + Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
+        Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
+    );
+    housekeeping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut status_elapsed_ms: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
     let mut seq_to_conn: HashMap<u32, SequenceTrackingEntry> =
         HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
     let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
     let mut last_sequence_cleanup_ms: u64 = 0;
     let mut last_selected_idx: Option<usize> = None;
-    let mut last_switch_time: Option<Instant> = None;
     let mut all_failed_at: Option<Instant> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
 
@@ -122,46 +394,30 @@ pub async fn run_sender_with_toggles(
     let mut sighup = signal(SignalKind::hangup())?;
 
     // Main loop - run housekeeping frequently like C version
+    // Run housekeeping once before entering the main event loop so we start in a clean state.
+    {
+        let classic = toggles
+            .classic_mode
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Err(err) = handle_housekeeping(
+            &mut connections,
+            &mut reg,
+            &mut seq_to_conn,
+            &mut seq_order,
+            &mut last_sequence_cleanup_ms,
+            classic,
+            &mut all_failed_at,
+            &mut reader_handles,
+            &packet_tx,
+        )
+        .await
+        {
+            warn!("initial housekeeping failed: {err}");
+        }
+    }
+
     #[cfg(unix)]
     loop {
-        {
-            let classic = toggles
-                .classic_mode
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let _ = handle_housekeeping(
-                &mut connections,
-                &mut reg,
-                &instant_tx,
-                last_client_addr,
-                &local_listener,
-                &mut seq_to_conn,
-                &mut seq_order,
-                &mut last_sequence_cleanup_ms,
-                classic,
-                &mut all_failed_at,
-            )
-            .await;
-        }
-
-        // Apply pending connection changes immediately (like C srtla_send)
-        // This matches C behavior: SIGHUP sets flag, next loop iteration applies changes
-        if let Some(changes) = pending_changes.take()
-            && let Some(new_ips) = changes.new_ips
-        {
-            info!("applying queued connection changes: {} IPs", new_ips.len());
-            apply_connection_changes(
-                &mut connections,
-                &new_ips,
-                &changes.receiver_host,
-                changes.receiver_port,
-                &mut last_selected_idx,
-                &mut seq_to_conn,
-                &mut seq_order,
-            )
-            .await;
-            info!("connection changes applied successfully");
-        }
-
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(
@@ -169,7 +425,6 @@ pub async fn run_sender_with_toggles(
                     &mut recv_buf,
                     &mut connections,
                     &mut last_selected_idx,
-                    &mut last_switch_time,
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_client_addr,
@@ -178,13 +433,101 @@ pub async fn run_sender_with_toggles(
                     &toggles,
                 )
                 .await;
+                drain_packet_queue(
+                    &mut packet_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
+            }
+            packet = packet_rx.recv() => {
+                if let Some(packet) = packet {
+                    handle_uplink_packet(
+                        packet,
+                        &mut connections,
+                        &mut reg,
+                        &instant_tx,
+                        last_client_addr,
+                        &local_listener,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                        &toggles,
+                    ).await;
+                    drain_packet_queue(
+                        &mut packet_rx,
+                        &mut connections,
+                        &mut reg,
+                        &instant_tx,
+                        last_client_addr,
+                        &local_listener,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                        &toggles,
+                    ).await;
+                } else {
+                    return Ok(());
+                }
             }
             _ = housekeeping_timer.tick() => {
-                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
-                status_counter = status_counter.wrapping_add(1);
-                if status_counter.is_multiple_of(30000) {
-                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                let classic = toggles
+                    .classic_mode
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if let Err(err) = handle_housekeeping(
+                    &mut connections,
+                    &mut reg,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &mut last_sequence_cleanup_ms,
+                    classic,
+                    &mut all_failed_at,
+                    &mut reader_handles,
+                    &packet_tx,
+                ).await {
+                    warn!("housekeeping failed: {err}");
                 }
+
+                if let Some(changes) = pending_changes.take()
+                    && let Some(new_ips) = changes.new_ips
+                {
+                    info!("applying queued connection changes: {} IPs", new_ips.len());
+                    apply_connection_changes(
+                        &mut connections,
+                        &new_ips,
+                        &changes.receiver_host,
+                        changes.receiver_port,
+                        &mut last_selected_idx,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                    ).await;
+                    info!("connection changes applied successfully");
+                    sync_readers(&connections, &mut reader_handles, &packet_tx);
+                }
+
+                status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
+                if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
+                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                    status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
+                }
+
+                sync_readers(&connections, &mut reader_handles, &packet_tx);
+                drain_packet_queue(
+                    &mut packet_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
             }
             _ = sighup.recv() => {
                 info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
@@ -196,49 +539,24 @@ pub async fn run_sender_with_toggles(
                     });
                     info!("uplink IP changes queued for next processing cycle");
                 }
+                drain_packet_queue(
+                    &mut packet_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
             }
         }
     }
 
     #[cfg(not(unix))]
     loop {
-        {
-            let classic = toggles
-                .classic_mode
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let _ = handle_housekeeping(
-                &mut connections,
-                &mut reg,
-                &instant_tx,
-                last_client_addr,
-                &local_listener,
-                &mut seq_to_conn,
-                &mut seq_order,
-                &mut last_sequence_cleanup_ms,
-                classic,
-                &mut all_failed_at,
-            )
-            .await;
-        }
-
-        // Apply pending connection changes immediately (like C srtla_send)
-        if let Some(changes) = pending_changes.take() {
-            if let Some(new_ips) = changes.new_ips {
-                info!("applying queued connection changes: {} IPs", new_ips.len());
-                apply_connection_changes(
-                    &mut connections,
-                    &new_ips,
-                    &changes.receiver_host,
-                    changes.receiver_port,
-                    &mut last_selected_idx,
-                    &mut seq_to_conn,
-                    &mut seq_order,
-                )
-                .await;
-                info!("connection changes applied successfully");
-            }
-        }
-
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
                 handle_srt_packet(
@@ -246,7 +564,6 @@ pub async fn run_sender_with_toggles(
                     &mut recv_buf,
                     &mut connections,
                     &mut last_selected_idx,
-                    &mut last_switch_time,
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_client_addr,
@@ -255,13 +572,102 @@ pub async fn run_sender_with_toggles(
                     &toggles,
                 )
                 .await;
+                drain_packet_queue(
+                    &mut packet_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
+            }
+            packet = packet_rx.recv() => {
+                if let Some(packet) = packet {
+                    handle_uplink_packet(
+                        packet,
+                        &mut connections,
+                        &mut reg,
+                        &instant_tx,
+                        last_client_addr,
+                        &local_listener,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                        &toggles,
+                    ).await;
+                    drain_packet_queue(
+                        &mut packet_rx,
+                        &mut connections,
+                        &mut reg,
+                        &instant_tx,
+                        last_client_addr,
+                        &local_listener,
+                        &mut seq_to_conn,
+                        &mut seq_order,
+                        &toggles,
+                    ).await;
+                } else {
+                    return Ok(());
+                }
             }
             _ = housekeeping_timer.tick() => {
-                // Periodic status reporting (every 30 seconds = 30,000 ticks at 1ms intervals)
-                status_counter = status_counter.wrapping_add(1);
-                if status_counter.is_multiple_of(30000) {
-                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                let classic = toggles
+                    .classic_mode
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if let Err(err) = handle_housekeeping(
+                    &mut connections,
+                    &mut reg,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &mut last_sequence_cleanup_ms,
+                    classic,
+                    &mut all_failed_at,
+                    &mut reader_handles,
+                    &packet_tx,
+                ).await {
+                   warn!("housekeeping failed: {err}");
+               }
+
+               if let Some(changes) = pending_changes.take()
+                   && let Some(new_ips) = changes.new_ips
+               {
+                   info!("applying queued connection changes: {} IPs", new_ips.len());
+                   apply_connection_changes(
+                       &mut connections,
+                       &new_ips,
+                       &changes.receiver_host,
+                       changes.receiver_port,
+                       &mut last_selected_idx,
+                       &mut seq_to_conn,
+                       &mut seq_order,
+                   )
+                   .await;
+                   info!("connection changes applied successfully");
+                    sync_readers(&connections, &mut reader_handles, &packet_tx);
                 }
+
+                status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
+                if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
+                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                    status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
+                }
+
+                sync_readers(&connections, &mut reader_handles, &packet_tx);
+                drain_packet_queue(
+                    &mut packet_rx,
+                    &mut connections,
+                    &mut reg,
+                    &instant_tx,
+                    last_client_addr,
+                    &local_listener,
+                    &mut seq_to_conn,
+                    &mut seq_order,
+                    &toggles,
+                )
+                .await;
             }
         }
     }
@@ -273,7 +679,6 @@ async fn handle_srt_packet(
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
-    last_switch_time: &mut Option<Instant>,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
@@ -318,7 +723,6 @@ async fn handle_srt_packet(
                         seq,
                         connections,
                         last_selected_idx,
-                        last_switch_time,
                         seq_to_conn,
                         seq_order,
                         last_client_addr,
@@ -329,10 +733,6 @@ async fn handle_srt_packet(
                 }
                 return;
             }
-            // pick best connection (respect dynamic stickiness toggle)
-            let enable_stick = toggles
-                .stickiness_enabled
-                .load(std::sync::atomic::Ordering::Relaxed);
             let enable_quality = toggles
                 .quality_scoring_enabled
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -343,23 +743,12 @@ async fn handle_srt_packet(
                 .classic_mode
                 .load(std::sync::atomic::Ordering::Relaxed);
 
-            // Classic mode overrides all other toggles
-            let effective_enable_stick = enable_stick && !classic;
             let effective_enable_quality = enable_quality && !classic;
             let effective_enable_explore = enable_explore && !classic;
 
             let sel_idx = select_connection_idx(
                 connections,
-                if effective_enable_stick {
-                    *last_selected_idx
-                } else {
-                    None
-                },
-                if effective_enable_stick {
-                    *last_switch_time
-                } else {
-                    None
-                },
+                *last_selected_idx,
                 effective_enable_quality,
                 effective_enable_explore,
                 classic,
@@ -372,7 +761,6 @@ async fn handle_srt_packet(
                     seq,
                     connections,
                     last_selected_idx,
-                    last_switch_time,
                     seq_to_conn,
                     seq_order,
                     last_client_addr,
@@ -400,7 +788,6 @@ async fn forward_via_connection(
     seq: Option<u32>,
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
-    last_switch_time: &mut Option<Instant>,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
@@ -425,7 +812,6 @@ async fn forward_via_connection(
             );
         }
         *last_selected_idx = Some(sel_idx);
-        *last_switch_time = Some(Instant::now());
     }
     let conn = &mut connections[sel_idx];
     if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
@@ -460,89 +846,56 @@ async fn forward_via_connection(
 async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<Vec<u8>>,
-    last_client_addr: Option<SocketAddr>,
-    local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_sequence_cleanup_ms: &mut u64,
     classic: bool,
     all_failed_at: &mut Option<Instant>,
+    reader_handles: &mut HashMap<ConnectionId, ReaderHandle>,
+    packet_tx: &UnboundedSender<UplinkPacket>,
 ) -> Result<()> {
     // If we're waiting on a REG2 response past the timeout, proactively retry REG1
     let current_ms = now_ms();
     let _ = reg.clear_pending_if_timed_out(current_ms);
 
-    // housekeeping: receive responses, drive registration, send keepalives
-    for i in 0..connections.len() {
-        let incoming = connections[i].drain_incoming(i, reg, instant_tx).await?;
-        if incoming.read_any { /* timestamps updated inside */ }
-
-        // Apply ACKs to all connections like Java
-        for ack in incoming.ack_numbers.iter() {
-            for c in connections.iter_mut() {
-                c.handle_srt_ack(*ack as i32);
-            }
-        }
-
-        // Process SRTLA ACKs: first find specific packet, then optionally apply
-        // classic-mode global recovery.
-        for srtla_ack in incoming.srtla_ack_numbers.iter() {
-            // Phase 1: Find the connection that sent this specific packet
-            for c in connections.iter_mut() {
-                if c.handle_srtla_ack_specific(*srtla_ack as i32, classic) {
-                    break;
-                }
-            }
-
-            // Phase 2: Classic mode mirrors the C implementation by bumping every
-            // active connection's window. Enhanced mode relies on the fine-grained
-            // Bond Bunny logic inside `handle_srtla_ack_specific` and skips the
-            // global +1 to avoid over-inflating other links.
-            if classic {
-                for c in connections.iter_mut() {
-                    c.handle_srtla_ack_global();
+    if reg.is_probing() {
+        let was_probing = true;
+        reg.check_probing_complete();
+        // If probing just completed, reset grace period for the selected connection
+        if !reg.is_probing() && was_probing {
+            if let Some(idx) = reg.get_selected_connection_idx() {
+                if let Some(conn) = connections.get_mut(idx) {
+                    conn.startup_grace_deadline_ms = current_ms + 1500;
+                    debug!(
+                        "{}: Reset grace period after being selected for initial registration",
+                        conn.label
+                    );
                 }
             }
         }
+    }
 
-        for nak in incoming.nak_numbers.iter() {
-            if let Some(entry) = seq_to_conn.get(nak) {
-                let current_time = now_ms();
-                if !entry.is_expired(current_time) {
-                    if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id)
-                    {
-                        conn.handle_nak(*nak as i32);
-                        continue;
-                    }
-                }
-            }
-            connections[i].handle_nak(*nak as i32);
-        }
-
-        // Forward responses back to local SRT client
-        if let Some(client) = last_client_addr {
-            for pkt in incoming.forward_to_client.iter() {
-                let _ = local_listener.send_to(pkt, client).await;
-            }
-        }
-
+    // housekeeping: drive registration, send keepalives
+    for (i, conn) in connections.iter_mut().enumerate() {
         // Simple reconnect-on-timeout, then allow reg driver to proceed
-        if connections[i].is_timed_out() {
-            if connections[i].should_attempt_reconnect() {
-                let label = connections[i].label.clone();
-                connections[i].record_reconnect_attempt();
-                warn!(
-                    "{} timed out; resetting connection state for recovery",
-                    label
-                );
-                // Use C-style recovery: reset state but keep socket alive
-                connections[i].mark_for_recovery();
+        if conn.is_timed_out() {
+            if conn.should_attempt_reconnect() {
+                let label = conn.label.clone();
+                conn.record_reconnect_attempt();
+                warn!("{} timed out; attempting full socket reconnection", label);
+                // Perform full socket reconnection
+                if let Err(e) = conn.reconnect().await {
+                    warn!("{} failed to reconnect: {}", label, e);
+                    // Fall back to mark_for_recovery if reconnect fails
+                    conn.mark_for_recovery();
+                } else {
+                    restart_reader_for(conn, reader_handles, packet_tx);
+                }
 
                 match reg.pending_reg2_idx() {
                     Some(idx) if idx == i => {
                         info!("{} marked for recovery; re-sending REG1", label);
-                        reg.send_reg1_to(i, &mut connections[i]).await;
+                        reg.send_reg1_to(i, conn).await;
                     }
                     Some(_) => {
                         debug!(
@@ -552,23 +905,23 @@ async fn handle_housekeeping(
                     }
                     None => {
                         info!("{} marked for recovery; re-sending REG2", label);
-                        reg.send_reg2_to(i, &mut connections[i]).await;
+                        reg.send_reg2_to(i, conn).await;
                     }
                 }
             } else {
-                debug!("{} timed out but in retry interval", connections[i].label);
+                debug!("{} timed out but in retry interval", conn.label);
             }
             continue;
         }
 
-        if connections[i].needs_keepalive() {
-            let _ = connections[i].send_keepalive().await;
+        if conn.needs_keepalive() {
+            let _ = conn.send_keepalive().await;
         }
-        if connections[i].needs_rtt_measurement() {
-            let _ = connections[i].send_keepalive().await;
+        if conn.needs_rtt_measurement() {
+            let _ = conn.send_keepalive().await;
         }
         if !classic {
-            connections[i].perform_window_recovery();
+            conn.perform_window_recovery();
         }
     }
 
@@ -639,13 +992,24 @@ fn cleanup_expired_sequence_tracking(
     seq_order.retain(|seq| seq_to_conn.contains_key(seq));
 
     if removed_count > 0 {
-        info!(
-            "Cleaned up {} stale sequence mappings ({} → {}, {:.1}% capacity)",
-            removed_count,
-            before_size,
-            seq_to_conn.len(),
-            (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0
-        );
+        let utilization = (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0;
+        if utilization >= 75.0 {
+            info!(
+                "Cleaned up {} stale sequence mappings ({} → {}, {:.1}% capacity)",
+                removed_count,
+                before_size,
+                seq_to_conn.len(),
+                utilization
+            );
+        } else {
+            debug!(
+                "Cleaned up {} stale sequence mappings ({} → {}, {:.1}% capacity)",
+                removed_count,
+                before_size,
+                seq_to_conn.len(),
+                utilization
+            );
+        }
     }
 
     if seq_to_conn.len() > (MAX_SEQUENCE_TRACKING as f64 * 0.8) as usize {
@@ -703,8 +1067,7 @@ pub(crate) fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
 
 pub fn select_connection_idx(
     conns: &[SrtlaConnection],
-    last_idx: Option<usize>,
-    last_switch: Option<Instant>,
+    _last_idx: Option<usize>,
     enable_quality: bool,
     enable_explore: bool,
     classic: bool,
@@ -728,16 +1091,6 @@ pub fn select_connection_idx(
         return best_idx;
     }
 
-    // Enhanced mode: Bond Bunny approach - calculate scores first, then apply
-    // stickiness Check if we're in stickiness window
-    let in_stickiness_window = if let (Some(idx), Some(ts)) = (last_idx, last_switch) {
-        now.duration_since(ts).as_millis() < (MIN_SWITCH_INTERVAL_MS as u128)
-            && idx < conns.len()
-            && conns[idx].connected
-            && !conns[idx].is_timed_out()
-    } else {
-        false
-    };
     // Exploration window: simple periodic exploration of second-best
     // Use elapsed time since program start for consistent periodic behavior
     let explore_now = enable_explore && (now.elapsed().as_millis() % 5000) < 300;
@@ -792,16 +1145,6 @@ pub fn select_connection_idx(
         }
     }
 
-    // Bond Bunny approach: if in stickiness window and last connection is still
-    // good, keep it
-    if in_stickiness_window
-        && let Some(idx) = last_idx
-        && idx < conns.len()
-        && !conns[idx].is_timed_out()
-    {
-        return Some(idx);
-    }
-
     // Allow switching if better connection found (prevents getting stuck on
     // degraded connections)
     if explore_now {
@@ -811,9 +1154,9 @@ pub fn select_connection_idx(
     }
 }
 
-pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
+pub async fn read_ip_list(path: &str) -> Result<SmallVec<IpAddr, 4>> {
     let text = std::fs::read_to_string(Path::new(path)).context("read IPs file")?;
-    let mut out = Vec::new();
+    let mut out = SmallVec::new();
     for line in text.lines() {
         let l = line.trim();
         if l.is_empty() {
@@ -828,7 +1171,7 @@ pub async fn read_ip_list(path: &str) -> Result<Vec<IpAddr>> {
 }
 
 pub(crate) async fn apply_connection_changes(
-    connections: &mut Vec<SrtlaConnection>,
+    connections: &mut SmallVec<SrtlaConnection, 4>,
     new_ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
@@ -863,7 +1206,7 @@ pub(crate) async fn apply_connection_changes(
     }
 
     // Add new connections
-    let new_ips_needed: Vec<IpAddr> = new_ips
+    let new_ips_needed: SmallVec<IpAddr, 4> = new_ips
         .iter()
         .copied()
         .filter(|ip| {
@@ -888,8 +1231,8 @@ pub async fn create_connections_from_ips(
     ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
-) -> Vec<SrtlaConnection> {
-    let mut connections = Vec::new();
+) -> SmallVec<SrtlaConnection, 4> {
+    let mut connections = SmallVec::new();
     for ip in ips {
         match SrtlaConnection::connect_from_ip(*ip, receiver_host, receiver_port).await {
             Ok(conn) => {
@@ -933,9 +1276,8 @@ pub(crate) fn log_connection_status(
 
     // Show toggle states
     info!(
-        "  Toggles: classic={}, stickiness={}, quality={}, exploration={}",
+        "  Toggles: classic={}, quality={}, exploration={}",
         toggles.classic_mode.load(Ordering::Relaxed),
-        toggles.stickiness_enabled.load(Ordering::Relaxed),
         toggles.quality_scoring_enabled.load(Ordering::Relaxed),
         toggles.exploration_enabled.load(Ordering::Relaxed)
     );

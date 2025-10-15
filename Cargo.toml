@@ -1,7 +1,7 @@
 [package]
 resolver = "3"
 name = "srtla_send"
-version = "2.3.0"
+version = "2.5.0"
 edition = "2024"
 description = "SRT transport proxy with link aggregation for connection bonding (sender-side)"
 license = "MIT"
@@ -24,6 +24,7 @@ tokio = { version = "1.47.1", features = [
 	"time",
 	"io-util",
 	"signal",
+	"sync",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
