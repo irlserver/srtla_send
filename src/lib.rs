@@ -4,6 +4,12 @@
 //! aggregation) sender implementation. It includes protocol handling,
 //! connection management, and dynamic configuration toggles.
 
+// Use mimalloc as the global allocator for tests (non-Windows only)
+#[cfg(not(windows))]
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod connection;
 pub mod protocol;
 pub mod registration;

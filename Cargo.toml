@@ -32,6 +32,7 @@ socket2 = { version = "0.6", features = ["all"] }
 bytes = "1.10.1"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 smallvec = "=2.0.0-alpha.11"
+mimalloc = { version = "0.1.43", default-features = false, features = ["secure"] }
 
 [features]
 test-internals = []
