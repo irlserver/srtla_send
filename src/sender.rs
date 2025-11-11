@@ -865,7 +865,7 @@ async fn handle_housekeeping(
         if !reg.is_probing() && was_probing {
             if let Some(idx) = reg.get_selected_connection_idx() {
                 if let Some(conn) = connections.get_mut(idx) {
-                    conn.startup_grace_deadline_ms = current_ms + 1500;
+                    conn.reconnection.startup_grace_deadline_ms = current_ms + 1500;
                     debug!(
                         "{}: Reset grace period after being selected for initial registration",
                         conn.label
@@ -1360,7 +1360,7 @@ pub(crate) fn log_connection_status(
             conn.current_bitrate_mbps()
         );
 
-        if conn.estimated_rtt_ms > 0.0 {
+        if conn.rtt.estimated_rtt_ms > 0.0 {
             info!(
                 "        RTT: smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, stable={} (last: \
                  {:.1}s ago)",
@@ -1368,7 +1368,7 @@ pub(crate) fn log_connection_status(
                 conn.get_fast_rtt_ms(),
                 conn.get_rtt_jitter_ms(),
                 conn.is_rtt_stable(),
-                (now_ms().saturating_sub(conn.last_rtt_measurement_ms) as f64) / 1000.0
+                (now_ms().saturating_sub(conn.rtt.last_rtt_measurement_ms) as f64) / 1000.0
             );
         }
     }

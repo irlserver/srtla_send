@@ -70,8 +70,8 @@ mod tests {
 
         // Test window increase behavior
         let initial_window = conn.window;
-        conn.consecutive_acks_without_nak = 4; // Trigger window increase
-        conn.last_window_increase_ms = now_ms() - 300; // Make sure enough time passed
+        conn.congestion.consecutive_acks_without_nak = 4; // Trigger window increase
+        conn.congestion.last_window_increase_ms = now_ms() - 300; // Make sure enough time passed
         conn.handle_srt_ack(40);
 
         assert!(conn.window >= initial_window);
@@ -91,26 +91,26 @@ mod tests {
 
         // Test single NAK
         conn.handle_nak(100);
-        assert_eq!(conn.nak_count, 1);
+        assert_eq!(conn.congestion.nak_count, 1);
         assert!(conn.window < initial_window);
-        assert_eq!(conn.nak_burst_count, 0);
+        assert_eq!(conn.congestion.nak_burst_count, 0);
 
         // Test NAK burst detection
         let current_time = now_ms();
-        conn.last_nak_time_ms = current_time;
+        conn.congestion.last_nak_time_ms = current_time;
 
         // Simulate NAK burst (multiple NAKs within 1 second)
-        conn.last_nak_time_ms = current_time;
+        conn.congestion.last_nak_time_ms = current_time;
         conn.handle_nak(101);
-        assert_eq!(conn.nak_burst_count, 2);
+        assert_eq!(conn.congestion.nak_burst_count, 2);
 
         conn.handle_nak(102);
-        assert_eq!(conn.nak_burst_count, 3);
+        assert_eq!(conn.congestion.nak_burst_count, 3);
 
         // Test fast recovery mode activation
         conn.window = 1500; // Low enough to trigger fast recovery
         conn.handle_nak(103);
-        assert!(conn.fast_recovery_mode);
+        assert!(conn.congestion.fast_recovery_mode);
     }
 
     #[test]
@@ -118,7 +118,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
         let initial_window = conn.window;
-        let initial_nak_count = conn.nak_count;
+        let initial_nak_count = conn.congestion.nak_count;
 
         // Register a packet (simulate sending it)
         conn.register_packet(100);
@@ -128,7 +128,7 @@ mod tests {
 
         assert!(conn.window < initial_window, "Window should shrink on NAK");
         assert_eq!(
-            conn.nak_count,
+            conn.congestion.nak_count,
             initial_nak_count + 1,
             "NAK count should increment when packet is found"
         );
@@ -144,22 +144,22 @@ mod tests {
         }
 
         conn.handle_nak(100);
-        assert_eq!(conn.nak_burst_count, 0);
-        assert_eq!(conn.nak_count, 1);
+        assert_eq!(conn.congestion.nak_burst_count, 0);
+        assert_eq!(conn.congestion.nak_count, 1);
 
         std::thread::sleep(std::time::Duration::from_millis(500));
         conn.handle_nak(101);
-        assert_eq!(conn.nak_burst_count, 2);
-        assert_eq!(conn.nak_count, 2);
+        assert_eq!(conn.congestion.nak_burst_count, 2);
+        assert_eq!(conn.congestion.nak_count, 2);
 
         conn.handle_nak(102);
-        assert_eq!(conn.nak_burst_count, 3);
-        assert_eq!(conn.nak_count, 3);
+        assert_eq!(conn.congestion.nak_burst_count, 3);
+        assert_eq!(conn.congestion.nak_count, 3);
 
         std::thread::sleep(std::time::Duration::from_millis(1100));
         conn.handle_nak(103);
-        assert_eq!(conn.nak_burst_count, 0);
-        assert_eq!(conn.nak_count, 4);
+        assert_eq!(conn.congestion.nak_burst_count, 0);
+        assert_eq!(conn.congestion.nak_count, 4);
     }
 
     #[test]
@@ -174,15 +174,15 @@ mod tests {
         conn.handle_nak(100);
         conn.handle_nak(101);
         conn.handle_nak(102);
-        assert_eq!(conn.nak_burst_count, 3);
+        assert_eq!(conn.congestion.nak_burst_count, 3);
 
         conn.perform_window_recovery();
-        assert_eq!(conn.nak_burst_count, 3);
+        assert_eq!(conn.congestion.nak_burst_count, 3);
 
         std::thread::sleep(std::time::Duration::from_millis(1100));
         conn.perform_window_recovery();
-        assert_eq!(conn.nak_burst_count, 0);
-        assert_eq!(conn.nak_burst_start_time_ms, 0);
+        assert_eq!(conn.congestion.nak_burst_count, 0);
+        assert_eq!(conn.congestion.nak_burst_start_time_ms, 0);
     }
 
     #[test]
@@ -192,14 +192,14 @@ mod tests {
 
         conn.register_packet(100);
 
-        let initial_nak_count = conn.nak_count;
-        let initial_burst_count = conn.nak_burst_count;
+        let initial_nak_count = conn.congestion.nak_count;
+        let initial_burst_count = conn.congestion.nak_burst_count;
         let initial_window = conn.window;
 
         let found = conn.handle_nak(999);
         assert!(!found);
-        assert_eq!(conn.nak_count, initial_nak_count);
-        assert_eq!(conn.nak_burst_count, initial_burst_count);
+        assert_eq!(conn.congestion.nak_count, initial_nak_count);
+        assert_eq!(conn.congestion.nak_burst_count, initial_burst_count);
         assert_eq!(conn.window, initial_window);
     }
 
@@ -214,14 +214,14 @@ mod tests {
 
         conn.handle_nak(100);
         conn.handle_nak(101);
-        assert_eq!(conn.nak_burst_count, 2);
+        assert_eq!(conn.congestion.nak_burst_count, 2);
 
         conn.handle_nak(102);
-        assert_eq!(conn.nak_burst_count, 3);
+        assert_eq!(conn.congestion.nak_burst_count, 3);
 
         std::thread::sleep(std::time::Duration::from_millis(1100));
         conn.handle_nak(103);
-        assert_eq!(conn.nak_burst_count, 0);
+        assert_eq!(conn.congestion.nak_burst_count, 0);
     }
 
     #[test]
@@ -236,15 +236,15 @@ mod tests {
         conn.handle_nak(100);
         conn.handle_nak(101);
         conn.handle_nak(102);
-        assert_eq!(conn.nak_burst_count, 3);
-        assert!(conn.nak_burst_start_time_ms > 0);
+        assert_eq!(conn.congestion.nak_burst_count, 3);
+        assert!(conn.congestion.nak_burst_start_time_ms > 0);
 
         rt.block_on(conn.reconnect()).unwrap();
 
-        assert_eq!(conn.nak_burst_count, 0);
-        assert_eq!(conn.nak_burst_start_time_ms, 0);
-        assert_eq!(conn.nak_count, 0);
-        assert_eq!(conn.last_nak_time_ms, 0);
+        assert_eq!(conn.congestion.nak_burst_count, 0);
+        assert_eq!(conn.congestion.nak_burst_start_time_ms, 0);
+        assert_eq!(conn.congestion.nak_count, 0);
+        assert_eq!(conn.congestion.last_nak_time_ms, 0);
     }
 
     #[test]
@@ -306,8 +306,8 @@ mod tests {
         // Reset connection state for enhanced mode test
         conn.window = 5000; // Higher window to make utilization threshold work
         conn.in_flight_packets = 0;
-        conn.consecutive_acks_without_nak = 0;
-        conn.last_window_increase_ms = 0; // Reset timing
+        conn.congestion.consecutive_acks_without_nak = 0;
+        conn.congestion.last_window_increase_ms = 0; // Reset timing
 
         // Add packets for testing
         conn.register_packet(200);
@@ -322,28 +322,28 @@ mod tests {
         assert!(found2);
         assert_eq!(conn.window, 5000); // Should NOT increase yet
         assert_eq!(conn.in_flight_packets, 3);
-        assert_eq!(conn.consecutive_acks_without_nak, 1); // Should increment
+        assert_eq!(conn.congestion.consecutive_acks_without_nak, 1); // Should increment
 
         // Second ACK - should still not increase (needs 4 consecutive for normal mode)
         let found3 = conn.handle_srtla_ack_specific(300, false);
         assert!(found3);
         assert_eq!(conn.window, 5000); // Should NOT increase yet
         assert_eq!(conn.in_flight_packets, 2);
-        assert_eq!(conn.consecutive_acks_without_nak, 2); // Should increment
+        assert_eq!(conn.congestion.consecutive_acks_without_nak, 2); // Should increment
 
         // Third ACK - still not enough
         let found4 = conn.handle_srtla_ack_specific(400, false);
         assert!(found4);
         assert_eq!(conn.window, 5000); // Should NOT increase yet
         assert_eq!(conn.in_flight_packets, 1);
-        assert_eq!(conn.consecutive_acks_without_nak, 3); // Should increment
+        assert_eq!(conn.congestion.consecutive_acks_without_nak, 3); // Should increment
 
         // Fourth ACK - should finally increase window
         let found5 = conn.handle_srtla_ack_specific(500, false);
         assert!(found5);
         assert_eq!(conn.window, 5000 + WINDOW_INCR); // Should increase now
         assert_eq!(conn.in_flight_packets, 0);
-        assert_eq!(conn.consecutive_acks_without_nak, 0); // Should reset after increase
+        assert_eq!(conn.congestion.consecutive_acks_without_nak, 0); // Should reset after increase
     }
 
     #[test]
@@ -372,12 +372,12 @@ mod tests {
         assert!(conn.needs_rtt_measurement());
 
         // After waiting for response, should not need
-        conn.waiting_for_keepalive_response = true;
+        conn.rtt.waiting_for_keepalive_response = true;
         assert!(!conn.needs_rtt_measurement());
 
         // After timeout, should need again
-        conn.waiting_for_keepalive_response = false;
-        conn.last_rtt_measurement_ms = now_ms() - 4000;
+        conn.rtt.waiting_for_keepalive_response = false;
+        conn.rtt.last_rtt_measurement_ms = now_ms() - 4000;
         assert!(conn.needs_rtt_measurement());
     }
 
@@ -393,8 +393,8 @@ mod tests {
         let reduced_window = conn.window;
 
         // Simulate time passing without NAKs
-        conn.last_nak_time_ms = now_ms() - 3000;
-        conn.last_window_increase_ms = now_ms() - 2500;
+        conn.congestion.last_nak_time_ms = now_ms() - 3000;
+        conn.congestion.last_window_increase_ms = now_ms() - 2500;
 
         conn.perform_window_recovery();
         assert!(conn.window > reduced_window);
@@ -410,18 +410,18 @@ mod tests {
 
         // Record attempt
         conn.record_reconnect_attempt();
-        assert_eq!(conn.reconnect_failure_count, 1);
+        assert_eq!(conn.reconnection.reconnect_failure_count, 1);
 
         // Should not allow immediate retry
         assert!(!conn.should_attempt_reconnect());
 
         // Test backoff behavior
-        let initial_time = conn.last_reconnect_attempt_ms;
+        let initial_time = conn.reconnection.last_reconnect_attempt_ms;
         assert!(initial_time > 0);
 
         // Test reconnect success
         conn.mark_reconnect_success();
-        assert_eq!(conn.reconnect_failure_count, 0);
+        assert_eq!(conn.reconnection.reconnect_failure_count, 0);
     }
 
     #[test]
@@ -489,14 +489,14 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
 
-        assert_eq!(conn.total_nak_count(), 0);
-        assert_eq!(conn.nak_burst_count(), 0);
+        assert_eq!(conn.congestion.nak_count, 0);
+        assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.time_since_last_nak_ms(), None);
 
         conn.register_packet(100);
         conn.handle_nak(100);
-        assert_eq!(conn.total_nak_count(), 1);
-        assert_eq!(conn.nak_burst_count(), 0);
+        assert_eq!(conn.congestion.nak_count, 1);
+        assert_eq!(conn.congestion.nak_burst_count, 0);
         assert!(conn.time_since_last_nak_ms().is_some());
 
         let time_since = conn.time_since_last_nak_ms().unwrap();
@@ -522,21 +522,21 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
 
-        assert!(!conn.fast_recovery_mode);
+        assert!(!conn.congestion.fast_recovery_mode);
 
         // Register packet first, then reduce window to trigger fast recovery
         conn.register_packet(100);
         conn.window = 1500;
         conn.handle_nak(100);
 
-        assert!(conn.fast_recovery_mode);
+        assert!(conn.congestion.fast_recovery_mode);
 
         // Test recovery exit condition
         conn.window = 15_000;
         conn.register_packet(200);
         conn.handle_srtla_ack_specific(200, false);
 
-        assert!(!conn.fast_recovery_mode);
+        assert!(!conn.congestion.fast_recovery_mode);
     }
 
     #[test]

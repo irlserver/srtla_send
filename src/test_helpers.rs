@@ -7,7 +7,9 @@ use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
-use crate::connection::SrtlaConnection;
+use crate::connection::{
+    BitrateTracker, CongestionControl, ReconnectionState, RttTracker, SrtlaConnection,
+};
 use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
 use crate::utils::now_ms;
 
@@ -33,33 +35,15 @@ pub async fn create_test_connection() -> SrtlaConnection {
         packet_send_times_ms: [0; PKT_LOG_SIZE],
         packet_idx: 0,
         last_received: Some(Instant::now()),
-        last_keepalive_sent_ms: 0,
-        waiting_for_keepalive_response: false,
-        last_rtt_measurement_ms: 0,
-        smooth_rtt_ms: 0.0,
-        fast_rtt_ms: 0.0,
-        rtt_jitter_ms: 0.0,
-        prev_rtt_ms: 0.0,
-        rtt_avg_delta_ms: 0.0,
-        rtt_min_ms: 200.0,
-        estimated_rtt_ms: 0.0,
-        nak_count: 0,
-        last_nak_time_ms: 0,
-        last_window_increase_ms: 0,
-        consecutive_acks_without_nak: 0,
-        fast_recovery_mode: false,
-        fast_recovery_start_ms: 0,
-        nak_burst_count: 0,
-        nak_burst_start_time_ms: 0,
-        last_reconnect_attempt_ms: 0,
-        reconnect_failure_count: 0,
-        connection_established_ms: now_ms(),
-        startup_grace_deadline_ms: now_ms(),
-        bytes_sent_total: 0,
-        bytes_sent_window: 0,
-        last_rate_update_ms: now_ms(),
-        current_bitrate_bps: 0.0,
         last_sent: None,
+        rtt: RttTracker::default(),
+        congestion: CongestionControl::default(),
+        bitrate: BitrateTracker::default(),
+        reconnection: ReconnectionState {
+            connection_established_ms: now_ms(),
+            startup_grace_deadline_ms: now_ms(),
+            ..Default::default()
+        },
     }
 }
 
@@ -88,33 +72,15 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
             packet_send_times_ms: [0; PKT_LOG_SIZE],
             packet_idx: 0,
             last_received: Some(Instant::now()),
-            last_keepalive_sent_ms: 0,
-            waiting_for_keepalive_response: false,
-            last_rtt_measurement_ms: 0,
-            smooth_rtt_ms: 0.0,
-            fast_rtt_ms: 0.0,
-            rtt_jitter_ms: 0.0,
-            prev_rtt_ms: 0.0,
-            rtt_avg_delta_ms: 0.0,
-            rtt_min_ms: 200.0,
-            estimated_rtt_ms: 0.0,
-            nak_count: 0,
-            last_nak_time_ms: 0,
-            last_window_increase_ms: 0,
-            consecutive_acks_without_nak: 0,
-            fast_recovery_mode: false,
-            fast_recovery_start_ms: 0,
-            nak_burst_count: 0,
-            nak_burst_start_time_ms: 0,
-            last_reconnect_attempt_ms: 0,
-            reconnect_failure_count: 0,
-            connection_established_ms: now_ms(),
-            startup_grace_deadline_ms: now_ms(),
-            bytes_sent_total: 0,
-            bytes_sent_window: 0,
-            last_rate_update_ms: now_ms(),
-            current_bitrate_bps: 0.0,
             last_sent: None,
+            rtt: RttTracker::default(),
+            congestion: CongestionControl::default(),
+            bitrate: BitrateTracker::default(),
+            reconnection: ReconnectionState {
+                connection_established_ms: now_ms(),
+                startup_grace_deadline_ms: now_ms(),
+                ..Default::default()
+            },
         };
         connections.push(conn);
     }
