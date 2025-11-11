@@ -159,9 +159,8 @@ impl SrtlaConnection {
     pub async fn send_keepalive(&mut self) -> Result<()> {
         let pkt = create_keepalive_packet();
         self.socket.send(&pkt).await?;
-        let now_instant = Instant::now();
         let now = now_ms();
-        self.last_sent = Some(now_instant); // Track all sends, including keepalives
+        self.last_sent = Some(Instant::now()); // Track all sends, including keepalives
         // Only set waiting flag and timestamp when we intend to measure RTT
         if !self.rtt.waiting_for_keepalive_response
             && (self.rtt.last_rtt_measurement_ms == 0

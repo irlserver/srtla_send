@@ -24,3 +24,12 @@ pub fn now_ms() -> u64 {
 pub fn elapsed_ms() -> u64 {
     STARTUP_INSTANT.elapsed().as_millis() as u64
 }
+
+/// Get elapsed milliseconds since program startup for a given Instant
+/// Uses the stable STARTUP_INSTANT for consistent periodic timing
+pub fn instant_to_elapsed_ms(instant: Instant) -> u64 {
+    STARTUP_INSTANT
+        .elapsed()
+        .saturating_sub(instant.elapsed())
+        .as_millis() as u64
+}

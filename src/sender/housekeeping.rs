@@ -120,7 +120,7 @@ pub async fn handle_housekeeping(
 
         // Timeout when all connections have failed
         if let Some(failed_at) = all_failed_at
-            && failed_at.elapsed().as_millis() > GLOBAL_TIMEOUT_MS as u128
+            && crate::utils::instant_to_elapsed_ms(*failed_at) > GLOBAL_TIMEOUT_MS
         {
             if reg.has_connected {
                 error!("Failed to re-establish any connections");

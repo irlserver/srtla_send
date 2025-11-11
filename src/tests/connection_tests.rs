@@ -691,7 +691,10 @@ mod tests {
         let before = conn.window;
         conn.perform_window_recovery();
         // Should NOT recover because increment wait time not met
-        assert_eq!(conn.window, before, "Should not recover when timing constraint not met");
+        assert_eq!(
+            conn.window, before,
+            "Should not recover when timing constraint not met"
+        );
 
         // Now allow enough time
         conn.congestion.last_window_increase_ms = now_ms() - 1500; // Enough time
