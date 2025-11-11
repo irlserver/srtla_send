@@ -553,29 +553,17 @@ impl SrtlaConnection {
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
         self.packet_idx = 0;
-        self.congestion.nak_count = 0;
-        self.congestion.last_nak_time_ms = 0;
-        self.congestion.nak_burst_count = 0;
-        self.congestion.nak_burst_start_time_ms = 0;
-        self.congestion.last_window_increase_ms = 0;
-        self.congestion.consecutive_acks_without_nak = 0;
-        self.congestion.fast_recovery_mode = false;
-        self.rtt.last_rtt_measurement_ms = 0;
-        self.rtt.smooth_rtt_ms = 0.0;
-        self.rtt.fast_rtt_ms = 0.0;
-        self.rtt.rtt_jitter_ms = 0.0;
-        self.rtt.prev_rtt_ms = 0.0;
-        self.rtt.rtt_avg_delta_ms = 0.0;
-        self.rtt.rtt_min_ms = 200.0;
-        self.rtt.estimated_rtt_ms = 0.0;
-        self.rtt.last_keepalive_sent_ms = 0;
-        self.rtt.waiting_for_keepalive_response = false;
         self.packet_send_times_ms = [0; PKT_LOG_SIZE];
-        self.congestion.fast_recovery_start_ms = 0;
+
+        // Use encapsulated reset methods for submodules
+        self.congestion.reset();
+        self.rtt.reset();
+        self.bitrate.reset();
+
+        // Reset reconnection tracking
         self.reconnection.last_reconnect_attempt_ms = now_ms();
         self.reconnection.reconnect_failure_count = 0;
-        // Reset bitrate tracker to start fresh measurement window after reconnect
-        self.bitrate.reset();
+
         // Don't reset connection_established_ms for reconnections - only set when REG3
         // is received
         self.mark_reconnect_success();

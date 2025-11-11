@@ -31,6 +31,19 @@ pub struct CongestionControl {
 }
 
 impl CongestionControl {
+    /// Reset all congestion control state to initial values
+    /// Used during reconnection to start with a clean slate
+    pub fn reset(&mut self) {
+        self.nak_count = 0;
+        self.last_nak_time_ms = 0;
+        self.nak_burst_count = 0;
+        self.nak_burst_start_time_ms = 0;
+        self.last_window_increase_ms = 0;
+        self.consecutive_acks_without_nak = 0;
+        self.fast_recovery_mode = false;
+        self.fast_recovery_start_ms = 0;
+    }
+
     pub fn handle_nak(&mut self, window: &mut i32, seq: i32, label: &str) -> bool {
         let current_time = now_ms();
         self.nak_count = self.nak_count.saturating_add(1);

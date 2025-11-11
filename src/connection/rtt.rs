@@ -36,6 +36,21 @@ impl Default for RttTracker {
 }
 
 impl RttTracker {
+    /// Reset all RTT tracking state to initial values
+    /// Used during reconnection to start with a clean slate
+    pub fn reset(&mut self) {
+        self.last_rtt_measurement_ms = 0;
+        self.smooth_rtt_ms = 0.0;
+        self.fast_rtt_ms = 0.0;
+        self.rtt_jitter_ms = 0.0;
+        self.prev_rtt_ms = 0.0;
+        self.rtt_avg_delta_ms = 0.0;
+        self.rtt_min_ms = 200.0;
+        self.estimated_rtt_ms = 0.0;
+        self.last_keepalive_sent_ms = 0;
+        self.waiting_for_keepalive_response = false;
+    }
+
     pub fn update_estimate(&mut self, rtt_ms: u64) {
         let current_rtt = rtt_ms as f64;
 
