@@ -50,12 +50,11 @@ impl Default for SrtlaRegistrationManager {
 }
 
 impl SrtlaRegistrationManager {
-    #[allow(deprecated)]
     pub fn new() -> Self {
         let mut id = [0u8; SRTLA_ID_LEN];
-        rand::thread_rng().fill_bytes(&mut id);
+        rand::rng().fill_bytes(&mut id);
         let mut probe_id = [0u8; SRTLA_ID_LEN];
-        rand::thread_rng().fill_bytes(&mut probe_id);
+        rand::rng().fill_bytes(&mut probe_id);
         Self {
             srtla_id: id,
             pending_reg2_idx: None,

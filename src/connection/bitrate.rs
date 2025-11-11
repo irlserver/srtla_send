@@ -48,12 +48,6 @@ impl BitrateTracker {
         }
     }
 
-    /// Get current bitrate in bits per second
-    #[allow(dead_code)]
-    pub fn bps(&self) -> f64 {
-        self.current_bitrate_bps
-    }
-
     /// Get current bitrate in Mbps
     pub fn mbps(&self) -> f64 {
         self.current_bitrate_bps / 1_000_000.0

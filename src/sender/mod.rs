@@ -12,11 +12,11 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use housekeeping::handle_housekeeping;
-use packet_handler::{drain_packet_queue, handle_srt_packet, handle_uplink_packet};
-// Re-export public items (used by tests and other modules)
+// Re-export public items used by tests
 #[allow(unused_imports)]
 pub use housekeeping::GLOBAL_TIMEOUT_MS;
+use housekeeping::handle_housekeeping;
+use packet_handler::{drain_packet_queue, handle_srt_packet, handle_uplink_packet};
 #[allow(unused_imports)]
 pub use selection::{calculate_quality_multiplier, select_connection_idx};
 #[allow(unused_imports)]

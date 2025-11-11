@@ -451,16 +451,6 @@ impl SrtlaConnection {
         self.rtt.rtt_jitter_ms
     }
 
-    #[allow(dead_code)]
-    pub fn get_rtt_min_ms(&self) -> f64 {
-        self.rtt.rtt_min_ms
-    }
-
-    #[allow(dead_code)]
-    pub fn get_rtt_avg_delta_ms(&self) -> f64 {
-        self.rtt.rtt_avg_delta_ms
-    }
-
     pub fn needs_rtt_measurement(&self) -> bool {
         self.rtt
             .needs_measurement(self.connected, self.reconnection.connection_established_ms)
@@ -543,12 +533,6 @@ impl SrtlaConnection {
     /// Calculate current bitrate
     pub fn calculate_bitrate(&mut self) {
         self.bitrate.calculate();
-    }
-
-    /// Get current bitrate in bits per second
-    #[allow(dead_code)]
-    pub fn current_bitrate_bps(&self) -> f64 {
-        self.bitrate.bps()
     }
 
     /// Get current bitrate in Mbps

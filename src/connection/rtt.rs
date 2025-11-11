@@ -130,21 +130,4 @@ impl RttTracker {
             && (self.last_rtt_measurement_ms == 0
                 || now_ms().saturating_sub(self.last_rtt_measurement_ms) > 3000)
     }
-
-    #[allow(dead_code)]
-    pub fn log_significant_change(&self, label: &str) {
-        let delta_rtt = self.prev_rtt_ms - (self.prev_rtt_ms - self.rtt_avg_delta_ms);
-        if delta_rtt.abs() > 20.0 || self.rtt_jitter_ms > 50.0 {
-            debug!(
-                "{}: RTT update - smooth={:.1}ms, fast={:.1}ms, jitter={:.1}ms, delta={:.1}ms, \
-                 stable={}",
-                label,
-                self.smooth_rtt_ms,
-                self.fast_rtt_ms,
-                self.rtt_jitter_ms,
-                self.rtt_avg_delta_ms,
-                self.is_stable()
-            );
-        }
-    }
 }

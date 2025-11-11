@@ -14,17 +14,6 @@ pub struct ReconnectionState {
 }
 
 impl ReconnectionState {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        let startup_deadline = now_ms() + STARTUP_GRACE_MS;
-        Self {
-            last_reconnect_attempt_ms: 0,
-            reconnect_failure_count: 0,
-            connection_established_ms: 0,
-            startup_grace_deadline_ms: startup_deadline,
-        }
-    }
-
     pub fn should_attempt_reconnect(&self) -> bool {
         const BASE_RECONNECT_DELAY_MS: u64 = 5000;
         const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
