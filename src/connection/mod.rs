@@ -474,9 +474,26 @@ impl SrtlaConnection {
     }
 
     pub fn is_timed_out(&self) -> bool {
+        // During initial registration (not yet connected), allow grace period
         if !self.connected {
-            return true;
+            // If this connection was never established (connection_established_ms == 0),
+            // check if we're still within the startup grace period
+            if self.reconnection.connection_established_ms == 0 {
+                let now = now_ms();
+                if now < self.reconnection.startup_grace_deadline_ms {
+                    return false;
+                }
+            }
+            // After grace period, or for connections that were previously established,
+            // if we've never received anything or haven't received in a while, consider it timed out
+            return self.last_received.is_none()
+                || self
+                    .last_received
+                    .map(|lr| lr.elapsed().as_secs() >= CONN_TIMEOUT)
+                    .unwrap_or(true);
         }
+
+        // For established connections, check normal timeout
         if let Some(lr) = self.last_received {
             lr.elapsed().as_secs() >= CONN_TIMEOUT
         } else {
@@ -496,7 +513,9 @@ impl SrtlaConnection {
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
-        self.reconnection.reset_startup_grace();
+        // Set grace deadline to 0 to indicate this connection is immediately timed out
+        // (matches C behavior of setting last_rcvd = 1)
+        self.reconnection.startup_grace_deadline_ms = 0;
     }
 
     pub fn time_since_last_nak_ms(&self) -> Option<u64> {
