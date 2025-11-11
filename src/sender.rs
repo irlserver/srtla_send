@@ -923,6 +923,8 @@ async fn handle_housekeeping(
         if !classic {
             conn.perform_window_recovery();
         }
+        // Update bitrate calculation (from Android C implementation)
+        conn.calculate_bitrate();
     }
 
     // Update active connections count (matches C implementation behavior)
@@ -1261,8 +1263,12 @@ pub(crate) fn log_connection_status(
     let active_connections = connections.iter().filter(|c| !c.is_timed_out()).count();
     let timed_out_connections = total_connections - active_connections;
 
+    // Calculate total bitrate across all connections
+    let total_bitrate_mbps: f64 = connections.iter().map(|c| c.current_bitrate_mbps()).sum();
+
     info!("📊 Connection Status Report:");
     info!("  Total connections: {}", total_connections);
+    info!("  Total bitrate: {:.2} Mbps", total_bitrate_mbps);
     info!(
         "  Active connections: {} ({:.1}%)",
         active_connections,
@@ -1335,9 +1341,23 @@ pub(crate) fn log_connection_status(
             .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
             .unwrap_or_else(|| "never".to_string());
 
+        let last_send = conn
+            .last_sent
+            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
+            .unwrap_or_else(|| "never".to_string());
+
         info!(
-            "    [{}] {} {} - Score: {} - Last recv: {} - Window: {} - In-flight: {}",
-            i, status, conn.label, score_desc, last_recv, conn.window, conn.in_flight_packets
+            "    [{}] {} {} - Score: {} - Last recv/send: {}/{} - Window: {} - In-flight: {} - \
+             Bitrate: {:.2} Mbps",
+            i,
+            status,
+            conn.label,
+            score_desc,
+            last_recv,
+            last_send,
+            conn.window,
+            conn.in_flight_packets,
+            conn.current_bitrate_mbps()
         );
 
         if conn.estimated_rtt_ms > 0.0 {

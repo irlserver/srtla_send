@@ -1,5 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
     use crate::protocol::*;
     use crate::test_helpers::create_test_connection;
     use crate::utils::now_ms;
@@ -351,11 +355,11 @@ mod tests {
         assert!(conn.needs_keepalive());
 
         // After sending, should not need immediately
-        conn.last_keepalive_ms = now_ms();
+        conn.last_sent = Some(Instant::now());
         assert!(!conn.needs_keepalive());
 
-        // After timeout, should need again
-        conn.last_keepalive_ms = now_ms() - (IDLE_TIME * 1000 + 100);
+        // After timeout, should need again (simulate 2 seconds ago)
+        conn.last_sent = Some(Instant::now() - Duration::from_secs(IDLE_TIME + 1));
         assert!(conn.needs_keepalive());
     }
 

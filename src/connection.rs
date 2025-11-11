@@ -80,10 +80,6 @@ pub struct SrtlaConnection {
     pub last_received: Option<Instant>,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) last_received: Option<Instant>,
-    #[cfg(feature = "test-internals")]
-    pub last_keepalive_ms: u64,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_keepalive_ms: u64,
     // RTT measurement via keepalive
     #[cfg(feature = "test-internals")]
     pub last_keepalive_sent_ms: u64,
@@ -176,6 +172,28 @@ pub struct SrtlaConnection {
     pub startup_grace_deadline_ms: u64,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) startup_grace_deadline_ms: u64,
+    // Bitrate tracking (matching Android C implementation)
+    #[cfg(feature = "test-internals")]
+    pub bytes_sent_total: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) bytes_sent_total: u64,
+    #[cfg(feature = "test-internals")]
+    pub bytes_sent_window: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) bytes_sent_window: u64,
+    #[cfg(feature = "test-internals")]
+    pub last_rate_update_ms: u64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_rate_update_ms: u64,
+    #[cfg(feature = "test-internals")]
+    pub current_bitrate_bps: f64,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) current_bitrate_bps: f64,
+    // Last sent tracking (separate from last_received)
+    #[cfg(feature = "test-internals")]
+    pub last_sent: Option<Instant>,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_sent: Option<Instant>,
 }
 
 impl SrtlaConnection {
@@ -203,7 +221,6 @@ impl SrtlaConnection {
             packet_send_times_ms: [0; PKT_LOG_SIZE],
             packet_idx: 0,
             last_received: None,
-            last_keepalive_ms: 0,
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,
             last_rtt_measurement_ms: 0,
@@ -226,6 +243,11 @@ impl SrtlaConnection {
             reconnect_failure_count: 0,
             connection_established_ms: 0, // Will be set when REG3 is received
             startup_grace_deadline_ms: startup_deadline,
+            bytes_sent_total: 0,
+            bytes_sent_window: 0,
+            last_rate_update_ms: now_ms(),
+            current_bitrate_bps: 0.0,
+            last_sent: None,
         })
     }
 
@@ -244,6 +266,10 @@ impl SrtlaConnection {
     #[inline]
     pub async fn send_data_with_tracking(&mut self, data: &[u8], seq: Option<u32>) -> Result<()> {
         self.socket.send(data).await?;
+        // Track bytes sent for bitrate calculation
+        self.update_bitrate_on_send(data.len() as u64);
+        // Update last_sent timestamp
+        self.last_sent = Some(Instant::now());
         if let Some(s) = seq {
             self.register_packet(s as i32);
         }
@@ -253,8 +279,9 @@ impl SrtlaConnection {
     pub async fn send_keepalive(&mut self) -> Result<()> {
         let pkt = create_keepalive_packet();
         self.socket.send(&pkt).await?;
+        let now_instant = Instant::now();
         let now = now_ms();
-        self.last_keepalive_ms = now;
+        self.last_sent = Some(now_instant); // Track all sends, including keepalives
         // Only set waiting flag and timestamp when we intend to measure RTT
         if !self.waiting_for_keepalive_response
             && (self.last_rtt_measurement_ms == 0
@@ -265,8 +292,9 @@ impl SrtlaConnection {
         Ok(())
     }
 
-    pub async fn send_srtla_packet(&self, pkt: &[u8]) -> Result<()> {
+    pub async fn send_srtla_packet(&mut self, pkt: &[u8]) -> Result<()> {
         self.socket.send(pkt).await?;
+        self.last_sent = Some(Instant::now());
         Ok(())
     }
 
@@ -774,10 +802,18 @@ impl SrtlaConnection {
     }
 
     pub fn needs_keepalive(&self) -> bool {
-        let now = now_ms();
-        self.connected
-            && (self.last_keepalive_ms == 0
-                || now.saturating_sub(self.last_keepalive_ms) >= IDLE_TIME * 1000)
+        // Match C implementation: send keepalive if we haven't sent ANY data (not just
+        // keepalives) in IDLE_TIME. This prevents unnecessary keepalives during active
+        // transmission.
+        let now = Instant::now();
+        if !self.connected {
+            return false;
+        }
+
+        match self.last_sent {
+            None => true, // Never sent anything, need keepalive
+            Some(last) => now.duration_since(last).as_secs() >= IDLE_TIME,
+        }
     }
 
     pub fn perform_window_recovery(&mut self) {
@@ -869,7 +905,6 @@ impl SrtlaConnection {
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
     pub fn mark_for_recovery(&mut self) {
         self.last_received = None;
-        self.last_keepalive_ms = 0;
         self.last_keepalive_sent_ms = 0;
         self.waiting_for_keepalive_response = false;
         self.connected = false;
@@ -970,6 +1005,44 @@ impl SrtlaConnection {
         }
     }
 
+    /// Update bitrate tracking when bytes are sent (matches Android C implementation)
+    #[inline]
+    pub fn update_bitrate_on_send(&mut self, bytes_sent: u64) {
+        self.bytes_sent_total = self.bytes_sent_total.saturating_add(bytes_sent);
+    }
+
+    /// Calculate current bitrate over a 2-second window (matching Android C implementation)
+    pub fn calculate_bitrate(&mut self) {
+        const BITRATE_UPDATE_INTERVAL_MS: u64 = 2000;
+
+        let now = now_ms();
+        let time_diff_ms = now.saturating_sub(self.last_rate_update_ms);
+
+        if time_diff_ms >= BITRATE_UPDATE_INTERVAL_MS {
+            let bytes_diff = self.bytes_sent_total.saturating_sub(self.bytes_sent_window);
+
+            if time_diff_ms > 0 {
+                // Convert to bits per second: (bytes * 8 * 1000) / milliseconds
+                let bits = bytes_diff.saturating_mul(8);
+                self.current_bitrate_bps = (bits as f64 * 1000.0) / time_diff_ms as f64;
+            }
+
+            self.last_rate_update_ms = now;
+            self.bytes_sent_window = self.bytes_sent_total;
+        }
+    }
+
+    /// Get current bitrate in bits per second
+    #[allow(dead_code)]
+    pub fn current_bitrate_bps(&self) -> f64 {
+        self.current_bitrate_bps
+    }
+
+    /// Get current bitrate in Mbps
+    pub fn current_bitrate_mbps(&self) -> f64 {
+        self.current_bitrate_bps / 1_000_000.0
+    }
+
     pub async fn reconnect(&mut self) -> Result<()> {
         let sock = bind_from_ip(self.local_ip, 0)?;
         sock.connect(&self.remote.into())?;
@@ -998,7 +1071,6 @@ impl SrtlaConnection {
         self.rtt_avg_delta_ms = 0.0;
         self.rtt_min_ms = 200.0;
         self.estimated_rtt_ms = 0.0;
-        self.last_keepalive_ms = 0;
         self.last_keepalive_sent_ms = 0;
         self.waiting_for_keepalive_response = false;
         self.packet_send_times_ms = [0; PKT_LOG_SIZE];

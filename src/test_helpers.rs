@@ -33,7 +33,6 @@ pub async fn create_test_connection() -> SrtlaConnection {
         packet_send_times_ms: [0; PKT_LOG_SIZE],
         packet_idx: 0,
         last_received: Some(Instant::now()),
-        last_keepalive_ms: 0,
         last_keepalive_sent_ms: 0,
         waiting_for_keepalive_response: false,
         last_rtt_measurement_ms: 0,
@@ -56,6 +55,11 @@ pub async fn create_test_connection() -> SrtlaConnection {
         reconnect_failure_count: 0,
         connection_established_ms: now_ms(),
         startup_grace_deadline_ms: now_ms(),
+        bytes_sent_total: 0,
+        bytes_sent_window: 0,
+        last_rate_update_ms: now_ms(),
+        current_bitrate_bps: 0.0,
+        last_sent: None,
     }
 }
 
@@ -84,7 +88,6 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
             packet_send_times_ms: [0; PKT_LOG_SIZE],
             packet_idx: 0,
             last_received: Some(Instant::now()),
-            last_keepalive_ms: 0,
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,
             last_rtt_measurement_ms: 0,
@@ -107,6 +110,11 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
             reconnect_failure_count: 0,
             connection_established_ms: now_ms(),
             startup_grace_deadline_ms: now_ms(),
+            bytes_sent_total: 0,
+            bytes_sent_window: 0,
+            last_rate_update_ms: now_ms(),
+            current_bitrate_bps: 0.0,
+            last_sent: None,
         };
         connections.push(conn);
     }
