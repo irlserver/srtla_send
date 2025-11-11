@@ -8,7 +8,6 @@ mod tests {
 
     use smallvec::SmallVec;
     use tempfile::NamedTempFile;
-    use tokio::time::Instant;
 
     use crate::sender::*;
     use crate::test_helpers::create_test_connections;
@@ -25,8 +24,7 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected =
-            select_connection_idx(&connections, None, false, false, true, Instant::now());
+        let selected = select_connection_idx(&connections, None, false, false, true);
         assert_eq!(selected, Some(1));
     }
 
@@ -46,8 +44,7 @@ mod tests {
         connections[2].congestion.nak_count = 3;
         connections[2].congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
 
-        let selected =
-            select_connection_idx(&connections, None, true, false, false, Instant::now());
+        let selected = select_connection_idx(&connections, None, true, false, false);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -68,8 +65,7 @@ mod tests {
         connections[1].congestion.nak_burst_count = 0;
         connections[1].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
 
-        let selected =
-            select_connection_idx(&connections, None, true, false, false, Instant::now());
+        let selected = select_connection_idx(&connections, None, true, false, false);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -276,8 +272,7 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected =
-            select_connection_idx(&connections, None, false, false, false, Instant::now());
+        let selected = select_connection_idx(&connections, None, false, false, false);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -289,8 +284,7 @@ mod tests {
         let connections = rt.block_on(create_test_connections(3));
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected =
-            select_connection_idx(&connections, None, false, true, false, Instant::now());
+        let _selected = select_connection_idx(&connections, None, false, true, false);
 
         // The result depends on timing, but should not panic
     }

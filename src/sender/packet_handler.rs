@@ -6,7 +6,6 @@ use anyhow::Result;
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use super::selection::select_connection_idx;
@@ -255,7 +254,6 @@ pub async fn handle_srt_packet(
                 effective_enable_quality,
                 effective_enable_explore,
                 classic,
-                Instant::now(),
             );
             if let Some(sel_idx) = sel_idx {
                 forward_via_connection(

@@ -1,8 +1,7 @@
-use tokio::time::Instant;
 use tracing::debug;
 
 use crate::connection::SrtlaConnection;
-use crate::utils::now_ms;
+use crate::utils::{elapsed_ms, now_ms};
 
 pub fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
     // Startup grace period: first 10 seconds after connection establishment
@@ -51,7 +50,6 @@ pub fn select_connection_idx(
     enable_quality: bool,
     enable_explore: bool,
     classic: bool,
-    now: Instant,
 ) -> Option<usize> {
     // Classic mode: simple algorithm matching original implementation
     if classic {
@@ -73,7 +71,8 @@ pub fn select_connection_idx(
 
     // Exploration window: simple periodic exploration of second-best
     // Use elapsed time since program start for consistent periodic behavior
-    let explore_now = enable_explore && (now.elapsed().as_millis() % 5000) < 300;
+    // Every 5 seconds, explore for 300ms window
+    let explore_now = enable_explore && (elapsed_ms() % 5000) < 300;
     // Score connections by base score; apply quality multiplier unless classic
     let mut best_idx: Option<usize> = None;
     let mut second_idx: Option<usize> = None;
