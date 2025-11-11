@@ -546,7 +546,7 @@ impl SrtlaConnection {
         let socket = UdpSocket::from_std(std_sock)?;
         self.socket = Arc::new(socket);
         self.connected = false;
-        self.last_received = Some(Instant::now());
+        self.last_received = None;
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log = [-1; PKT_LOG_SIZE];
