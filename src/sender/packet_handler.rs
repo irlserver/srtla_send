@@ -175,6 +175,33 @@ pub async fn drain_packet_queue(
     }
 }
 
+/// Selects a connection to use during the pre-registration phase.
+///
+/// Selection priority:
+/// 1. Last selected connection (if still connected and not timed out)
+/// 2. Any non-timed-out connection
+/// 3. None (if all connections are timed out)
+fn select_pre_registration_connection(
+    connections: &[SrtlaConnection],
+    last_selected_idx: Option<usize>,
+) -> Option<usize> {
+    // Try to reuse the last selected connection if it's still valid
+    if let Some(idx) = last_selected_idx {
+        if let Some(conn) = connections.get(idx) {
+            if conn.connected && !conn.is_timed_out() {
+                return Some(idx);
+            }
+        }
+    }
+
+    // Otherwise, find any non-timed-out connection
+    connections
+        .iter()
+        .enumerate()
+        .find(|(_, c)| !c.is_timed_out())
+        .map(|(i, _)| i)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
@@ -196,28 +223,7 @@ pub async fn handle_srt_packet(
             let pkt = &recv_buf[..n];
             let seq = protocol::get_srt_sequence_number(pkt);
             if !registration_complete {
-                let sel_idx = if let Some(idx) = last_selected_idx {
-                    if let Some(conn) = connections.get(*idx) {
-                        if conn.connected && !conn.is_timed_out() {
-                            Some(*idx)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    connections
-                        .iter()
-                        .enumerate()
-                        .find(|(_, c)| !c.is_timed_out())
-                        .map(|(i, _)| i)
-                        .or_else(|| {
-                            connections
-                                .first()
-                                .and_then(|c| if !c.is_timed_out() { Some(0) } else { None })
-                        })
-                };
+                let sel_idx = select_pre_registration_connection(connections, *last_selected_idx);
                 if let Some(sel_idx) = sel_idx {
                     forward_via_connection(
                         sel_idx,
