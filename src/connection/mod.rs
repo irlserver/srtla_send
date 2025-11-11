@@ -182,8 +182,6 @@ impl SrtlaConnection {
         let pkt = create_reg2_packet(probe_id);
         let sent_at = now_ms();
         self.socket.send(&pkt).await?;
-        self.rtt.last_keepalive_sent_ms = sent_at;
-        self.rtt.waiting_for_keepalive_response = true;
         self.reconnection.startup_grace_deadline_ms = sent_at + STARTUP_GRACE_MS;
         Ok(sent_at)
     }
