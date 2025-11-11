@@ -574,6 +574,8 @@ impl SrtlaConnection {
         self.congestion.fast_recovery_start_ms = 0;
         self.reconnection.last_reconnect_attempt_ms = now_ms();
         self.reconnection.reconnect_failure_count = 0;
+        // Reset bitrate tracker to start fresh measurement window after reconnect
+        self.bitrate.reset();
         // Don't reset connection_established_ms for reconnections - only set when REG3
         // is received
         self.mark_reconnect_success();

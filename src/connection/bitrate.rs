@@ -21,6 +21,14 @@ impl Default for BitrateTracker {
 }
 
 impl BitrateTracker {
+    /// Reset all bitrate tracking state to start fresh measurement window
+    pub fn reset(&mut self) {
+        self.bytes_sent_total = 0;
+        self.bytes_sent_window = 0;
+        self.last_rate_update_ms = now_ms();
+        self.current_bitrate_bps = 0.0;
+    }
+
     /// Update bitrate tracking when bytes are sent (matches Android C implementation)
     #[inline]
     pub fn update_on_send(&mut self, bytes_sent: u64) {
