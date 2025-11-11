@@ -227,19 +227,19 @@ impl CongestionControl {
                 // Conservative recovery multipliers (using cached values)
                 let fast_mode_bonus = if self.fast_recovery_mode { 2 } else { 1 };
 
-                // More conservative recovery based on how long since last NAK
+                // Progressive recovery based on how long since last NAK
                 if tsn > 10_000 {
-                    // No NAKs for 10+ seconds: moderate recovery (was 5s)
+                    // No NAKs for 10+ seconds: aggressive recovery (200% rate)
                     *window += WINDOW_INCR * 2 * fast_mode_bonus;
                 } else if tsn > 7_000 {
-                    // No NAKs for 7+ seconds: slow recovery (was 3s)
+                    // No NAKs for 7+ seconds: moderate recovery (100% rate)
                     *window += WINDOW_INCR * fast_mode_bonus;
                 } else if tsn > 5_000 {
-                    // No NAKs for 5+ seconds: very slow recovery (was 1.5s)
-                    *window += WINDOW_INCR * fast_mode_bonus;
+                    // No NAKs for 5+ seconds: slow recovery (50% rate)
+                    *window += WINDOW_INCR * fast_mode_bonus / 2;
                 } else {
-                    // Recent NAKs: minimal recovery (keep same as before)
-                    *window += WINDOW_INCR * fast_mode_bonus;
+                    // Recent NAKs: minimal recovery (25% rate)
+                    *window += WINDOW_INCR * fast_mode_bonus / 4;
                 }
 
                 *window = min(*window, WINDOW_MAX * WINDOW_MULT);

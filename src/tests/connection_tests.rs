@@ -560,4 +560,168 @@ mod tests {
         // Should have reduced in-flight count
         assert!(conn.in_flight_packets < PKT_LOG_SIZE as i32 + 10);
     }
+
+    #[test]
+    fn test_progressive_window_recovery_rates() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        // Reduce window through NAKs
+        conn.register_packet(100);
+        conn.handle_nak(100);
+        let reduced_window = conn.window;
+
+        // Test 1: Recent NAKs (<5 seconds) - should recover at 25% rate (minimal)
+        conn.congestion.last_nak_time_ms = now_ms() - 3000; // 3 seconds ago
+        conn.congestion.last_window_increase_ms = now_ms() - 2500; // Allow recovery
+        let before_recovery = conn.window;
+        conn.perform_window_recovery();
+        let recovery_amount_25 = conn.window - before_recovery;
+        // Should be WINDOW_INCR * 1 / 4 = 30 / 4 = 7 (rounded down)
+        assert_eq!(
+            recovery_amount_25,
+            WINDOW_INCR / 4,
+            "Recent NAKs should recover at 25% rate"
+        );
+
+        // Test 2: 5-7 seconds since last NAK - should recover at 50% rate (slow)
+        conn.window = reduced_window;
+        conn.congestion.last_nak_time_ms = now_ms() - 6000; // 6 seconds ago
+        conn.congestion.last_window_increase_ms = now_ms() - 2500; // Allow recovery
+        let before_recovery = conn.window;
+        conn.perform_window_recovery();
+        let recovery_amount_50 = conn.window - before_recovery;
+        // Should be WINDOW_INCR * 1 / 2 = 30 / 2 = 15
+        assert_eq!(
+            recovery_amount_50,
+            WINDOW_INCR / 2,
+            "5-7 seconds should recover at 50% rate"
+        );
+
+        // Test 3: 7-10 seconds since last NAK - should recover at 100% rate (moderate)
+        conn.window = reduced_window;
+        conn.congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
+        conn.congestion.last_window_increase_ms = now_ms() - 2500; // Allow recovery
+        let before_recovery = conn.window;
+        conn.perform_window_recovery();
+        let recovery_amount_100 = conn.window - before_recovery;
+        // Should be WINDOW_INCR * 1 = 30
+        assert_eq!(
+            recovery_amount_100, WINDOW_INCR,
+            "7-10 seconds should recover at 100% rate"
+        );
+
+        // Test 4: 10+ seconds since last NAK - should recover at 200% rate (aggressive)
+        conn.window = reduced_window;
+        conn.congestion.last_nak_time_ms = now_ms() - 11000; // 11 seconds ago
+        conn.congestion.last_window_increase_ms = now_ms() - 2500; // Allow recovery
+        let before_recovery = conn.window;
+        conn.perform_window_recovery();
+        let recovery_amount_200 = conn.window - before_recovery;
+        // Should be WINDOW_INCR * 2 = 30 * 2 = 60
+        assert_eq!(
+            recovery_amount_200,
+            WINDOW_INCR * 2,
+            "10+ seconds should recover at 200% rate"
+        );
+
+        // Verify progressive rates: 25% < 50% < 100% < 200%
+        assert!(recovery_amount_25 < recovery_amount_50);
+        assert!(recovery_amount_50 < recovery_amount_100);
+        assert!(recovery_amount_100 < recovery_amount_200);
+    }
+
+    #[test]
+    fn test_progressive_recovery_with_fast_mode() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        // Reduce window and trigger fast recovery mode
+        conn.register_packet(100);
+        conn.window = 1500;
+        conn.handle_nak(100);
+        assert!(conn.congestion.fast_recovery_mode);
+
+        let reduced_window = conn.window;
+
+        // Test fast mode with recent NAKs - should be 25% * 2 = 50% of normal rate
+        conn.congestion.last_nak_time_ms = now_ms() - 3000; // 3 seconds ago
+        conn.congestion.last_window_increase_ms = now_ms() - 600; // Allow fast recovery timing
+        let before_recovery = conn.window;
+        conn.perform_window_recovery();
+        let fast_recovery_25 = conn.window - before_recovery;
+        // Should be WINDOW_INCR * 2 / 4 = 30 * 2 / 4 = 15
+        assert_eq!(
+            fast_recovery_25,
+            (WINDOW_INCR * 2) / 4,
+            "Fast mode recent NAKs should be 50% of normal rate"
+        );
+
+        // Test fast mode with 10+ seconds - should be 200% * 2 = 400% of normal rate
+        conn.window = reduced_window;
+        conn.congestion.last_nak_time_ms = now_ms() - 11000; // 11 seconds ago
+        conn.congestion.last_window_increase_ms = now_ms() - 600; // Allow fast recovery timing
+        let before_recovery = conn.window;
+        conn.perform_window_recovery();
+        let fast_recovery_200 = conn.window - before_recovery;
+        // Should be WINDOW_INCR * 2 * 2 = 30 * 2 * 2 = 120
+        assert_eq!(
+            fast_recovery_200,
+            WINDOW_INCR * 2 * 2,
+            "Fast mode 10+ seconds should be 400% of normal rate"
+        );
+
+        // Fast recovery should be significantly faster than normal
+        assert!(fast_recovery_200 > WINDOW_INCR * 2);
+    }
+
+    #[test]
+    fn test_progressive_recovery_timing_constraints() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+
+        // Reduce window
+        conn.register_packet(100);
+        conn.handle_nak(100);
+        let reduced_window = conn.window;
+
+        // Test normal mode timing constraint (2000ms min wait + 1000ms increment wait)
+        conn.congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago (should trigger)
+        conn.congestion.last_window_increase_ms = now_ms() - 500; // Too recent
+        let before = conn.window;
+        conn.perform_window_recovery();
+        // Should NOT recover because increment wait time not met
+        assert_eq!(conn.window, before, "Should not recover when timing constraint not met");
+
+        // Now allow enough time
+        conn.congestion.last_window_increase_ms = now_ms() - 1500; // Enough time
+        conn.perform_window_recovery();
+        // Should recover now
+        assert!(
+            conn.window > before,
+            "Should recover when timing constraint is met"
+        );
+
+        // Test fast mode timing constraint (500ms min wait + 300ms increment wait)
+        conn.window = reduced_window;
+        conn.congestion.fast_recovery_mode = true;
+        conn.congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
+        conn.congestion.last_window_increase_ms = now_ms() - 200; // Too recent even for fast mode
+        let before_fast = conn.window;
+        conn.perform_window_recovery();
+        // Should NOT recover
+        assert_eq!(
+            conn.window, before_fast,
+            "Fast mode should not recover when timing constraint not met"
+        );
+
+        // Now allow enough time for fast mode
+        conn.congestion.last_window_increase_ms = now_ms() - 400; // Enough for fast mode
+        conn.perform_window_recovery();
+        // Should recover now
+        assert!(
+            conn.window > before_fast,
+            "Fast mode should recover when timing constraint is met"
+        );
+    }
 }
