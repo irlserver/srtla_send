@@ -2,6 +2,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+// Use mimalloc as the global allocator for the binary (non-Windows only)
+#[cfg(not(windows))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod connection;
 mod protocol;
 mod registration;

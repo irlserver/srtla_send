@@ -22,7 +22,6 @@ impl Default for DynamicToggles {
 }
 
 impl DynamicToggles {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             classic_mode: Arc::new(AtomicBool::new(false)),

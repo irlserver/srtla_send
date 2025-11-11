@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use smallvec::SmallVec;
 
 pub const SRTLA_TYPE_KEEPALIVE: u16 = 0x9000;
@@ -9,19 +7,23 @@ pub const SRTLA_TYPE_REG2: u16 = 0x9201;
 pub const SRTLA_TYPE_REG3: u16 = 0x9202;
 pub const SRTLA_TYPE_REG_ERR: u16 = 0x9210;
 pub const SRTLA_TYPE_REG_NGP: u16 = 0x9211;
+#[allow(dead_code)]
 pub const SRTLA_TYPE_REG_NAK: u16 = 0x9212;
 
+// SRT protocol constants (some used in tests or for protocol completeness)
+#[allow(dead_code)]
 pub const SRT_TYPE_HANDSHAKE: u16 = 0x8000;
 pub const SRT_TYPE_ACK: u16 = 0x8002;
 pub const SRT_TYPE_NAK: u16 = 0x8003;
+#[allow(dead_code)]
 pub const SRT_TYPE_SHUTDOWN: u16 = 0x8005;
+#[allow(dead_code)]
 pub const SRT_TYPE_DATA: u16 = 0x0000;
-
-pub const SRT_MIN_LEN: usize = 16;
 
 pub const SRTLA_ID_LEN: usize = 256;
 pub const SRTLA_TYPE_REG1_LEN: usize = 2 + SRTLA_ID_LEN;
 pub const SRTLA_TYPE_REG2_LEN: usize = 2 + SRTLA_ID_LEN;
+#[allow(dead_code)]
 pub const SRTLA_TYPE_REG3_LEN: usize = 2;
 
 pub const MTU: usize = 1500;
@@ -29,7 +31,6 @@ pub const MTU: usize = 1500;
 pub const CONN_TIMEOUT: u64 = 5; // sec
 pub const REG2_TIMEOUT: u64 = 4; // sec
 pub const REG3_TIMEOUT: u64 = 4; // sec
-pub const GLOBAL_TIMEOUT: u64 = 10; // sec
 pub const IDLE_TIME: u64 = 1; // sec
 
 pub const WINDOW_MIN: i32 = 1;
@@ -100,6 +101,8 @@ pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
     Some(ts)
 }
 
+/// Create SRTLA ACK packet (used in tests and receiver implementations)
+#[allow(dead_code)]
 pub fn create_ack_packet(acks: &[u32]) -> SmallVec<u8, 64> {
     // Create packets that match the actual SRTLA receiver format (4-byte header)
     let mut pkt = SmallVec::from_vec(vec![0u8; 4 + 4 * acks.len()]);
@@ -178,18 +181,28 @@ pub fn parse_srtla_ack(buf: &[u8]) -> SmallVec<u32, 4> {
     out
 }
 
+/// Helper functions for packet type checking (used in tests)
+#[allow(dead_code)]
 pub fn is_srtla_reg1(buf: &[u8]) -> bool {
     buf.len() == SRTLA_TYPE_REG1_LEN && get_packet_type(buf) == Some(SRTLA_TYPE_REG1)
 }
+
+#[allow(dead_code)]
 pub fn is_srtla_reg2(buf: &[u8]) -> bool {
     buf.len() == SRTLA_TYPE_REG2_LEN && get_packet_type(buf) == Some(SRTLA_TYPE_REG2)
 }
+
+#[allow(dead_code)]
 pub fn is_srtla_reg3(buf: &[u8]) -> bool {
     buf.len() == SRTLA_TYPE_REG3_LEN && get_packet_type(buf) == Some(SRTLA_TYPE_REG3)
 }
+
+#[allow(dead_code)]
 pub fn is_srtla_keepalive(buf: &[u8]) -> bool {
     get_packet_type(buf) == Some(SRTLA_TYPE_KEEPALIVE)
 }
+
+#[allow(dead_code)]
 pub fn is_srt_ack(buf: &[u8]) -> bool {
     get_packet_type(buf) == Some(SRT_TYPE_ACK)
 }

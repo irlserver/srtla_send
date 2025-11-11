@@ -8,7 +8,6 @@ mod tests {
 
     use smallvec::SmallVec;
     use tempfile::NamedTempFile;
-    use tokio::time::Instant;
 
     use crate::sender::*;
     use crate::test_helpers::create_test_connections;
@@ -25,8 +24,7 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected =
-            select_connection_idx(&connections, None, false, false, true, Instant::now());
+        let selected = select_connection_idx(&connections, None, false, false, true);
         assert_eq!(selected, Some(1));
     }
 
@@ -36,18 +34,17 @@ mod tests {
         let mut connections = rt.block_on(create_test_connections(3));
 
         // Connection 0: Recent NAKs - should get low score
-        connections[0].nak_count = 5;
-        connections[0].last_nak_time_ms = now_ms() - 1000; // 1 second ago
+        connections[0].congestion.nak_count = 5;
+        connections[0].congestion.last_nak_time_ms = now_ms() - 1000; // 1 second ago
 
         // Connection 1: No NAKs - should get bonus
-        connections[1].nak_count = 0;
+        connections[1].congestion.nak_count = 0;
 
         // Connection 2: Old NAKs - should get partial penalty
-        connections[2].nak_count = 3;
-        connections[2].last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
+        connections[2].congestion.nak_count = 3;
+        connections[2].congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
 
-        let selected =
-            select_connection_idx(&connections, None, true, false, false, Instant::now());
+        let selected = select_connection_idx(&connections, None, true, false, false);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -59,17 +56,16 @@ mod tests {
         let mut connections = rt.block_on(create_test_connections(3));
 
         // Connection 0: NAK burst
-        connections[0].nak_count = 5;
-        connections[0].nak_burst_count = 3;
-        connections[0].last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
+        connections[0].congestion.nak_count = 5;
+        connections[0].congestion.nak_burst_count = 3;
+        connections[0].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
 
         // Connection 1: Same NAK count but no burst
-        connections[1].nak_count = 5;
-        connections[1].nak_burst_count = 0;
-        connections[1].last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
+        connections[1].congestion.nak_count = 5;
+        connections[1].congestion.nak_burst_count = 0;
+        connections[1].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
 
-        let selected =
-            select_connection_idx(&connections, None, true, false, false, Instant::now());
+        let selected = select_connection_idx(&connections, None, true, false, false);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -85,22 +81,22 @@ mod tests {
         connections[2].register_packet(300);
 
         let initial_counts = [
-            connections[0].nak_count,
-            connections[1].nak_count,
-            connections[2].nak_count,
+            connections[0].congestion.nak_count,
+            connections[1].congestion.nak_count,
+            connections[2].congestion.nak_count,
         ];
 
         let found_0 = connections[0].handle_nak(100);
         assert!(found_0);
-        assert_eq!(connections[0].nak_count, initial_counts[0] + 1);
-        assert_eq!(connections[1].nak_count, initial_counts[1]);
-        assert_eq!(connections[2].nak_count, initial_counts[2]);
+        assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
+        assert_eq!(connections[1].congestion.nak_count, initial_counts[1]);
+        assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
         let found_1 = connections[1].handle_nak(200);
         assert!(found_1);
-        assert_eq!(connections[0].nak_count, initial_counts[0] + 1);
-        assert_eq!(connections[1].nak_count, initial_counts[1] + 1);
-        assert_eq!(connections[2].nak_count, initial_counts[2]);
+        assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
+        assert_eq!(connections[1].congestion.nak_count, initial_counts[1] + 1);
+        assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
         let not_found_0 = connections[0].handle_nak(999);
         let not_found_1 = connections[1].handle_nak(999);
@@ -108,9 +104,9 @@ mod tests {
         assert!(!not_found_0);
         assert!(!not_found_1);
         assert!(!not_found_2);
-        assert_eq!(connections[0].nak_count, initial_counts[0] + 1);
-        assert_eq!(connections[1].nak_count, initial_counts[1] + 1);
-        assert_eq!(connections[2].nak_count, initial_counts[2]);
+        assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
+        assert_eq!(connections[1].congestion.nak_count, initial_counts[1] + 1);
+        assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
     }
 
     #[tokio::test]
@@ -276,8 +272,7 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected =
-            select_connection_idx(&connections, None, false, false, false, Instant::now());
+        let selected = select_connection_idx(&connections, None, false, false, false);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -289,8 +284,7 @@ mod tests {
         let connections = rt.block_on(create_test_connections(3));
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected =
-            select_connection_idx(&connections, None, false, true, false, Instant::now());
+        let _selected = select_connection_idx(&connections, None, false, true, false);
 
         // The result depends on timing, but should not panic
     }
@@ -319,35 +313,35 @@ mod tests {
             .next()
             .unwrap();
 
-        conn.connection_established_ms = now_ms() - 15000;
+        conn.reconnection.connection_established_ms = now_ms() - 15000;
 
         assert_eq!(calculate_quality_multiplier(&conn), 1.2);
 
         // Test connection with recent NAK (< 2 seconds ago) - heavy penalty
-        conn.nak_count = 1;
-        conn.last_nak_time_ms = now_ms() - 1000;
+        conn.congestion.nak_count = 1;
+        conn.congestion.last_nak_time_ms = now_ms() - 1000;
         assert_eq!(calculate_quality_multiplier(&conn), 0.1);
 
         // Test connection with NAK 3-5 seconds ago - moderate penalty
-        conn.last_nak_time_ms = now_ms() - 3000;
+        conn.congestion.last_nak_time_ms = now_ms() - 3000;
         assert_eq!(calculate_quality_multiplier(&conn), 0.5);
 
         // Test connection with NAK 5-10 seconds ago - light penalty
-        conn.last_nak_time_ms = now_ms() - 7000;
+        conn.congestion.last_nak_time_ms = now_ms() - 7000;
         assert_eq!(calculate_quality_multiplier(&conn), 0.8);
 
         // Test connection with NAK > 10 seconds ago and no total NAKs - bonus
-        conn.last_nak_time_ms = now_ms() - 15000;
-        conn.nak_count = 0;
+        conn.congestion.last_nak_time_ms = now_ms() - 15000;
+        conn.congestion.nak_count = 0;
         assert_eq!(calculate_quality_multiplier(&conn), 1.2);
 
         // Test connection with NAK > 10 seconds ago and some NAKs - no penalty/bonus
-        conn.nak_count = 5;
+        conn.congestion.nak_count = 5;
         assert_eq!(calculate_quality_multiplier(&conn), 1.0);
 
         // Test burst NAK penalty
-        conn.last_nak_time_ms = now_ms() - 3000;
-        conn.nak_burst_count = 3;
+        conn.congestion.last_nak_time_ms = now_ms() - 3000;
+        conn.congestion.nak_burst_count = 3;
         assert_eq!(calculate_quality_multiplier(&conn), 0.5 * 0.5); // 0.5 * 0.5 = 0.25
     }
 }

@@ -135,7 +135,7 @@ async fn test_protocol_message_flow() {
 async fn test_keepalive_timing() {
     use crate::protocol::*;
 
-    let start_time = std::time::Instant::now();
+    let start_time = tokio::time::Instant::now();
 
     // Create several keepalive packets with delays
     let mut timestamps = Vec::new();
@@ -150,7 +150,7 @@ async fn test_keepalive_timing() {
         timestamps.push(timestamp);
     }
 
-    let end_time = std::time::Instant::now();
+    let end_time = tokio::time::Instant::now();
     let elapsed_ms = end_time.duration_since(start_time).as_millis() as u64;
 
     // Verify timestamps are increasing

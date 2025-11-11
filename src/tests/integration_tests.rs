@@ -124,7 +124,6 @@ fn test_protocol_constants_consistency() {
     assert!(CONN_TIMEOUT > 0);
     assert!(REG2_TIMEOUT > 0);
     assert!(REG3_TIMEOUT > 0);
-    assert!(GLOBAL_TIMEOUT >= CONN_TIMEOUT);
     assert!(IDLE_TIME > 0);
 }
 
