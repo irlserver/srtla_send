@@ -17,7 +17,7 @@ rust-version = "1.87"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 rand = "0.9"
-tokio = { version = "1.47.1", features = [
+tokio = { version = "1.48.0", features = [
 	"rt-multi-thread",
 	"macros",
 	"net",
@@ -27,12 +27,14 @@ tokio = { version = "1.47.1", features = [
 	"sync",
 ] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 socket2 = { version = "0.6", features = ["all"] }
 bytes = "1.10.1"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 smallvec = "=2.0.0-alpha.11"
-mimalloc = { version = "0.1.43", default-features = false, features = ["secure"] }
+mimalloc = { version = "0.1.43", default-features = false, features = [
+	"secure",
+] }
 
 [features]
 test-internals = []
