@@ -6,11 +6,7 @@ use crate::protocol::*;
 use crate::utils::now_ms;
 
 const NAK_BURST_WINDOW_MS: u64 = 1000;
-const NAK_BURST_LOG_THRESHOLD: i32 = 3;
-const NORMAL_UTILIZATION_THRESHOLD: f64 = 0.85;
-const FAST_UTILIZATION_THRESHOLD: f64 = 0.95;
-const NORMAL_ACKS_REQUIRED: i32 = 4;
-const FAST_ACKS_REQUIRED: i32 = 2;
+const NAK_BURST_LOG_THRESHOLD: i32 = 10;
 const NORMAL_MIN_WAIT_MS: u64 = 2000;
 const FAST_MIN_WAIT_MS: u64 = 500;
 const NORMAL_INCREMENT_WAIT_MS: u64 = 1000;
@@ -129,57 +125,25 @@ impl CongestionControl {
         in_flight_packets: i32,
         label: &str,
     ) {
-        // Enhanced mode ACK handling with utilization thresholds and consecutive ACK
-        // tracking
-        let old_window = *window;
-        let mut window_increased = false;
-        let current_time = now_ms();
+        // Enhanced mode: IDENTICAL window growth to classic mode
+        // The only difference from classic is quality scoring in connection selection
+        // This prevents thrashing while still avoiding bad connections
 
-        // Only increase window if we haven't increased recently (slower recovery)
-        if current_time.saturating_sub(self.last_window_increase_ms) > 200 {
-            // Utilization thresholds for enhanced mode
-            let utilization_threshold = if self.fast_recovery_mode {
-                FAST_UTILIZATION_THRESHOLD
-            } else {
-                NORMAL_UTILIZATION_THRESHOLD
-            };
+        // Use exact classic logic for window increase
+        if in_flight_packets * WINDOW_MULT > *window {
+            let old = *window;
+            *window = min(*window + WINDOW_INCR - 1, WINDOW_MAX * WINDOW_MULT);
 
-            if (in_flight_packets as f64)
-                < (*window as f64 * utilization_threshold / WINDOW_MULT as f64)
-            {
-                self.consecutive_acks_without_nak =
-                    self.consecutive_acks_without_nak.saturating_add(1);
-
-                // Conservative recovery - require more ACKs
-                let acks_required = if self.fast_recovery_mode {
-                    FAST_ACKS_REQUIRED
-                } else {
-                    NORMAL_ACKS_REQUIRED
-                };
-
-                if self.consecutive_acks_without_nak >= acks_required {
-                    *window = min(*window + WINDOW_INCR, WINDOW_MAX * WINDOW_MULT);
-                    window_increased = true;
-                    self.last_window_increase_ms = current_time;
-                    self.consecutive_acks_without_nak = 0; // Reset counter to prevent burst increases
-                }
+            if old != *window && old <= 10000 {
+                debug!(
+                    "{}: ACK increased window {} → {} (in_flight={}, fast_mode={}) [ENHANCED]",
+                    label, old, *window, in_flight_packets, self.fast_recovery_mode
+                );
             }
         }
 
-        // Log window recovery for diagnosis
-        if window_increased && old_window <= 10000 {
-            debug!(
-                "{}: ACK increased window {} → {} (in_flight={}, consec_acks={}, fast_mode={}) \
-                 [ENHANCED]",
-                label,
-                old_window,
-                *window,
-                in_flight_packets,
-                self.consecutive_acks_without_nak,
-                self.fast_recovery_mode
-            );
-        }
-
+        // Fast recovery mode helps connections recover from severe congestion
+        let current_time = now_ms();
         if self.fast_recovery_mode && *window >= FAST_RECOVERY_DISABLE_WINDOW {
             self.fast_recovery_mode = false;
             let recovery_duration = current_time.saturating_sub(self.fast_recovery_start_ms);

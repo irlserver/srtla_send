@@ -24,7 +24,7 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&connections, None, false, false, true);
+        let selected = select_connection_idx(&connections, None, 0, false, false, true);
         assert_eq!(selected, Some(1));
     }
 
@@ -44,7 +44,7 @@ mod tests {
         connections[2].congestion.nak_count = 3;
         connections[2].congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
 
-        let selected = select_connection_idx(&connections, None, true, false, false);
+        let selected = select_connection_idx(&connections, None, 0, true, false, false);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -65,7 +65,7 @@ mod tests {
         connections[1].congestion.nak_burst_count = 0;
         connections[1].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
 
-        let selected = select_connection_idx(&connections, None, true, false, false);
+        let selected = select_connection_idx(&connections, None, 0, true, false, false);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -272,7 +272,7 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&connections, None, false, false, false);
+        let selected = select_connection_idx(&connections, None, 0, false, false, false);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -284,7 +284,7 @@ mod tests {
         let connections = rt.block_on(create_test_connections(3));
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&connections, None, false, true, false);
+        let _selected = select_connection_idx(&connections, None, 0, false, true, false);
 
         // The result depends on timing, but should not panic
     }
@@ -313,35 +313,67 @@ mod tests {
             .next()
             .unwrap();
 
-        conn.reconnection.connection_established_ms = now_ms() - 15000;
+        conn.reconnection.connection_established_ms = now_ms() - 35000;
 
-        assert_eq!(calculate_quality_multiplier(&conn), 1.2);
+        assert_eq!(calculate_quality_multiplier(&conn), 1.1);
 
-        // Test connection with recent NAK (< 2 seconds ago) - heavy penalty
+        // Test connection with recent NAK - exponential decay formula
+        // With exponential decay: penalty = 0.5 * e^(-age_ms / 2000), multiplier = 1.0 - penalty
         conn.congestion.nak_count = 1;
-        conn.congestion.last_nak_time_ms = now_ms() - 1000;
-        assert_eq!(calculate_quality_multiplier(&conn), 0.1);
 
-        // Test connection with NAK 3-5 seconds ago - moderate penalty
-        conn.congestion.last_nak_time_ms = now_ms() - 3000;
-        assert_eq!(calculate_quality_multiplier(&conn), 0.5);
+        // 500ms ago: multiplier ≈ 0.61 (strong penalty, recent NAK)
+        conn.congestion.last_nak_time_ms = now_ms() - 500;
+        let mult_500 = calculate_quality_multiplier(&conn);
+        assert!(
+            (mult_500 - 0.61).abs() < 0.02,
+            "Expected ~0.61, got {}",
+            mult_500
+        );
 
-        // Test connection with NAK 5-10 seconds ago - light penalty
-        conn.congestion.last_nak_time_ms = now_ms() - 7000;
-        assert_eq!(calculate_quality_multiplier(&conn), 0.8);
+        // 2000ms ago (half-life): multiplier ≈ 0.816 (moderate penalty)
+        conn.congestion.last_nak_time_ms = now_ms() - 2000;
+        let mult_2000 = calculate_quality_multiplier(&conn);
+        assert!(
+            (mult_2000 - 0.816).abs() < 0.02,
+            "Expected ~0.816, got {}",
+            mult_2000
+        );
 
-        // Test connection with NAK > 10 seconds ago and no total NAKs - bonus
+        // 5000ms ago: multiplier ≈ 0.96 (light penalty)
+        conn.congestion.last_nak_time_ms = now_ms() - 5000;
+        let mult_5000 = calculate_quality_multiplier(&conn);
+        assert!(
+            (mult_5000 - 0.96).abs() < 0.02,
+            "Expected ~0.96, got {}",
+            mult_5000
+        );
+
+        // 15000ms ago: multiplier ≈ 1.0 (essentially recovered)
         conn.congestion.last_nak_time_ms = now_ms() - 15000;
+        let mult_15000 = calculate_quality_multiplier(&conn);
+        assert!(
+            (mult_15000 - 1.0).abs() < 0.02,
+            "Expected ~1.0, got {}",
+            mult_15000
+        );
+
+        // Test connection with no NAKs ever - bonus
+        // Need to clear the last_nak_time_ms to simulate truly no NAKs
         conn.congestion.nak_count = 0;
-        assert_eq!(calculate_quality_multiplier(&conn), 1.2);
+        conn.congestion.last_nak_time_ms = 0; // Clear NAK history
+        assert_eq!(calculate_quality_multiplier(&conn), 1.1);
 
-        // Test connection with NAK > 10 seconds ago and some NAKs - no penalty/bonus
+        // Test burst NAK penalty (requires 5+ NAKs in burst, within 3s)
+        // Burst penalty is 0.7x additional multiplier
         conn.congestion.nak_count = 5;
-        assert_eq!(calculate_quality_multiplier(&conn), 1.0);
-
-        // Test burst NAK penalty
-        conn.congestion.last_nak_time_ms = now_ms() - 3000;
-        conn.congestion.nak_burst_count = 3;
-        assert_eq!(calculate_quality_multiplier(&conn), 0.5 * 0.5); // 0.5 * 0.5 = 0.25
+        conn.congestion.last_nak_time_ms = now_ms() - 2000;
+        conn.congestion.nak_burst_count = 5;
+        let mult_burst = calculate_quality_multiplier(&conn);
+        // At 2000ms: base multiplier ≈ 0.816, with burst: 0.816 * 0.7 ≈ 0.571
+        assert!(
+            (mult_burst - 0.571).abs() < 0.02,
+            "Expected ~0.571, got {}",
+            mult_burst
+        );
     }
 }

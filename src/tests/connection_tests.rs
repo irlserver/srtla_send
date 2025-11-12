@@ -302,48 +302,38 @@ mod tests {
         conn.register_packet(400); // Add another packet
         assert_eq!(conn.in_flight_packets, 3);
 
-        // Test ENHANCED MODE: Should use sophisticated logic
+        // Test ENHANCED MODE: Should behave identically to classic for window growth
+        // The only difference is quality scoring in connection selection
         // Reset connection state for enhanced mode test
-        conn.window = 5000; // Higher window to make utilization threshold work
+        conn.window = 5000;
         conn.in_flight_packets = 0;
-        conn.congestion.consecutive_acks_without_nak = 0;
-        conn.congestion.last_window_increase_ms = 0; // Reset timing
 
         // Add packets for testing
         conn.register_packet(200);
         conn.register_packet(300);
         conn.register_packet(400);
         conn.register_packet(500);
-        assert_eq!(conn.in_flight_packets, 4);
+        conn.register_packet(600);
+        conn.register_packet(700);
+        assert_eq!(conn.in_flight_packets, 6);
 
-        // First ACK - should increment consecutive counter but not increase window yet
-        // With window=5000, in_flight=4, utilization check should pass
-        let found2 = conn.handle_srtla_ack_specific(200, false); // classic_mode = false
+        // First ACK - should increase window immediately (same as classic)
+        // ACK decrements in_flight 6→5, then check: 5*1000 > 5000? NO (boundary)
+        let found2 = conn.handle_srtla_ack_specific(200, false);
         assert!(found2);
-        assert_eq!(conn.window, 5000); // Should NOT increase yet
-        assert_eq!(conn.in_flight_packets, 3);
-        assert_eq!(conn.congestion.consecutive_acks_without_nak, 1); // Should increment
+        assert_eq!(conn.window, 5000); // Boundary case - no increase
+        assert_eq!(conn.in_flight_packets, 5);
 
-        // Second ACK - should still not increase (needs 4 consecutive for normal mode)
+        // Add more to get above threshold
+        conn.register_packet(800);
+        conn.register_packet(900);
+        assert_eq!(conn.in_flight_packets, 7);
+
+        // Second ACK - decrements 7→6, check: 6*1000 > 5000 → TRUE, increase!
         let found3 = conn.handle_srtla_ack_specific(300, false);
         assert!(found3);
-        assert_eq!(conn.window, 5000); // Should NOT increase yet
-        assert_eq!(conn.in_flight_packets, 2);
-        assert_eq!(conn.congestion.consecutive_acks_without_nak, 2); // Should increment
-
-        // Third ACK - still not enough
-        let found4 = conn.handle_srtla_ack_specific(400, false);
-        assert!(found4);
-        assert_eq!(conn.window, 5000); // Should NOT increase yet
-        assert_eq!(conn.in_flight_packets, 1);
-        assert_eq!(conn.congestion.consecutive_acks_without_nak, 3); // Should increment
-
-        // Fourth ACK - should finally increase window
-        let found5 = conn.handle_srtla_ack_specific(500, false);
-        assert!(found5);
-        assert_eq!(conn.window, 5000 + WINDOW_INCR); // Should increase now
-        assert_eq!(conn.in_flight_packets, 0);
-        assert_eq!(conn.congestion.consecutive_acks_without_nak, 0); // Should reset after increase
+        assert_eq!(conn.window, 5000 + WINDOW_INCR - 1); // Should increase
+        assert_eq!(conn.in_flight_packets, 6);
     }
 
     #[test]
