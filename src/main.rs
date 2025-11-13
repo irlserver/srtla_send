@@ -14,6 +14,10 @@ mod sender;
 mod toggles;
 mod utils;
 
+// Test helpers for binary tests
+#[cfg(any(test, feature = "test-internals"))]
+mod test_helpers;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "srtla_send",
