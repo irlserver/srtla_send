@@ -229,7 +229,7 @@ These toggles affect how the system selects the best connection for sending data
 
 **Classic SRTLA Algorithm** (`classic`): Matches the original srtla_send logic without any enhancements.
 
-**Quality-Based Scoring** (`quality`): Punishes connections with recent NAKs. More recent NAKs = more punishment. **Double punishment for NAK bursts** (multiple NAKs in short time).
+**Quality-Based Scoring** (`quality`): Punishes connections with recent NAKs. More recent NAKs = more punishment. **Additional 30% penalty (0.7x multiplier) for NAK bursts** (≥5 NAKs in short time).
 
 **Connection Exploration** (`explore`): Optional smart context-aware exploration that tests alternative connections when the current best is degrading and alternatives have recovered. Periodic fallback exploration every 30 seconds. **Disabled by default** and **completely disabled in classic mode** - enable with `--exploration` flag or runtime toggle.
 
@@ -268,7 +268,7 @@ Normal registration:
 - For each IP in `BIND_IPS_FILE`, the sender binds a UDP socket and connects to `SRTLA_HOST:SRTLA_PORT`.
 - Incoming SRT UDP packets are read on `SRT_LISTEN_PORT` and forwarded over the currently selected uplink based on the score `window / (in_flight + 1)`.
 - ACKs are applied to all uplinks to reduce in-flight counts; NAKs are attributed to the uplink that originally sent the sequence (tracked), falling back to the receiver uplink if unknown.
-- **Burst NAK Detection**: The system tracks NAK bursts (multiple NAKs within 1 second) per connection. When quality scoring is enabled, connections with recent NAK bursts (>1 NAK in burst, within last 5 seconds) receive an additional 0.5x penalty multiplier to their quality score, helping avoid connections experiencing packet loss issues.
+- **Burst NAK Detection**: The system tracks NAK bursts (multiple NAKs within 1 second) per connection. When quality scoring is enabled, connections with recent NAK bursts (≥5 NAKs in burst, within last 3 seconds) receive an additional 0.7x penalty multiplier to their quality score, helping avoid connections experiencing packet loss issues.
 - Keepalives are sent when idle, and periodically for RTT measurement; the RTT is smoothed. Window recovery is conservative and time-based when there are no recent NAKs.
 
 ## Notes
@@ -342,12 +342,26 @@ With properly configured connections, you should observe:
 
 ### Constants (Advanced)
 
-If needed, these can be adjusted in the following files under `src/sender/selection/`:
+If needed, these can be adjusted in `src/sender/selection/`:
 
-- `SWITCH_THRESHOLD`: in `src/sender/selection/enhanced.rs` (Currently 1.02, 2% hysteresis) - increase for more stability, decrease for faster response
-- `HALF_LIFE_MS`: in `src/sender/selection/quality.rs` (Currently 2000ms, 2 second NAK decay) - adjust recovery speed
-- `MAX_RTT_BONUS`: in `src/sender/selection/enhanced.rs` (Currently 1.03, 3% max bonus) - adjust RTT preference strength  
-- Exploration period: in `src/sender/selection/enhanced.rs` (`should_explore_now()` function, currently 30s) - adjust exploration interval
+**Enhanced Mode (`enhanced.rs`):**
+- `SWITCH_THRESHOLD`: 1.02 (2% hysteresis) - increase for more stability, decrease for faster response
+
+**Quality Scoring (`quality.rs`):**
+- `STARTUP_GRACE_PERIOD_MS`: 30000ms (30 seconds) - grace period before quality penalties apply
+- `PERFECT_CONNECTION_BONUS`: 1.1 (10% bonus) - bonus for connections with no NAKs
+- `STARTUP_NAK_PENALTY`: 0.98 (2% penalty) - light penalty during grace period
+- `HALF_LIFE_MS`: 2000ms (2 seconds) - NAK penalty decay speed
+- `MAX_PENALTY`: 0.5 (50% penalty) - maximum initial penalty after NAK
+- `NAK_BURST_THRESHOLD`: 5 NAKs - minimum burst size to trigger extra penalty
+- `NAK_BURST_MAX_AGE_MS`: 3000ms (3 seconds) - max age for burst penalty
+- `NAK_BURST_PENALTY`: 0.7 (30% extra penalty) - additional multiplier for bursts
+- `RTT_BONUS_THRESHOLD_MS`: 200ms - RTT threshold for bonus calculation
+- `MIN_RTT_MS`: 50ms - minimum RTT for calculation (prevents division issues)
+- `MAX_RTT_BONUS`: 1.03 (3% max bonus) - maximum RTT bonus multiplier
+
+**Exploration (`enhanced.rs`):**
+- Exploration period: `should_explore_now()` function, currently 30s - adjust exploration interval
 
 ### Runtime Optimization
 
