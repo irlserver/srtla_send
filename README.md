@@ -342,12 +342,12 @@ With properly configured connections, you should observe:
 
 ### Constants (Advanced)
 
-If needed, these can be adjusted in `src/sender/selection.rs`:
+If needed, these can be adjusted in the following files under `src/sender/selection/`:
 
-- `SWITCH_THRESHOLD`: Currently 1.02 (2% hysteresis) - increase for more stability, decrease for faster response
-- `HALF_LIFE_MS`: Currently 2000ms (2 second NAK decay) - adjust recovery speed
-- `MAX_RTT_BONUS`: Currently 1.03 (3% max bonus) - adjust RTT preference strength  
-- Exploration period: Currently 30s - adjust in `should_explore_now()` function
+- `SWITCH_THRESHOLD`: in `src/sender/selection/enhanced.rs` (Currently 1.02, 2% hysteresis) - increase for more stability, decrease for faster response
+- `HALF_LIFE_MS`: in `src/sender/selection/quality.rs` (Currently 2000ms, 2 second NAK decay) - adjust recovery speed
+- `MAX_RTT_BONUS`: in `src/sender/selection/enhanced.rs` (Currently 1.03, 3% max bonus) - adjust RTT preference strength  
+- Exploration period: in `src/sender/selection/enhanced.rs` (`should_explore_now()` function, currently 30s) - adjust exploration interval
 
 ### Runtime Optimization
 
