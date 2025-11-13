@@ -26,6 +26,13 @@ const SWITCH_THRESHOLD: f64 = 1.02; // New connection must be 2% better
 /// Returns the index of the connection with the best quality-adjusted score.
 /// Implements time-based switch dampening to prevent rapid thrashing.
 ///
+/// IMPORTANT: This function is called for EACH incoming SRT packet. The returned
+/// connection index determines where that packet (and subsequent packets) will be routed.
+/// Time-based dampening prevents changing the routing decision too frequently, ensuring
+/// all packets continue flowing through the same connection during the cooldown period.
+/// This is NOT a per-packet round-robin - it's a per-packet "best connection" selection
+/// with dampening to prevent rapid switching under bursty network conditions.
+///
 /// # Arguments
 /// * `conns` - Slice of available connections
 /// * `last_idx` - Previously selected connection index (for hysteresis)

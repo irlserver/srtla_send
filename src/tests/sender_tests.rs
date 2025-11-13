@@ -72,6 +72,171 @@ mod tests {
     }
 
     #[test]
+    fn test_time_based_switch_dampening_blocks_within_cooldown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup: Connection 0 is currently selected, Connection 1 has better score
+        connections[0].in_flight_packets = 5; // Lower score
+        connections[1].in_flight_packets = 0; // Best score
+        connections[2].in_flight_packets = 10; // Worst score
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within 500ms cooldown)
+
+        // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
+        // This prevents rapid thrashing between connections under bursty score changes
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            selected,
+            Some(0),
+            "Should continue routing all packets via current connection during cooldown period"
+        );
+    }
+
+    #[test]
+    fn test_time_based_switch_dampening_allows_after_cooldown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup: Connection 0 is currently selected, Connection 1 has significantly better score
+        connections[0].in_flight_packets = 5; // Lower score
+        connections[1].in_flight_packets = 0; // Best score (significantly better, exceeds 2% hysteresis)
+        connections[2].in_flight_packets = 10; // Worst score
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 600; // 600ms after last switch (past 500ms cooldown)
+
+        // After cooldown: per-packet selection can now choose the better connection
+        // From this point forward, all subsequent packets will route via connection 1
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            selected,
+            Some(1),
+            "Should switch per-packet routing to better connection after cooldown expires"
+        );
+    }
+
+    #[test]
+    fn test_time_based_switch_dampening_allows_if_current_invalid() {
+        use tokio::time::{Duration, Instant};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup: Connection 0 is currently selected but becomes timed out
+        connections[0].in_flight_packets = 5;
+        // Simulate timeout by setting last_received to 11 seconds ago (CONN_TIMEOUT is 10 seconds)
+        connections[0].last_received = Some(Instant::now() - Duration::from_secs(11));
+        connections[1].in_flight_packets = 0; // Best score
+        connections[2].in_flight_packets = 10;
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 200; // Within cooldown period
+
+        // Cooldown is bypassed when current connection is invalid/timed out
+        // Per-packet selection immediately switches to valid connection
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            selected,
+            Some(1),
+            "Should immediately route packets via valid connection if current is timed out, \
+             bypassing cooldown"
+        );
+    }
+
+    #[test]
+    fn test_exploration_blocked_during_cooldown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup connections with distinct scores
+        connections[0].in_flight_packets = 2; // Currently selected
+        connections[1].in_flight_packets = 0; // Best
+        connections[2].in_flight_packets = 1; // Second-best
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 200; // Within cooldown
+
+        // Enable exploration, but should be blocked by cooldown
+        // This prevents exploration from causing rapid per-packet routing changes
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            true, // exploration enabled
+            false,
+        );
+
+        // Should continue routing packets via connection 0, not explore during cooldown
+        assert_eq!(
+            selected,
+            Some(0),
+            "Exploration-triggered per-packet routing changes should be blocked during cooldown"
+        );
+    }
+
+    #[test]
+    fn test_classic_mode_ignores_time_dampening() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup: Connection 0 is currently selected, Connection 1 has better score
+        connections[0].in_flight_packets = 5; // Lower score
+        connections[1].in_flight_packets = 0; // Best score
+        connections[2].in_flight_packets = 10; // Worst score
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within cooldown)
+
+        // Classic mode: per-packet selection ALWAYS picks highest score connection
+        // No dampening, no hysteresis - matches original C implementation
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            false,
+            false,
+            true, // classic mode
+        );
+
+        // Per-packet routing immediately uses connection 1 (best score)
+        assert_eq!(
+            selected,
+            Some(1),
+            "Classic mode per-packet selection should ignore time-based dampening and always \
+             route via highest score connection"
+        );
+    }
+
+    #[test]
     fn test_nak_attribution_to_correct_connection() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
