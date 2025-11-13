@@ -57,7 +57,7 @@ pub fn select_connection(
             base
         } else {
             let quality_mult = calculate_quality_multiplier(c);
-            let final_score = (base * quality_mult).max(1.0);
+            let final_score = base * quality_mult;
 
             // Log quality issues and recoveries for debugging
             if quality_mult < 0.8 {
