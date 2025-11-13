@@ -73,15 +73,84 @@ pub fn select_connection_idx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::create_test_connections;
+    use crate::utils::now_ms;
 
     #[test]
     fn test_select_connection_idx_classic() {
-        // Test that classic mode uses classic algorithm
+        // Test that classic mode always picks highest score, ignoring dampening
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        connections[0].in_flight_packets = 5; // Lower score
+        connections[1].in_flight_packets = 0; // Highest score
+        connections[2].in_flight_packets = 10; // Lowest score
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 100; // Within cooldown
+
+        // Classic mode should pick connection 1 (highest score) even during cooldown
+        let result = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            false,
+            false,
+            true, // classic mode
+        );
+        assert_eq!(
+            result,
+            Some(1),
+            "Classic mode should pick highest score connection"
+        );
     }
 
     #[test]
     fn test_select_connection_idx_enhanced() {
-        // Test that enhanced mode uses enhanced algorithm
+        // Test that enhanced mode enforces cooldown dampening
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        connections[0].in_flight_packets = 5; // Currently selected, lower score
+        connections[1].in_flight_packets = 0; // Highest score
+        connections[2].in_flight_packets = 10; // Lowest score
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 100; // Within cooldown
+
+        // Enhanced mode should stay with connection 0 due to cooldown
+        let result = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            false,
+            false, // enhanced mode
+        );
+        assert_eq!(
+            result,
+            Some(0),
+            "Enhanced mode should enforce cooldown and stay with current connection"
+        );
+
+        // After cooldown expires, should allow switching
+        let current_time_after_cooldown = last_switch_time_ms + 600; // Past cooldown
+        let result_after = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_after_cooldown,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            result_after,
+            Some(1),
+            "Enhanced mode should allow switching after cooldown expires"
+        );
     }
 
     #[test]
