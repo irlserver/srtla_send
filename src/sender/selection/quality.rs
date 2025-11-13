@@ -35,11 +35,11 @@ pub fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
 
         // Exponential decay formula: penalty = max_penalty * e^(-age/half_life)
         // This gives smooth recovery:
-        //   0ms:    50% penalty (0.5x multiplier)
-        //   2000ms: 25% penalty (0.75x multiplier) -- half-life
-        //   4000ms: 12.5% penalty (0.875x multiplier)
-        //   6000ms: 6.25% penalty (0.9375x multiplier)
-        //   8000ms+: ~0% penalty (1.0x multiplier)
+        //   0ms:     50% penalty (0.5x multiplier)
+        //   2000ms:  18.4% penalty (0.816x multiplier)
+        //   4000ms:   6.8% penalty (0.932x multiplier)
+        //   6000ms:   2.5% penalty (0.975x multiplier)
+        //   8000ms+: ~0.9% penalty (0.991x multiplier)
         let decay_factor = (-(nak_age_ms as f64) / HALF_LIFE_MS).exp();
         let penalty = MAX_PENALTY * decay_factor;
         let mut mult = 1.0 - penalty; // Smoothly recovers from 0.5 to 1.0
