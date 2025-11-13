@@ -24,7 +24,7 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&connections, None, 0, false, false, true);
+        let selected = select_connection_idx(&connections, None, 0, 0, false, false, true);
         assert_eq!(selected, Some(1));
     }
 
@@ -44,7 +44,7 @@ mod tests {
         connections[2].congestion.nak_count = 3;
         connections[2].congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
 
-        let selected = select_connection_idx(&connections, None, 0, true, false, false);
+        let selected = select_connection_idx(&connections, None, 0, 0, true, false, false);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -65,7 +65,7 @@ mod tests {
         connections[1].congestion.nak_burst_count = 0;
         connections[1].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
 
-        let selected = select_connection_idx(&connections, None, 0, true, false, false);
+        let selected = select_connection_idx(&connections, None, 0, 0, true, false, false);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -272,7 +272,7 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&connections, None, 0, false, false, false);
+        let selected = select_connection_idx(&connections, None, 0, 0, false, false, false);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -284,7 +284,7 @@ mod tests {
         let connections = rt.block_on(create_test_connections(3));
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&connections, None, 0, false, true, false);
+        let _selected = select_connection_idx(&connections, None, 0, 0, false, true, false);
 
         // The result depends on timing, but should not panic
     }

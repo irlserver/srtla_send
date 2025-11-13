@@ -256,10 +256,12 @@ pub async fn handle_srt_packet(
             let effective_enable_quality = enable_quality && !classic;
             let effective_enable_explore = enable_explore && !classic;
 
+            let current_time_ms = now_ms();
             let sel_idx = select_connection_idx(
                 connections,
                 *last_selected_idx,
                 *last_switch_time_ms,
+                current_time_ms,
                 effective_enable_quality,
                 effective_enable_explore,
                 classic,

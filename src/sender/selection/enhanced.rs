@@ -11,10 +11,10 @@
 
 use tracing::debug;
 
+use super::MIN_SWITCH_INTERVAL_MS;
 use super::exploration::should_explore_now;
 use super::quality::calculate_quality_multiplier;
 use crate::connection::SrtlaConnection;
-use crate::utils::now_ms;
 
 /// Switching hysteresis: require new connection to be significantly better
 /// REDUCED to 2% to allow better load distribution across multiple connections
@@ -24,15 +24,20 @@ const SWITCH_THRESHOLD: f64 = 1.02; // New connection must be 2% better
 /// Select best connection using enhanced algorithm with quality awareness
 ///
 /// Returns the index of the connection with the best quality-adjusted score.
+/// Implements time-based switch dampening to prevent rapid thrashing.
 ///
 /// # Arguments
 /// * `conns` - Slice of available connections
 /// * `last_idx` - Previously selected connection index (for hysteresis)
+/// * `last_switch_time_ms` - Timestamp of last connection switch
+/// * `current_time_ms` - Current timestamp in milliseconds
 /// * `enable_quality` - Whether to apply quality scoring
 /// * `enable_explore` - Whether to enable smart exploration
 pub fn select_connection(
     conns: &[SrtlaConnection],
     last_idx: Option<usize>,
+    last_switch_time_ms: u64,
+    current_time_ms: u64,
     enable_quality: bool,
     enable_explore: bool,
 ) -> Option<usize> {
@@ -95,33 +100,64 @@ pub fn select_connection(
         }
     }
 
-    // Apply switching hysteresis to prevent unnecessary switching
-    if let (Some(last), Some(current)) = (last_idx, current_score) {
-        // If current connection is still valid and new best isn't significantly better
-        if best_idx != Some(last) && best_score < current * SWITCH_THRESHOLD {
-            // Only log occasionally to reduce spam
-            if now_ms() % 1000 < 10 {
+    // Time-based switch dampening: prevent rapid thrashing under bursty scores
+    // Check if we're within the minimum switch interval
+    let time_since_last_switch_ms = current_time_ms.saturating_sub(last_switch_time_ms);
+    let in_switch_cooldown = time_since_last_switch_ms < MIN_SWITCH_INTERVAL_MS;
+
+    if let Some(last) = last_idx {
+        // If proposing a different connection
+        if best_idx != Some(last) {
+            // Check if last connection is still valid
+            let last_still_valid =
+                last < conns.len() && !conns[last].is_timed_out() && conns[last].connected;
+
+            // If in cooldown period and last connection is still valid, keep it
+            if in_switch_cooldown && last_still_valid {
                 debug!(
-                    "Hysteresis: staying with current connection (current: {:.1}, best: {:.1}, \
-                     threshold: {:.1})",
-                    current,
-                    best_score,
-                    current * SWITCH_THRESHOLD
+                    "Switch dampening: staying with current connection (cooldown: {}ms remaining)",
+                    MIN_SWITCH_INTERVAL_MS.saturating_sub(time_since_last_switch_ms)
                 );
+                return Some(last);
             }
-            return Some(last);
+
+            // Apply score-based hysteresis if not in cooldown
+            // If current connection is still valid and new best isn't significantly better
+            if let Some(current) = current_score {
+                if best_score < current * SWITCH_THRESHOLD {
+                    // Only log occasionally to reduce spam
+                    if current_time_ms % 1000 < 10 {
+                        debug!(
+                            "Score hysteresis: staying with current connection (current: {:.1}, \
+                             best: {:.1}, threshold: {:.1})",
+                            current,
+                            best_score,
+                            current * SWITCH_THRESHOLD
+                        );
+                    }
+                    return Some(last);
+                }
+            }
         }
     }
 
-    // Apply exploration if enabled
-    let explore_now = if enable_explore {
+    // Apply exploration if enabled (but respect cooldown to avoid rapid switching)
+    let explore_now = if enable_explore && !in_switch_cooldown {
         should_explore_now(conns, best_idx, second_idx)
     } else {
         false
     };
 
     if explore_now {
-        second_idx.or(best_idx)
+        // Exploration wants to try second-best, but only if different from current
+        if let (Some(second), Some(last)) = (second_idx, last_idx) {
+            if second != last {
+                debug!("Exploration: trying second-best connection");
+                return second_idx.or(best_idx);
+            }
+        }
+        // If second is same as current, just use best
+        best_idx
     } else {
         best_idx
     }

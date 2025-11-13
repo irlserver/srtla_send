@@ -18,6 +18,7 @@ use crate::connection::SrtlaConnection;
 /// or None if all connections are timed out or disconnected.
 ///
 /// This matches the original C implementation's behavior exactly.
+/// No time-based dampening or hysteresis is applied in classic mode.
 pub fn select_connection(conns: &[SrtlaConnection]) -> Option<usize> {
     let mut best_idx: Option<usize> = None;
     let mut best_score: i32 = -1;
