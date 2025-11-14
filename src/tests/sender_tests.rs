@@ -528,7 +528,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = 0; // Clear NAK history
         assert_eq!(calculate_quality_multiplier(&conn), 1.1);
 
-        // Test burst NAK penalty (requires 5+ NAKs in burst, within 3s)
+        // Test burst NAK penalty (requires ≥5 NAKs in burst, within 3s)
         // Burst penalty is 0.7x additional multiplier
         conn.congestion.nak_count = 5;
         conn.congestion.last_nak_time_ms = now_ms() - 2000;

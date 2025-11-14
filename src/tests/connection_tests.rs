@@ -332,7 +332,7 @@ mod tests {
         // Second ACK - decrements 7→6, check: 6*1000 > 5000 → TRUE, increase!
         let found3 = conn.handle_srtla_ack_specific(300, false);
         assert!(found3);
-        assert_eq!(conn.window, 5000 + WINDOW_INCR - 1); // Should increase
+        assert_eq!(conn.window, 5000 + WINDOW_INCR - 1); // Should increase by WINDOW_INCR - 1
         assert_eq!(conn.in_flight_packets, 6);
     }
 

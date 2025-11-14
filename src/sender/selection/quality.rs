@@ -43,7 +43,7 @@ const MAX_RTT_BONUS: f64 = 1.03;
 /// Returns a multiplier that adjusts the base score:
 /// - 1.1x bonus for perfect connections (no NAKs)
 /// - 0.5x-1.0x penalty for connections with recent NAKs (exponential decay)
-/// - 0.7x additional penalty for NAK bursts (5+ NAKs in short time)
+/// - 0.7x additional multiplier for NAK bursts (30% reduction for 5+ NAKs in short time)
 /// - 1.0x-1.03x RTT bonus for low-latency connections
 pub fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
     // Startup grace period: first 30 seconds after connection establishment
