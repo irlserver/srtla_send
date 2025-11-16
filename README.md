@@ -355,7 +355,7 @@ If needed, these can be adjusted in `src/sender/selection/`:
 - `MAX_PENALTY`: 0.5 (50% penalty) - maximum initial penalty after NAK
 - `NAK_BURST_THRESHOLD`: 5 NAKs - minimum burst size to trigger extra penalty
 - `NAK_BURST_MAX_AGE_MS`: 3000ms (3 seconds) - max age for burst penalty
-- `NAK_BURST_PENALTY`: 0.7 (30% extra penalty) - additional multiplier for bursts
+- `NAK_BURST_PENALTY`: 0.7 (30% reduction) - multiplier applied for bursts
 - `RTT_BONUS_THRESHOLD_MS`: 200ms - RTT threshold for bonus calculation
 - `MIN_RTT_MS`: 50ms - minimum RTT for calculation (prevents division issues)
 - `MAX_RTT_BONUS`: 1.03 (3% max bonus) - maximum RTT bonus multiplier
