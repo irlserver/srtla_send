@@ -32,6 +32,14 @@ jobs:
           aarch64-linux-gnu-gcc --version
           rustup target list | grep aarch64-unknown-linux-gnu
 
+      # Extract version from Cargo.toml
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "cargo_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
       # Compile Rust project for ARM64
       - name: Build for ARM64
         env:
@@ -42,19 +50,13 @@ jobs:
           mkdir -p build/usr/bin
           cp target/aarch64-unknown-linux-gnu/release/srtla_send build/usr/bin/
 
-      - uses: paulhatch/semantic-version@v5.4.0
-        id: semantic
-        with:
-          tag_prefix: ""
-          version_format: ${{ github.event_name == 'release' && '${major}.${minor}.${patch}' || '${major}.${minor}.${patch}-prerelease${increment}' }}
-
       # Set up package structure
       - name: Create package directories
         run: |
           mkdir -p build/DEBIAN
           cat > build/DEBIAN/control << EOF
           Package: srtla
-          Version: ${{ steps.semantic.outputs.version }}
+          Version: ${{ steps.version.outputs.cargo_version }}
           Architecture: arm64
           Maintainer: Thomas Lekanger <mail@datagutt.no>
           Description: SRT transport proxy with link aggregation for connection bonding
@@ -67,12 +69,12 @@ jobs:
       - name: Build Debian package
         run: |
           dpkg-deb --build build
-          mv build.deb srtla_${{ steps.semantic.outputs.version }}_arm64.deb
+          mv build.deb srtla_${{ steps.version.outputs.cargo_version }}_arm64.deb
 
       - uses: actions/upload-artifact@v4
         with:
           name: srtla-arm64.deb
-          path: srtla_${{ steps.semantic.outputs.version }}_arm64.deb
+          path: srtla_${{ steps.version.outputs.cargo_version }}_arm64.deb
 
   deb-amd64:
     runs-on: ubuntu-latest
@@ -85,6 +87,14 @@ jobs:
           toolchain: nightly
           target: x86_64-unknown-linux-gnu
 
+      # Extract version from Cargo.toml
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "cargo_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
       # Compile Rust project for AMD64
       - name: Build for AMD64
         run: |
@@ -92,19 +102,13 @@ jobs:
           mkdir -p build/usr/bin
           cp target/x86_64-unknown-linux-gnu/release/srtla_send build/usr/bin/
 
-      - uses: paulhatch/semantic-version@v5.4.0
-        id: semantic
-        with:
-          tag_prefix: ""
-          version_format: ${{ github.event_name == 'release' && '${major}.${minor}.${patch}' || '${major}.${minor}.${patch}-prerelease${increment}' }}
-
       # Set up package structure
       - name: Create package directories
         run: |
           mkdir -p build/DEBIAN
           cat > build/DEBIAN/control << EOF
           Package: srtla
-          Version: ${{ steps.semantic.outputs.version }}
+          Version: ${{ steps.version.outputs.cargo_version }}
           Architecture: amd64
           Maintainer: Thomas Lekanger <mail@datagutt.no>
           Description: SRT transport proxy with link aggregation for connection bonding
@@ -117,12 +121,12 @@ jobs:
       - name: Build Debian package
         run: |
           dpkg-deb --build build
-          mv build.deb srtla_${{ steps.semantic.outputs.version }}_amd64.deb
+          mv build.deb srtla_${{ steps.version.outputs.cargo_version }}_amd64.deb
 
       - uses: actions/upload-artifact@v4
         with:
           name: srtla-amd64.deb
-          path: srtla_${{ steps.semantic.outputs.version }}_amd64.deb
+          path: srtla_${{ steps.version.outputs.cargo_version }}_amd64.deb
 
   release:
     needs: [deb-arm64, deb-amd64]
