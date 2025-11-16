@@ -142,8 +142,8 @@ mod tests {
 
         // Setup: Connection 0 is currently selected but becomes timed out
         connections[0].in_flight_packets = 5;
-        // Simulate timeout by setting last_received to 11 seconds ago (CONN_TIMEOUT is 10 seconds)
-        connections[0].last_received = Some(Instant::now() - Duration::from_secs(11));
+        // Simulate timeout by setting last_received to 6 seconds ago (CONN_TIMEOUT is 5 seconds)
+        connections[0].last_received = Some(Instant::now() - Duration::from_secs(6));
         connections[1].in_flight_packets = 0; // Best score
         connections[2].in_flight_packets = 10;
 
