@@ -127,6 +127,7 @@ pub async fn run_sender_with_toggles(
     let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
     let mut last_sequence_cleanup_ms: u64 = 0;
     let mut last_selected_idx: Option<usize> = None;
+    let mut last_switch_time_ms: u64 = 0; // Track time of last connection switch
     let mut all_failed_at: Option<Instant> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
 
@@ -167,6 +168,7 @@ pub async fn run_sender_with_toggles(
                     &mut recv_buf,
                     &mut connections,
                     &mut last_selected_idx,
+                    &mut last_switch_time_ms,
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_client_addr,
@@ -306,6 +308,7 @@ pub async fn run_sender_with_toggles(
                     &mut recv_buf,
                     &mut connections,
                     &mut last_selected_idx,
+                    &mut last_switch_time_ms,
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_client_addr,

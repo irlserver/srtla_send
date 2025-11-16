@@ -1,4 +1,5 @@
-#![cfg(test)]
+#![cfg(any(test, feature = "test-internals"))]
+#![allow(dead_code)] // Allow unused helpers - they're used by library tests but not binary tests
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;

@@ -19,14 +19,33 @@ The burst NAK penalty logic, quality scoring, and connection exploration feature
 
 ## Features
 
+### Core SRTLA Functionality
 - Multi-uplink bonding using a list of local source IPs
 - Registration flow (REG1/REG2/REG3) with ID propagation
 - SRT ACK and NAK handling (with correct NAK attribution to sending uplink)
-- Burst NAK penalty: Extra quality penalty for connections experiencing packet loss bursts
+- Dynamic path selection with automatic load distribution across all connections
 - Keepalives with RTT measurement and time-based window recovery
-- Dynamic path selection: score = window / (in_flight + 1)
 - Live IP list reload on Unix via SIGHUP
-- Runtime toggles via stdin (no restart required)
+- Runtime toggles via stdin or Unix socket (no restart required)
+
+### Enhanced Mode (Default)
+- **Exponential NAK Decay**: Smooth recovery from packet loss over ~8 seconds
+- **NAK Burst Detection**: Extra penalties for connections experiencing severe packet loss (≥5 NAKs)
+- **RTT-Aware Selection**: Small bonus (3% max) for lower-latency connections
+- **Quality Scoring**: Automatic preference for higher-quality connections
+- **Minimal Hysteresis**: 2% threshold prevents flip-flopping while maintaining natural load distribution
+
+### Optional Smart Exploration
+- **Context-Aware Discovery**: Tests alternative connections when current best is degrading and alternatives have recovered
+- **Periodic Fallback**: Every 30 seconds for 300ms as a safety net
+- **Smart Switching**: Tries second-best connections instead of always sticking to current best
+- **Enable via**: `--exploration` flag or runtime toggle (`explore on`)
+- **Use Case**: More aggressive connection testing in unstable network conditions
+
+### Classic Mode
+- Exact match to original `srtla_send.c` implementation
+- Pure capacity-based selection without quality awareness
+- Can be enabled via `--classic` flag or runtime toggle
 
 ## Assumptions and Prerequisites
 
@@ -210,11 +229,11 @@ These toggles affect how the system selects the best connection for sending data
 
 **Classic SRTLA Algorithm** (`classic`): Matches the original srtla_send logic without any enhancements.
 
-**Quality-Based Scoring** (`quality`): Punishes connections with recent NAKs. More recent NAKs = more punishment. **Double punishment for NAK bursts** (multiple NAKs in short time).
+**Quality-Based Scoring** (`quality`): Punishes connections with recent NAKs. More recent NAKs = more punishment. **Additional 30% penalty (0.7x multiplier) for NAK bursts** (≥5 NAKs in short time).
 
-**Connection Exploration** (`explore`): 10% of the time picks the 2nd best network. Every ~5 seconds explores for ~500ms to discover better alternatives.
+**Connection Exploration** (`explore`): Optional smart context-aware exploration that tests alternative connections when the current best is degrading and alternatives have recovered. Periodic fallback exploration every 30 seconds. **Disabled by default** and **completely disabled in classic mode** - enable with `--exploration` flag or runtime toggle.
 
-These affect selection behavior in real time. By default, quality-based scoring is enabled.
+These affect selection behavior in real time. By default, enhanced mode with quality-based scoring is enabled.
 
 ## IP List Reload (Unix only)
 
@@ -249,7 +268,7 @@ Normal registration:
 - For each IP in `BIND_IPS_FILE`, the sender binds a UDP socket and connects to `SRTLA_HOST:SRTLA_PORT`.
 - Incoming SRT UDP packets are read on `SRT_LISTEN_PORT` and forwarded over the currently selected uplink based on the score `window / (in_flight + 1)`.
 - ACKs are applied to all uplinks to reduce in-flight counts; NAKs are attributed to the uplink that originally sent the sequence (tracked), falling back to the receiver uplink if unknown.
-- **Burst NAK Detection**: The system tracks NAK bursts (multiple NAKs within 1 second) per connection. When quality scoring is enabled, connections with recent NAK bursts (>1 NAK in burst, within last 5 seconds) receive an additional 0.5x penalty multiplier to their quality score, helping avoid connections experiencing packet loss issues.
+- **Burst NAK Detection**: The system tracks NAK bursts (multiple NAKs within 1 second) per connection. When quality scoring is enabled, connections with recent NAK bursts (≥5 NAKs in burst, within last 3 seconds) receive an additional 0.7x multiplier (30% reduction) to their quality score, helping avoid connections experiencing packet loss issues.
 - Keepalives are sent when idle, and periodically for RTT measurement; the RTT is smoothed. Window recovery is conservative and time-based when there are no recent NAKs.
 
 ## Notes
@@ -262,3 +281,98 @@ Normal registration:
 ## License
 
 This Rust implementation is licensed under the MIT License. See the [LICENSE](./LICENSE) file for full details.
+
+## Expected Behavior
+
+### Load Distribution
+
+With properly configured connections, you should observe:
+
+**All connections active**: Traffic should appear on all uplinks (e.g., if you have 4 uplinks, all 4 should show active bitrate)
+
+**Proportional distribution**: 
+- With equal connections: roughly equal traffic distribution (e.g., 25% each with 4 uplinks)
+- With varying quality (enhanced mode): better connections get more traffic, degraded connections get less
+- With varying capacity: connections with larger windows get proportionally more traffic
+
+**Dynamic adaptation (enhanced mode)**: 
+- Connections experiencing NAKs automatically receive less traffic
+- Connections recover to full capacity within ~8 seconds after issues resolve
+- System continuously rebalances based on current conditions
+
+### Monitoring
+
+**Status logs** (every 30 seconds) show:
+- Total bitrate across all connections
+- Individual connection status (active/timed out)
+- Window sizes and in-flight packet counts
+- RTT measurements and connection quality metrics
+- Current toggle states (classic/enhanced mode)
+
+**Debug logs** (when `RUST_LOG=debug`) show:
+- Per-packet connection selection decisions
+- Quality multiplier calculations
+- NAK burst detections and recovery
+- Exploration attempts
+- Hysteresis decisions
+
+### Troubleshooting
+
+**If only some connections are used**:
+1. Check for NAKs in logs - degraded connections naturally get less traffic in enhanced mode
+2. Try classic mode: `echo "classic on"` - disables quality awareness for pure capacity-based distribution
+3. Temporarily disable quality scoring: `echo "quality off"`
+4. Verify all uplinks can reach the receiver (check for timeout messages)
+5. Check RTT differences - high-RTT connections get slightly less traffic in enhanced mode (3% max difference)
+
+**If throughput is lower than expected**:
+1. Verify SRT is not limiting the bitrate (check encoder settings)
+2. Check for high packet loss (NAKs) on connections - indicates network issues
+3. Ensure sender has sufficient CPU and network capacity
+4. Monitor SRT `SRTO_SNDDATA` buffer - if full, increase bitrate or improve connections
+5. Check connection windows in status logs - low windows indicate capacity limits
+
+**If connections are flip-flopping**:
+1. This should be minimal with 2% hysteresis in enhanced mode
+2. Check if scores are truly identical (look for hysteresis messages in debug logs)
+3. Verify connections have stable quality (no intermittent NAKs)
+4. Consider using classic mode for perfectly equal connections
+
+## Performance Tuning
+
+### Constants (Advanced)
+
+If needed, these can be adjusted in `src/sender/selection/`:
+
+**Enhanced Mode (`enhanced.rs`):**
+- `SWITCH_THRESHOLD`: 1.02 (2% hysteresis) - increase for more stability, decrease for faster response
+
+**Quality Scoring (`quality.rs`):**
+- `STARTUP_GRACE_PERIOD_MS`: 30000ms (30 seconds) - grace period before quality penalties apply
+- `PERFECT_CONNECTION_BONUS`: 1.1 (10% bonus) - bonus for connections with no NAKs
+- `STARTUP_NAK_PENALTY`: 0.98 (2% penalty) - light penalty during grace period
+- `HALF_LIFE_MS`: 2000ms (2 seconds) - NAK penalty decay speed
+- `MAX_PENALTY`: 0.5 (50% penalty) - maximum initial penalty after NAK
+- `NAK_BURST_THRESHOLD`: 5 NAKs - minimum burst size to trigger extra penalty
+- `NAK_BURST_MAX_AGE_MS`: 3000ms (3 seconds) - max age for burst penalty
+- `NAK_BURST_PENALTY`: 0.7 (30% reduction) - multiplier applied for bursts
+- `RTT_BONUS_THRESHOLD_MS`: 200ms - RTT threshold for bonus calculation
+- `MIN_RTT_MS`: 50ms - minimum RTT for calculation (prevents division issues)
+- `MAX_RTT_BONUS`: 1.03 (3% max bonus) - maximum RTT bonus multiplier
+
+**Exploration (`enhanced.rs`):**
+- Exploration period: `should_explore_now()` function, currently 30s - adjust exploration interval
+
+### Runtime Optimization
+
+For maximum throughput:
+- Use enhanced mode (default) to automatically avoid degraded connections
+- Ensure adequate SRT buffer size (`SRTO_SNDDATA`)
+- Monitor for connection timeouts - these interrupt traffic flow
+- Use `RUST_LOG=info` for minimal logging overhead (avoid debug in production)
+
+For maximum stability:
+- Use classic mode (`--classic`) for predictable, simple behavior
+- Disable exploration (`exploration off`) if not needed
+- Increase hysteresis threshold if experiencing unnecessary switching
+

@@ -17,7 +17,8 @@ pub mod sender;
 pub mod toggles;
 pub mod utils;
 
-#[cfg(test)]
+// Test helpers module - available when test-internals feature is enabled
+#[cfg(any(test, feature = "test-internals"))]
 pub mod test_helpers;
 
 #[cfg(test)]

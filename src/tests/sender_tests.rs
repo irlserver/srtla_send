@@ -24,7 +24,7 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&connections, None, false, false, true);
+        let selected = select_connection_idx(&connections, None, 0, 0, false, false, true);
         assert_eq!(selected, Some(1));
     }
 
@@ -44,7 +44,7 @@ mod tests {
         connections[2].congestion.nak_count = 3;
         connections[2].congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
 
-        let selected = select_connection_idx(&connections, None, true, false, false);
+        let selected = select_connection_idx(&connections, None, 0, 0, true, false, false);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -65,10 +65,175 @@ mod tests {
         connections[1].congestion.nak_burst_count = 0;
         connections[1].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
 
-        let selected = select_connection_idx(&connections, None, true, false, false);
+        let selected = select_connection_idx(&connections, None, 0, 0, true, false, false);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
+    }
+
+    #[test]
+    fn test_time_based_switch_dampening_blocks_within_cooldown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup: Connection 0 is currently selected, Connection 1 has better score
+        connections[0].in_flight_packets = 5; // Lower score
+        connections[1].in_flight_packets = 0; // Best score
+        connections[2].in_flight_packets = 10; // Worst score
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within 500ms cooldown)
+
+        // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
+        // This prevents rapid thrashing between connections under bursty score changes
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            selected,
+            Some(0),
+            "Should continue routing all packets via current connection during cooldown period"
+        );
+    }
+
+    #[test]
+    fn test_time_based_switch_dampening_allows_after_cooldown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup: Connection 0 is currently selected, Connection 1 has significantly better score
+        connections[0].in_flight_packets = 5; // Lower score
+        connections[1].in_flight_packets = 0; // Best score (significantly better, exceeds 2% hysteresis)
+        connections[2].in_flight_packets = 10; // Worst score
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 600; // 600ms after last switch (past 500ms cooldown)
+
+        // After cooldown: per-packet selection can now choose the better connection
+        // From this point forward, all subsequent packets will route via connection 1
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            selected,
+            Some(1),
+            "Should switch per-packet routing to better connection after cooldown expires"
+        );
+    }
+
+    #[test]
+    fn test_time_based_switch_dampening_allows_if_current_invalid() {
+        use tokio::time::{Duration, Instant};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup: Connection 0 is currently selected but becomes timed out
+        connections[0].in_flight_packets = 5;
+        // Simulate timeout by setting last_received to 6 seconds ago (CONN_TIMEOUT is 5 seconds)
+        connections[0].last_received = Some(Instant::now() - Duration::from_secs(6));
+        connections[1].in_flight_packets = 0; // Best score
+        connections[2].in_flight_packets = 10;
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 200; // Within cooldown period
+
+        // Cooldown is bypassed when current connection is invalid/timed out
+        // Per-packet selection immediately switches to valid connection
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            selected,
+            Some(1),
+            "Should immediately route packets via valid connection if current is timed out, \
+             bypassing cooldown"
+        );
+    }
+
+    #[test]
+    fn test_exploration_blocked_during_cooldown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup connections with distinct scores
+        connections[0].in_flight_packets = 2; // Currently selected
+        connections[1].in_flight_packets = 0; // Best
+        connections[2].in_flight_packets = 1; // Second-best
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 200; // Within cooldown
+
+        // Enable exploration, but should be blocked by cooldown
+        // This prevents exploration from causing rapid per-packet routing changes
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            true,
+            true, // exploration enabled
+            false,
+        );
+
+        // Should continue routing packets via connection 0, not explore during cooldown
+        assert_eq!(
+            selected,
+            Some(0),
+            "Exploration-triggered per-packet routing changes should be blocked during cooldown"
+        );
+    }
+
+    #[test]
+    fn test_classic_mode_ignores_time_dampening() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // Setup: Connection 0 is currently selected, Connection 1 has better score
+        connections[0].in_flight_packets = 5; // Lower score
+        connections[1].in_flight_packets = 0; // Best score
+        connections[2].in_flight_packets = 10; // Worst score
+
+        let last_switch_time_ms = now_ms();
+        let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within cooldown)
+
+        // Classic mode: per-packet selection ALWAYS picks highest score connection
+        // No dampening, no hysteresis - matches original C implementation
+        let selected = select_connection_idx(
+            &connections,
+            Some(0),
+            last_switch_time_ms,
+            current_time_ms,
+            false,
+            false,
+            true, // classic mode
+        );
+
+        // Per-packet routing immediately uses connection 1 (best score)
+        assert_eq!(
+            selected,
+            Some(1),
+            "Classic mode per-packet selection should ignore time-based dampening and always \
+             route via highest score connection"
+        );
     }
 
     #[test]
@@ -272,7 +437,7 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&connections, None, false, false, false);
+        let selected = select_connection_idx(&connections, None, 0, 0, false, false, false);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -284,7 +449,7 @@ mod tests {
         let connections = rt.block_on(create_test_connections(3));
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&connections, None, false, true, false);
+        let _selected = select_connection_idx(&connections, None, 0, 0, false, true, false);
 
         // The result depends on timing, but should not panic
     }
@@ -313,35 +478,67 @@ mod tests {
             .next()
             .unwrap();
 
-        conn.reconnection.connection_established_ms = now_ms() - 15000;
+        conn.reconnection.connection_established_ms = now_ms() - 35000;
 
-        assert_eq!(calculate_quality_multiplier(&conn), 1.2);
+        assert_eq!(calculate_quality_multiplier(&conn), 1.1);
 
-        // Test connection with recent NAK (< 2 seconds ago) - heavy penalty
+        // Test connection with recent NAK - exponential decay formula
+        // With exponential decay: penalty = 0.5 * e^(-age_ms / 2000), multiplier = 1.0 - penalty
         conn.congestion.nak_count = 1;
-        conn.congestion.last_nak_time_ms = now_ms() - 1000;
-        assert_eq!(calculate_quality_multiplier(&conn), 0.1);
 
-        // Test connection with NAK 3-5 seconds ago - moderate penalty
-        conn.congestion.last_nak_time_ms = now_ms() - 3000;
-        assert_eq!(calculate_quality_multiplier(&conn), 0.5);
+        // 500ms ago: multiplier ≈ 0.61 (strong penalty, recent NAK)
+        conn.congestion.last_nak_time_ms = now_ms() - 500;
+        let mult_500 = calculate_quality_multiplier(&conn);
+        assert!(
+            (mult_500 - 0.61).abs() < 0.02,
+            "Expected ~0.61, got {}",
+            mult_500
+        );
 
-        // Test connection with NAK 5-10 seconds ago - light penalty
-        conn.congestion.last_nak_time_ms = now_ms() - 7000;
-        assert_eq!(calculate_quality_multiplier(&conn), 0.8);
+        // 2000ms ago (half-life): multiplier ≈ 0.816 (moderate penalty)
+        conn.congestion.last_nak_time_ms = now_ms() - 2000;
+        let mult_2000 = calculate_quality_multiplier(&conn);
+        assert!(
+            (mult_2000 - 0.816).abs() < 0.02,
+            "Expected ~0.816, got {}",
+            mult_2000
+        );
 
-        // Test connection with NAK > 10 seconds ago and no total NAKs - bonus
+        // 5000ms ago: multiplier ≈ 0.96 (light penalty)
+        conn.congestion.last_nak_time_ms = now_ms() - 5000;
+        let mult_5000 = calculate_quality_multiplier(&conn);
+        assert!(
+            (mult_5000 - 0.96).abs() < 0.02,
+            "Expected ~0.96, got {}",
+            mult_5000
+        );
+
+        // 15000ms ago: multiplier ≈ 1.0 (essentially recovered)
         conn.congestion.last_nak_time_ms = now_ms() - 15000;
+        let mult_15000 = calculate_quality_multiplier(&conn);
+        assert!(
+            (mult_15000 - 1.0).abs() < 0.02,
+            "Expected ~1.0, got {}",
+            mult_15000
+        );
+
+        // Test connection with no NAKs ever - bonus
+        // Need to clear the last_nak_time_ms to simulate truly no NAKs
         conn.congestion.nak_count = 0;
-        assert_eq!(calculate_quality_multiplier(&conn), 1.2);
+        conn.congestion.last_nak_time_ms = 0; // Clear NAK history
+        assert_eq!(calculate_quality_multiplier(&conn), 1.1);
 
-        // Test connection with NAK > 10 seconds ago and some NAKs - no penalty/bonus
+        // Test burst NAK penalty (requires ≥5 NAKs in burst, within 3s)
+        // Burst penalty is 0.7x additional multiplier
         conn.congestion.nak_count = 5;
-        assert_eq!(calculate_quality_multiplier(&conn), 1.0);
-
-        // Test burst NAK penalty
-        conn.congestion.last_nak_time_ms = now_ms() - 3000;
-        conn.congestion.nak_burst_count = 3;
-        assert_eq!(calculate_quality_multiplier(&conn), 0.5 * 0.5); // 0.5 * 0.5 = 0.25
+        conn.congestion.last_nak_time_ms = now_ms() - 2000;
+        conn.congestion.nak_burst_count = 5;
+        let mult_burst = calculate_quality_multiplier(&conn);
+        // At 2000ms: base multiplier ≈ 0.816, with burst: 0.816 * 0.7 ≈ 0.571
+        assert!(
+            (mult_burst - 0.571).abs() < 0.02,
+            "Expected ~0.571, got {}",
+            mult_burst
+        );
     }
 }

@@ -208,6 +208,7 @@ pub async fn handle_srt_packet(
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
+    last_switch_time_ms: &mut u64,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
@@ -231,6 +232,7 @@ pub async fn handle_srt_packet(
                         seq,
                         connections,
                         last_selected_idx,
+                        last_switch_time_ms,
                         seq_to_conn,
                         seq_order,
                         last_client_addr,
@@ -254,9 +256,12 @@ pub async fn handle_srt_packet(
             let effective_enable_quality = enable_quality && !classic;
             let effective_enable_explore = enable_explore && !classic;
 
+            let current_time_ms = now_ms();
             let sel_idx = select_connection_idx(
                 connections,
                 *last_selected_idx,
+                *last_switch_time_ms,
+                current_time_ms,
                 effective_enable_quality,
                 effective_enable_explore,
                 classic,
@@ -268,6 +273,7 @@ pub async fn handle_srt_packet(
                     seq,
                     connections,
                     last_selected_idx,
+                    last_switch_time_ms,
                     seq_to_conn,
                     seq_order,
                     last_client_addr,
@@ -295,6 +301,7 @@ pub async fn forward_via_connection(
     seq: Option<u32>,
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
+    last_switch_time_ms: &mut u64,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
@@ -319,6 +326,7 @@ pub async fn forward_via_connection(
             );
         }
         *last_selected_idx = Some(sel_idx);
+        *last_switch_time_ms = now_ms(); // Track when switch occurred
     }
     let conn = &mut connections[sel_idx];
     if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
