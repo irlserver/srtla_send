@@ -317,7 +317,7 @@ mod tests {
         conn.register_packet(700);
         assert_eq!(conn.in_flight_packets, 6);
 
-        // First ACK - should increase window immediately (same as classic)
+        // First ACK - should NOT increase window immediately (boundary case: 5*1000 > 5000 is false)
         // ACK decrements in_flight 6→5, then check: 5*1000 > 5000? NO (boundary)
         let found2 = conn.handle_srtla_ack_specific(200, false);
         assert!(found2);
