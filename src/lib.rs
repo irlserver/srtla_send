@@ -11,6 +11,7 @@
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod connection;
+pub mod extensions;
 pub mod protocol;
 pub mod registration;
 pub mod sender;

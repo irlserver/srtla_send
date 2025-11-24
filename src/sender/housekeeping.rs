@@ -13,6 +13,13 @@ use crate::utils::now_ms;
 
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
+// IRLSERVER EXTENSION: Interval for sending connection info telemetry packets
+// Send connection statistics every 5 seconds for monitoring purposes
+//
+// NOTE: Standard SRTLA receivers should ignore unknown packet types (0x9Fxx),
+// but this can be disabled if needed by commenting out the send logic below.
+const CONN_INFO_INTERVAL_SECS: u64 = 5;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
@@ -91,6 +98,22 @@ pub async fn handle_housekeeping(
         if conn.needs_rtt_measurement() {
             let _ = conn.send_keepalive().await;
         }
+
+        // IRLSERVER EXTENSION: Send connection info telemetry periodically
+        // Only send if extension is negotiated, connected, and enough time has passed
+        if conn.connected && conn.has_extension(crate::extensions::SRTLA_EXT_CAP_CONN_INFO) {
+            let should_send_info = conn
+                .last_sent
+                .map(|last| last.elapsed().as_secs() >= CONN_INFO_INTERVAL_SECS)
+                .unwrap_or(false); // Don't send immediately after connection
+
+            if should_send_info {
+                if let Err(e) = conn.send_connection_info().await {
+                    debug!("{}: Failed to send connection info: {}", conn.label, e);
+                }
+            }
+        }
+
         if !classic {
             conn.perform_window_recovery();
         }

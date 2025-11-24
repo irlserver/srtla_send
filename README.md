@@ -27,6 +27,7 @@ The burst NAK penalty logic, quality scoring, and connection exploration feature
 - Keepalives with RTT measurement and time-based window recovery
 - Live IP list reload on Unix via SIGHUP
 - Runtime toggles via stdin or Unix socket (no restart required)
+- **[Protocol Extensions](docs/EXTENSIONS.md)**: Optional per-connection telemetry with automatic capability negotiation
 
 ### Enhanced Mode (Default)
 - **Exponential NAK Decay**: Smooth recovery from packet loss over ~8 seconds

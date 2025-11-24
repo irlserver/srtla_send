@@ -8,6 +8,7 @@ use tracing_subscriber::EnvFilter;
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod connection;
+mod extensions;
 mod protocol;
 mod registration;
 mod sender;

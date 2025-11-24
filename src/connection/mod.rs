@@ -19,8 +19,9 @@ use smallvec::SmallVec;
 pub use socket::{bind_from_ip, resolve_remote};
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
+use crate::extensions::{SRTLA_EXT_ACK, SRTLA_EXT_CAP_CONN_INFO};
 use crate::protocol::*;
 use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
 use crate::utils::now_ms;
@@ -93,6 +94,15 @@ pub struct SrtlaConnection {
     pub reconnection: ReconnectionState,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) reconnection: ReconnectionState,
+    // IRLSERVER EXTENSION: Track negotiated extension capabilities
+    #[cfg(feature = "test-internals")]
+    pub extensions_negotiated: bool,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) extensions_negotiated: bool,
+    #[cfg(feature = "test-internals")]
+    pub receiver_capabilities: u32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) receiver_capabilities: u32,
 }
 
 impl SrtlaConnection {
@@ -128,6 +138,8 @@ impl SrtlaConnection {
                 startup_grace_deadline_ms: startup_deadline,
                 ..Default::default()
             },
+            extensions_negotiated: false,
+            receiver_capabilities: 0,
         })
     }
 
@@ -169,6 +181,69 @@ impl SrtlaConnection {
             self.rtt.record_keepalive_sent();
         }
         Ok(())
+    }
+
+    /// IRLSERVER EXTENSION: Send connection info telemetry packet
+    ///
+    /// Sends a packet containing current connection statistics to the receiver
+    /// for monitoring, debugging, and potential adaptive bonding features.
+    ///
+    /// This is an irlserver-specific SRTLA extension (packet type 0x9F00) and
+    /// may not be recognized by standard SRTLA receivers.
+    pub async fn send_connection_info(&mut self) -> Result<()> {
+        use crate::extensions::create_connection_info_packet;
+
+        let pkt = create_connection_info_packet(
+            self.conn_id,                             // Connection ID
+            self.window,                              // Current window size
+            self.in_flight_packets,                   // In-flight packets
+            (self.rtt.smooth_rtt_ms * 1000.0) as u64, // RTT in microseconds
+            self.congestion.nak_count as u32,         // NAK count (convert i32 to u32)
+            self.bitrate.current_bitrate_bps as u32,  // Bitrate
+        );
+
+        self.socket.send(&pkt).await?;
+        self.last_sent = Some(Instant::now());
+
+        debug!(
+            "{}: Sent connection info (window={}, in_flight={}, rtt={:.1}ms, naks={}, \
+             bitrate={:.2}Mbps)",
+            self.label,
+            self.window,
+            self.in_flight_packets,
+            self.rtt.smooth_rtt_ms,
+            self.congestion.nak_count,
+            self.bitrate.current_bitrate_bps / 1_000_000.0
+        );
+
+        Ok(())
+    }
+
+    /// IRLSERVER EXTENSION: Send extension HELLO packet
+    ///
+    /// Announces our supported extensions to the receiver. Should be called
+    /// once after successful REG3 registration.
+    pub async fn send_extension_hello(&mut self) -> Result<()> {
+        use crate::extensions::create_extension_hello;
+
+        // Announce all extensions we support
+        let our_capabilities = SRTLA_EXT_CAP_CONN_INFO; // Add more with | operator
+
+        let pkt = create_extension_hello(our_capabilities);
+        self.socket.send(&pkt).await?;
+        self.last_sent = Some(Instant::now());
+
+        debug!(
+            "{}: Sent extension HELLO (capabilities=0x{:08x})",
+            self.label, our_capabilities
+        );
+
+        Ok(())
+    }
+
+    /// IRLSERVER EXTENSION: Check if a specific extension is mutually supported
+    pub fn has_extension(&self, capability_flag: u32) -> bool {
+        self.extensions_negotiated && (self.receiver_capabilities & capability_flag) != 0
     }
 
     pub async fn send_srtla_packet(&mut self, pkt: &[u8]) -> Result<()> {
@@ -255,6 +330,11 @@ impl SrtlaConnection {
                             self.reconnection.connection_established_ms = crate::utils::now_ms();
                         }
                         self.reconnection.mark_success(&self.label);
+
+                        // IRLSERVER EXTENSION: Send extension HELLO after successful registration
+                        if let Err(e) = self.send_extension_hello().await {
+                            debug!("{}: Failed to send extension HELLO: {}", self.label, e);
+                        }
                     }
                     RegistrationEvent::RegErr => {
                         self.connected = false;
@@ -301,6 +381,17 @@ impl SrtlaConnection {
                 }
             } else if pt == SRTLA_TYPE_KEEPALIVE {
                 self.rtt.handle_keepalive_response(data, &self.label);
+            } else if pt == SRTLA_EXT_ACK {
+                // IRLSERVER EXTENSION: Handle extension ACK from receiver
+                use crate::extensions::parse_extension_packet;
+                if let Some(caps) = parse_extension_packet(data) {
+                    self.extensions_negotiated = true;
+                    self.receiver_capabilities = caps.capabilities;
+                    info!(
+                        "{}: Extension negotiation complete (receiver capabilities=0x{:08x})",
+                        self.label, caps.capabilities
+                    );
+                }
             } else {
                 incoming.forward_to_client.push(SmallVec::from_slice(data));
             }

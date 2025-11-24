@@ -45,6 +45,8 @@ pub async fn create_test_connection() -> SrtlaConnection {
             startup_grace_deadline_ms: now_ms(),
             ..Default::default()
         },
+        extensions_negotiated: false,
+        receiver_capabilities: 0,
     }
 }
 
@@ -82,6 +84,8 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
                 startup_grace_deadline_ms: now_ms(),
                 ..Default::default()
             },
+            extensions_negotiated: false,
+            receiver_capabilities: 0,
         };
         connections.push(conn);
     }
