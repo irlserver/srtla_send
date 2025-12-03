@@ -194,12 +194,12 @@ impl SrtlaConnection {
         use crate::extensions::create_connection_info_packet;
 
         let pkt = create_connection_info_packet(
-            self.conn_id,                             // Connection ID
-            self.window,                              // Current window size
-            self.in_flight_packets,                   // In-flight packets
+            self.conn_id as u32,    // Connection ID (truncate u64 to u32 for protocol)
+            self.window,            // Current window size
+            self.in_flight_packets, // In-flight packets
             (self.rtt.smooth_rtt_ms * 1000.0) as u64, // RTT in microseconds
-            self.congestion.nak_count as u32,         // NAK count (convert i32 to u32)
-            self.bitrate.current_bitrate_bps as u32,  // Bitrate
+            self.congestion.nak_count as u32, // NAK count (convert i32 to u32)
+            self.bitrate.current_bitrate_bps as u32, // Bitrate
         );
 
         self.socket.send(&pkt).await?;

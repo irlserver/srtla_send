@@ -189,14 +189,14 @@ pub fn has_extension(capabilities: u32, flag: u32) -> bool {
 ///
 /// # Arguments
 ///
-/// * `conn_id` - Unique connection identifier
+/// * `conn_id` - Unique connection identifier (u32 per protocol specification)
 /// * `window` - Current congestion window size
 /// * `in_flight` - Number of packets currently in flight
 /// * `rtt_us` - Smoothed round-trip time in microseconds
 /// * `nak_count` - Total NAK count for this connection
 /// * `bitrate_bps` - Current bitrate in bytes per second
 pub fn create_connection_info_packet(
-    conn_id: u64,
+    conn_id: u32,
     window: i32,
     in_flight: i32,
     rtt_us: u64,
@@ -211,8 +211,8 @@ pub fn create_connection_info_packet(
     // Version (bytes 2-3)
     pkt[2..4].copy_from_slice(&SRTLA_EXT_CONN_INFO_VERSION.to_be_bytes());
 
-    // Connection ID (bytes 4-7) - only use lower 32 bits
-    pkt[4..8].copy_from_slice(&(conn_id as u32).to_be_bytes());
+    // Connection ID (bytes 4-7)
+    pkt[4..8].copy_from_slice(&conn_id.to_be_bytes());
 
     // Window size (bytes 8-11)
     pkt[8..12].copy_from_slice(&window.to_be_bytes());
