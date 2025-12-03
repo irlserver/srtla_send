@@ -204,7 +204,7 @@ impl SrtlaConnection {
             self.in_flight_packets, // In-flight packets
             (self.rtt.smooth_rtt_ms * 1000.0) as u64, // RTT in microseconds
             self.congestion.nak_count as u32, // NAK count (convert i32 to u32)
-            self.bitrate.current_bitrate_bps as u32, // Bitrate
+            (self.bitrate.current_bitrate_bps / 8.0) as u32, // Bitrate in bytes/sec (convert from bps)
         );
 
         self.socket.send(&pkt).await?;

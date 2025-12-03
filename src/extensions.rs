@@ -104,7 +104,7 @@ pub struct ConnectionInfoData {
     pub in_flight: i32,
     pub rtt_us: u64,
     pub nak_count: u32,
-    pub bitrate_bps: u32,
+    pub bitrate_bytes_per_sec: u32,
 }
 
 // ============================================================================
@@ -194,14 +194,14 @@ pub fn has_extension(capabilities: u32, flag: u32) -> bool {
 /// * `in_flight` - Number of packets currently in flight
 /// * `rtt_us` - Smoothed round-trip time in microseconds
 /// * `nak_count` - Total NAK count for this connection
-/// * `bitrate_bps` - Current bitrate in bytes per second
+/// * `bitrate_bytes_per_sec` - Current bitrate in bytes per second
 pub fn create_connection_info_packet(
     conn_id: u32,
     window: i32,
     in_flight: i32,
     rtt_us: u64,
     nak_count: u32,
-    bitrate_bps: u32,
+    bitrate_bytes_per_sec: u32,
 ) -> [u8; SRTLA_EXT_CONN_INFO_LEN] {
     let mut pkt = [0u8; SRTLA_EXT_CONN_INFO_LEN];
 
@@ -226,8 +226,8 @@ pub fn create_connection_info_packet(
     // NAK count (bytes 24-27)
     pkt[24..28].copy_from_slice(&nak_count.to_be_bytes());
 
-    // Bitrate (bytes 28-31)
-    pkt[28..32].copy_from_slice(&bitrate_bps.to_be_bytes());
+    // Bitrate in bytes/sec (bytes 28-31)
+    pkt[28..32].copy_from_slice(&bitrate_bytes_per_sec.to_be_bytes());
 
     pkt
 }
@@ -252,7 +252,7 @@ pub fn parse_connection_info(buf: &[u8]) -> Option<ConnectionInfoData> {
         buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
     ]);
     let nak_count = u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]);
-    let bitrate_bps = u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]);
+    let bitrate_bytes_per_sec = u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]);
 
     Some(ConnectionInfoData {
         version,
@@ -261,7 +261,7 @@ pub fn parse_connection_info(buf: &[u8]) -> Option<ConnectionInfoData> {
         in_flight,
         rtt_us,
         nak_count,
-        bitrate_bps,
+        bitrate_bytes_per_sec,
     })
 }
 
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(info.in_flight, 8);
         assert_eq!(info.rtt_us, 200_000);
         assert_eq!(info.nak_count, 25);
-        assert_eq!(info.bitrate_bps, 8_000_000);
+        assert_eq!(info.bitrate_bytes_per_sec, 8_000_000);
     }
 
     #[test]

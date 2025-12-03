@@ -156,9 +156,18 @@ If a receiver doesn't respond with EXT_ACK, the sender:
 ### With Future Versions
 
 The extension protocol is designed for forward compatibility:
-- **Version field**: Allows protocol evolution
+- **Version field**: Allows protocol evolution (currently 0x0001)
+- **Version validation**: Receivers MUST validate version fields and reject mismatched packets
 - **Bitmask**: New features can be added without breaking old implementations
 - **Graceful degradation**: Only common features are used
+
+#### Version Validation Policy
+
+Both EXT_HELLO and CONN_INFO packets include a version field that MUST be validated:
+
+- **EXT_HELLO**: If version doesn't match, log error and ignore packet (no EXT_ACK sent)
+- **CONN_INFO**: If version doesn't match, log warning and ignore packet
+- **Rationale**: Prevents protocol confusion and ensures data is interpreted correctly
 
 ## Implementation Details
 
@@ -211,6 +220,16 @@ To implement extension support in an SRTLA receiver:
 if packet_type == SRTLA_EXT_HELLO {
     let caps = parse_extension_packet(&packet)?;
     
+    // Validate protocol version
+    if caps.version != SRTLA_EXT_VERSION {
+        log::error!(
+            "Extension version mismatch: received=0x{:04X}, expected=0x{:04X}",
+            caps.version,
+            SRTLA_EXT_VERSION
+        );
+        return Ok(()); // Ignore incompatible version
+    }
+    
     // Determine what you support
     let our_caps = SRTLA_EXT_CAP_CONN_INFO; // Add more with |
     
@@ -226,13 +245,24 @@ if packet_type == SRTLA_EXT_HELLO {
 if packet_type == SRTLA_EXT_CONN_INFO {
     let info = parse_connection_info(&packet)?;
     
+    // Validate protocol version
+    if info.version != SRTLA_EXT_VERSION {
+        log::warn!(
+            "CONN_INFO version mismatch: received=0x{:04X}, expected=0x{:04X}",
+            info.version,
+            SRTLA_EXT_VERSION
+        );
+        return Ok(()); // Ignore incompatible version
+    }
+    
     // Log or process the statistics
     log::info!(
-        "Uplink {}: window={}, rtt={}μs, naks={}",
+        "Uplink {}: window={}, rtt={}μs, naks={}, bitrate={}KB/s",
         info.conn_id,
         info.window,
         info.rtt_us,
-        info.nak_count
+        info.nak_count,
+        info.bitrate_bytes_per_sec / 1000
     );
 }
 ```
