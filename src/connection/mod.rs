@@ -392,7 +392,14 @@ impl SrtlaConnection {
             } else if pt == SRTLA_EXT_ACK {
                 // IRLSERVER EXTENSION: Handle extension ACK from receiver
                 use crate::extensions::parse_extension_packet;
-                if let Some(caps) = parse_extension_packet(data) {
+                    if let Some(caps) = parse_extension_packet(data) {
+                        if caps.version != crate::extensions::SRTLA_EXT_VERSION {
+                        warn!(
+                            "{}: Extension version mismatch (received=0x{:04x}, expected=0x{:04x})",
+                            self.label, caps.version, crate::extensions::SRTLA_EXT_VERSION
+                        );
+                        return Ok(());
+                    }
                     self.extensions_negotiated = true;
                     self.receiver_capabilities = caps.capabilities;
                     info!(
