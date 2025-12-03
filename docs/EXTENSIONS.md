@@ -190,12 +190,27 @@ use srtla_send::extensions::{
     has_extension,
     
     // Types
+
     ExtensionCapabilities,
     ConnectionInfoData,
 };
 ```
 
+EXT_ACK packets use a fixed 10-byte layout, so receivers often add a helper to build them consistently:
+
+```rust
+fn create_extension_ack(capabilities: u32) -> [u8; SRTLA_EXT_HELLO_LEN] {
+    let mut pkt = [0u8; SRTLA_EXT_HELLO_LEN];
+    pkt[0..2].copy_from_slice(&SRTLA_EXT_ACK.to_be_bytes());
+    pkt[2..4].copy_from_slice(&SRTLA_EXT_VERSION.to_be_bytes());
+    pkt[4..8].copy_from_slice(&capabilities.to_be_bytes());
+    pkt[8..10].copy_from_slice(&0u16.to_be_bytes());
+    pkt
+}
+```
+
 ### Connection State
+
 
 Each `SrtlaConnection` tracks:
 ```rust
@@ -233,13 +248,16 @@ if packet_type == SRTLA_EXT_HELLO {
     // Determine what you support
     let our_caps = SRTLA_EXT_CAP_CONN_INFO; // Add more with |
     
-    // Respond with EXT_ACK
-    let ack = create_extension_hello(our_caps);  // Same format
+    // Respond with EXT_ACK (0x9FF1)
+    let ack = create_extension_ack(our_caps);
     send_packet(ack)?;
 }
 ```
 
+The receiver MUST reply with an `EXT_ACK` (type `0x9FF1`) so the sender knows negotiation succeeded. The helper above keeps the payload consistent while explicitly setting the type to the ACK opcode.
+
 ### 2. Handle CONN_INFO
+
 
 ```rust
 if packet_type == SRTLA_EXT_CONN_INFO {
