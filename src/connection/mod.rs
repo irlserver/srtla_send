@@ -77,6 +77,10 @@ pub struct SrtlaConnection {
     pub last_sent: Option<Instant>,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) last_sent: Option<Instant>,
+    #[cfg(feature = "test-internals")]
+    pub last_conn_info_sent: Option<Instant>,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) last_conn_info_sent: Option<Instant>,
     // Sub-structs for organized state management
     #[cfg(feature = "test-internals")]
     pub rtt: RttTracker,
@@ -131,6 +135,7 @@ impl SrtlaConnection {
             packet_idx: 0,
             last_received: None,
             last_sent: None,
+            last_conn_info_sent: None,
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
             bitrate: BitrateTracker::default(),
@@ -204,6 +209,7 @@ impl SrtlaConnection {
 
         self.socket.send(&pkt).await?;
         self.last_sent = Some(Instant::now());
+        self.last_conn_info_sent = Some(Instant::now());
 
         debug!(
             "{}: Sent connection info (window={}, in_flight={}, rtt={:.1}ms, naks={}, \
@@ -332,6 +338,8 @@ impl SrtlaConnection {
                         self.reconnection.mark_success(&self.label);
 
                         // IRLSERVER EXTENSION: Send extension HELLO after successful registration
+                        // Seed last_conn_info_sent to delay first telemetry by ~5 seconds
+                        self.last_conn_info_sent = Some(Instant::now());
                         if let Err(e) = self.send_extension_hello().await {
                             debug!("{}: Failed to send extension HELLO: {}", self.label, e);
                         }

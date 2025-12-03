@@ -103,9 +103,9 @@ pub async fn handle_housekeeping(
         // Only send if extension is negotiated, connected, and enough time has passed
         if conn.connected && conn.has_extension(crate::extensions::SRTLA_EXT_CAP_CONN_INFO) {
             let should_send_info = conn
-                .last_sent
+                .last_conn_info_sent
                 .map(|last| last.elapsed().as_secs() >= CONN_INFO_INTERVAL_SECS)
-                .unwrap_or(false); // Don't send immediately after connection
+                .unwrap_or(true); // Send immediately after connection if never sent
 
             if should_send_info {
                 if let Err(e) = conn.send_connection_info().await {
