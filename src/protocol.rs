@@ -42,6 +42,11 @@ pub const WINDOW_INCR: i32 = 30;
 
 pub const PKT_LOG_SIZE: usize = 256;
 
+// Extended KEEPALIVE with connection info
+pub const SRTLA_KEEPALIVE_MAGIC: u16 = 0xc01f; // "Connection Info" marker
+pub const SRTLA_KEEPALIVE_EXT_LEN: usize = 42; // Extended keepalive packet length
+pub const SRTLA_KEEPALIVE_EXT_VERSION: u16 = 0x0001; // Protocol version
+
 #[inline]
 pub fn get_packet_type(buf: &[u8]) -> Option<u16> {
     if buf.len() < 2 {
@@ -77,6 +82,7 @@ pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG2_LEN] 
     pkt
 }
 
+#[allow(dead_code)]
 pub fn create_keepalive_packet() -> [u8; 10] {
     let mut pkt = [0u8; 10];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
@@ -84,6 +90,55 @@ pub fn create_keepalive_packet() -> [u8; 10] {
     for i in 0..8 {
         pkt[2 + i] = ((ts >> (56 - i * 8)) & 0xff) as u8;
     }
+    pkt
+}
+
+/// Connection info data for extended keepalive
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionInfo {
+    pub conn_id: u32,
+    pub window: i32,
+    pub in_flight: i32,
+    pub rtt_us: u64,
+    pub nak_count: u32,
+    pub bitrate_bytes_per_sec: u32,
+}
+
+/// Create extended KEEPALIVE packet with connection info
+///
+/// Extended format (42 bytes):
+/// - Bytes 0-1:   Type (0x9000)
+/// - Bytes 2-9:   Timestamp (u64 ms)
+/// - Bytes 10-11: Magic (0xC01F)
+/// - Bytes 12-13: Version (0x0001)
+/// - Bytes 14-17: Connection ID (u32)
+/// - Bytes 18-21: Window (i32)
+/// - Bytes 22-25: In-flight (i32)
+/// - Bytes 26-33: RTT μs (u64)
+/// - Bytes 34-37: NAK count (u32)
+/// - Bytes 38-41: Bitrate bytes/sec (u32)
+///
+/// This packet is backwards compatible:
+/// - Old receivers read bytes 0-9 (type + timestamp) and ignore the rest
+/// - New receivers detect magic at bytes 10-11 and parse connection info
+pub fn create_keepalive_packet_ext(info: ConnectionInfo) -> [u8; SRTLA_KEEPALIVE_EXT_LEN] {
+    let mut pkt = [0u8; SRTLA_KEEPALIVE_EXT_LEN];
+
+    // Standard keepalive header (bytes 0-9)
+    pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
+    let ts = chrono::Utc::now().timestamp_millis() as u64;
+    pkt[2..10].copy_from_slice(&ts.to_be_bytes());
+
+    // Extended data (bytes 10-41)
+    pkt[10..12].copy_from_slice(&SRTLA_KEEPALIVE_MAGIC.to_be_bytes());
+    pkt[12..14].copy_from_slice(&SRTLA_KEEPALIVE_EXT_VERSION.to_be_bytes());
+    pkt[14..18].copy_from_slice(&info.conn_id.to_be_bytes());
+    pkt[18..22].copy_from_slice(&info.window.to_be_bytes());
+    pkt[22..26].copy_from_slice(&info.in_flight.to_be_bytes());
+    pkt[26..34].copy_from_slice(&info.rtt_us.to_be_bytes());
+    pkt[34..38].copy_from_slice(&info.nak_count.to_be_bytes());
+    pkt[38..42].copy_from_slice(&info.bitrate_bytes_per_sec.to_be_bytes());
+
     pkt
 }
 
@@ -99,6 +154,54 @@ pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
         ts = (ts << 8) | (buf[2 + i] as u64);
     }
     Some(ts)
+}
+
+/// Extract connection info from extended keepalive packet
+///
+/// Returns None if:
+/// - Packet is too short (< 42 bytes)
+/// - Not a KEEPALIVE packet
+/// - Magic number doesn't match (not an extended keepalive)
+/// - Version doesn't match
+#[allow(dead_code)]
+pub fn extract_keepalive_conn_info(buf: &[u8]) -> Option<ConnectionInfo> {
+    if buf.len() < SRTLA_KEEPALIVE_EXT_LEN {
+        return None;
+    }
+    if get_packet_type(buf)? != SRTLA_TYPE_KEEPALIVE {
+        return None;
+    }
+
+    // Check magic number at bytes 10-11
+    let magic = u16::from_be_bytes([buf[10], buf[11]]);
+    if magic != SRTLA_KEEPALIVE_MAGIC {
+        return None;
+    }
+
+    // Check version at bytes 12-13
+    let version = u16::from_be_bytes([buf[12], buf[13]]);
+    if version != SRTLA_KEEPALIVE_EXT_VERSION {
+        return None;
+    }
+
+    // Parse connection info
+    let conn_id = u32::from_be_bytes([buf[14], buf[15], buf[16], buf[17]]);
+    let window = i32::from_be_bytes([buf[18], buf[19], buf[20], buf[21]]);
+    let in_flight = i32::from_be_bytes([buf[22], buf[23], buf[24], buf[25]]);
+    let rtt_us = u64::from_be_bytes([
+        buf[26], buf[27], buf[28], buf[29], buf[30], buf[31], buf[32], buf[33],
+    ]);
+    let nak_count = u32::from_be_bytes([buf[34], buf[35], buf[36], buf[37]]);
+    let bitrate_bytes_per_sec = u32::from_be_bytes([buf[38], buf[39], buf[40], buf[41]]);
+
+    Some(ConnectionInfo {
+        conn_id,
+        window,
+        in_flight,
+        rtt_us,
+        nak_count,
+        bitrate_bytes_per_sec,
+    })
 }
 
 /// Create SRTLA ACK packet (used in tests and receiver implementations)
@@ -205,4 +308,94 @@ pub fn is_srtla_keepalive(buf: &[u8]) -> bool {
 #[allow(dead_code)]
 pub fn is_srt_ack(buf: &[u8]) -> bool {
     get_packet_type(buf) == Some(SRT_TYPE_ACK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extended_keepalive_roundtrip() {
+        let info = ConnectionInfo {
+            conn_id: 42,
+            window: 25000,
+            in_flight: 8,
+            rtt_us: 120_000,
+            nak_count: 5,
+            bitrate_bytes_per_sec: 2_500_000,
+        };
+
+        let pkt = create_keepalive_packet_ext(info);
+
+        // Verify packet length
+        assert_eq!(pkt.len(), SRTLA_KEEPALIVE_EXT_LEN);
+
+        // Verify packet type
+        assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
+
+        // Verify timestamp extraction works (backwards compatible)
+        assert!(extract_keepalive_timestamp(&pkt).is_some());
+
+        // Verify connection info extraction
+        let extracted = extract_keepalive_conn_info(&pkt).unwrap();
+        assert_eq!(extracted, info);
+    }
+
+    #[test]
+    fn test_standard_keepalive_no_conn_info() {
+        let pkt = create_keepalive_packet();
+
+        // Standard keepalive should not have connection info
+        assert_eq!(pkt.len(), 10);
+        assert!(extract_keepalive_timestamp(&pkt).is_some());
+        assert!(extract_keepalive_conn_info(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_extended_keepalive_backwards_compat() {
+        let info = ConnectionInfo {
+            conn_id: 1,
+            window: 20000,
+            in_flight: 5,
+            rtt_us: 100_000,
+            nak_count: 2,
+            bitrate_bytes_per_sec: 1_000_000,
+        };
+
+        let ext_pkt = create_keepalive_packet_ext(info);
+
+        // Old receiver behavior: only reads first 10 bytes
+        let timestamp_from_ext = extract_keepalive_timestamp(&ext_pkt);
+        assert!(timestamp_from_ext.is_some());
+
+        // Compare with standard keepalive timestamp
+        let std_pkt = create_keepalive_packet();
+        let timestamp_from_std = extract_keepalive_timestamp(&std_pkt);
+        assert!(timestamp_from_std.is_some());
+
+        // Both should be valid timestamps (within 1 second of each other)
+        let diff = timestamp_from_ext
+            .unwrap()
+            .abs_diff(timestamp_from_std.unwrap());
+        assert!(diff < 1000); // Less than 1 second difference
+    }
+
+    #[test]
+    fn test_extended_keepalive_wrong_magic() {
+        let mut pkt = [0u8; SRTLA_KEEPALIVE_EXT_LEN];
+        pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
+        pkt[10..12].copy_from_slice(&0xdeadu16.to_be_bytes()); // Wrong magic
+
+        assert!(extract_keepalive_conn_info(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_extended_keepalive_wrong_version() {
+        let mut pkt = [0u8; SRTLA_KEEPALIVE_EXT_LEN];
+        pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
+        pkt[10..12].copy_from_slice(&SRTLA_KEEPALIVE_MAGIC.to_be_bytes());
+        pkt[12..14].copy_from_slice(&0x9999u16.to_be_bytes()); // Wrong version
+
+        assert!(extract_keepalive_conn_info(&pkt).is_none());
+    }
 }
