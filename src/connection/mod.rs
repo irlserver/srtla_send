@@ -97,8 +97,7 @@ pub struct SrtlaConnection {
 
 impl SrtlaConnection {
     pub async fn connect_from_ip(ip: IpAddr, host: &str, port: u16) -> Result<Self> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+        use rand::RngCore;
 
         let remote = resolve_remote(host, port).await?;
         let sock = bind_from_ip(ip, 0)?;
@@ -108,7 +107,7 @@ impl SrtlaConnection {
         let socket = Arc::new(UdpSocket::from_std(std_sock)?);
         let startup_deadline = now_ms() + STARTUP_GRACE_MS;
         Ok(Self {
-            conn_id: NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed),
+            conn_id: rand::rng().next_u64(),
             socket,
             remote,
             local_ip: ip,
