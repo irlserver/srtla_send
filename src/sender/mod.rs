@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 // Re-export public items used by tests
@@ -88,9 +88,9 @@ pub async fn run_sender_with_toggles(
     let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
     sync_readers(&connections, &mut reader_handles, &packet_tx);
 
-    // Create instant ACK forwarding channel and shared client address
-    let (instant_tx, instant_rx) = std::sync::mpsc::channel::<SmallVec<u8, 64>>();
-    let shared_client_addr = Arc::new(Mutex::new(None::<SocketAddr>));
+    // Create instant ACK forwarding channel (sends client addr with packet)
+    let (instant_tx, mut instant_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(SocketAddr, SmallVec<u8, 64>)>();
 
     // Wrap local_listener in Arc for sharing
     let local_listener = Arc::new(local_listener);
@@ -98,18 +98,9 @@ pub async fn run_sender_with_toggles(
     // Spawn instant forwarding task
     {
         let local_listener_clone = local_listener.clone();
-        let shared_client_addr_clone = shared_client_addr.clone();
         tokio::spawn(async move {
-            while let Ok(ack_packet) = instant_rx.recv() {
-                let client_addr = {
-                    match shared_client_addr_clone.lock() {
-                        Ok(addr_guard) => *addr_guard,
-                        _ => None,
-                    }
-                };
-                if let Some(client) = client_addr {
-                    let _ = local_listener_clone.send_to(&ack_packet, client).await;
-                }
+            while let Some((client_addr, ack_packet)) = instant_rx.recv().await {
+                let _ = local_listener_clone.send_to(&ack_packet, client_addr).await;
             }
         });
     }
@@ -172,7 +163,6 @@ pub async fn run_sender_with_toggles(
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_client_addr,
-                    &shared_client_addr,
                     reg.has_connected,
                     &toggles,
                 )
@@ -312,7 +302,6 @@ pub async fn run_sender_with_toggles(
                     &mut seq_to_conn,
                     &mut seq_order,
                     &mut last_client_addr,
-                    &shared_client_addr,
                     reg.has_connected,
                     &toggles,
                 )

@@ -197,7 +197,8 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
-        instant_forwarder: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+        instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
+        client_addr: Option<SocketAddr>,
     ) -> Result<SrtlaIncoming> {
         let mut buf = [0u8; MTU];
         let mut incoming = SrtlaIncoming::default();
@@ -211,6 +212,7 @@ impl SrtlaConnection {
                         conn_idx,
                         reg,
                         instant_forwarder,
+                        client_addr,
                         &buf[..n],
                         &mut incoming,
                     )
@@ -230,12 +232,20 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
-        instant_forwarder: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+        instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
+        client_addr: Option<SocketAddr>,
         data: &[u8],
     ) -> Result<SrtlaIncoming> {
         let mut incoming = SrtlaIncoming::default();
-        self.process_packet_internal(conn_idx, reg, instant_forwarder, data, &mut incoming)
-            .await?;
+        self.process_packet_internal(
+            conn_idx,
+            reg,
+            instant_forwarder,
+            client_addr,
+            data,
+            &mut incoming,
+        )
+        .await?;
         Ok(incoming)
     }
 
@@ -243,7 +253,8 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
-        instant_forwarder: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+        instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
+        client_addr: Option<SocketAddr>,
         data: &[u8],
         incoming: &mut SrtlaIncoming,
     ) -> Result<()> {
@@ -280,7 +291,10 @@ impl SrtlaConnection {
                     incoming.ack_numbers.push(ack);
                 }
                 let ack_packet = SmallVec::from_slice(data);
-                let _ = instant_forwarder.send(ack_packet.clone());
+                // Send ACK immediately if we have a client address
+                if let Some(addr) = client_addr {
+                    let _ = instant_forwarder.send((addr, ack_packet.clone()));
+                }
                 incoming.forward_to_client.push(ack_packet);
             } else if pt == SRT_TYPE_NAK {
                 let nak_list = parse_srt_nak(data);

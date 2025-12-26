@@ -1,11 +1,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, warn};
 
 use super::selection::select_connection_idx;
@@ -17,12 +16,15 @@ use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
 use crate::utils::now_ms;
 
+/// Type alias for instant ACK forwarding: (client_addr, packet_data)
+pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn process_connection_events(
     idx: usize,
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+    instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
@@ -38,7 +40,7 @@ pub async fn process_connection_events(
         overridden
     } else {
         connections[idx]
-            .drain_incoming(idx, reg, instant_tx)
+            .drain_incoming(idx, reg, instant_tx, last_client_addr)
             .await?
     };
 
@@ -103,7 +105,7 @@ pub async fn handle_uplink_packet(
     packet: UplinkPacket,
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+    instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
@@ -115,7 +117,7 @@ pub async fn handle_uplink_packet(
     }
     if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
         match connections[idx]
-            .process_packet(idx, reg, instant_tx, &packet.bytes)
+            .process_packet(idx, reg, instant_tx, last_client_addr, &packet.bytes)
             .await
         {
             Ok(incoming) => {
@@ -152,7 +154,7 @@ pub async fn drain_packet_queue(
     packet_rx: &mut UnboundedReceiver<UplinkPacket>,
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    instant_tx: &std::sync::mpsc::Sender<SmallVec<u8, 64>>,
+    instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
@@ -212,7 +214,6 @@ pub async fn handle_srt_packet(
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
-    shared_client_addr: &Arc<Mutex<Option<SocketAddr>>>,
     registration_complete: bool,
     toggles: &DynamicToggles,
 ) {
@@ -235,12 +236,10 @@ pub async fn handle_srt_packet(
                         last_switch_time_ms,
                         seq_to_conn,
                         seq_order,
-                        last_client_addr,
-                        shared_client_addr,
-                        src,
                     )
                     .await;
                 }
+                *last_client_addr = Some(src);
                 return;
             }
             let enable_quality = toggles
@@ -276,19 +275,12 @@ pub async fn handle_srt_packet(
                     last_switch_time_ms,
                     seq_to_conn,
                     seq_order,
-                    last_client_addr,
-                    shared_client_addr,
-                    src,
                 )
                 .await;
             } else {
                 warn!("no available connection to forward packet from {}", src);
             }
             *last_client_addr = Some(src);
-            // Update shared client address for instant forwarding
-            if let Ok(mut addr_guard) = shared_client_addr.lock() {
-                *addr_guard = Some(src);
-            }
         }
         Err(e) => warn!("error reading local SRT: {}", e),
     }
@@ -304,9 +296,6 @@ pub async fn forward_via_connection(
     last_switch_time_ms: &mut u64,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
-    last_client_addr: &mut Option<SocketAddr>,
-    shared_client_addr: &Arc<Mutex<Option<SocketAddr>>>,
-    src: SocketAddr,
 ) {
     if sel_idx >= connections.len() {
         return;
@@ -350,9 +339,5 @@ pub async fn forward_via_connection(
             },
         );
         seq_order.push_back(s);
-    }
-    *last_client_addr = Some(src);
-    if let Ok(mut addr_guard) = shared_client_addr.lock() {
-        *addr_guard = Some(src);
     }
 }
