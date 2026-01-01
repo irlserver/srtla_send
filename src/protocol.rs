@@ -44,7 +44,7 @@ pub const PKT_LOG_SIZE: usize = 256;
 
 // Extended KEEPALIVE with connection info
 pub const SRTLA_KEEPALIVE_MAGIC: u16 = 0xc01f; // "Connection Info" marker
-pub const SRTLA_KEEPALIVE_EXT_LEN: usize = 42; // Extended keepalive packet length
+pub const SRTLA_KEEPALIVE_EXT_LEN: usize = 38; // Extended keepalive packet length
 pub const SRTLA_KEEPALIVE_EXT_VERSION: u16 = 0x0001; // Protocol version
 
 #[inline]
@@ -99,14 +99,14 @@ pub struct ConnectionInfo {
     pub conn_id: u32,
     pub window: i32,
     pub in_flight: i32,
-    pub rtt_us: u64,
+    pub rtt_ms: u32,
     pub nak_count: u32,
     pub bitrate_bytes_per_sec: u32,
 }
 
 /// Create extended KEEPALIVE packet with connection info
 ///
-/// Extended format (42 bytes):
+/// Extended format (38 bytes):
 /// - Bytes 0-1:   Type (0x9000)
 /// - Bytes 2-9:   Timestamp (u64 ms)
 /// - Bytes 10-11: Magic (0xC01F)
@@ -114,9 +114,9 @@ pub struct ConnectionInfo {
 /// - Bytes 14-17: Connection ID (u32)
 /// - Bytes 18-21: Window (i32)
 /// - Bytes 22-25: In-flight (i32)
-/// - Bytes 26-33: RTT μs (u64)
-/// - Bytes 34-37: NAK count (u32)
-/// - Bytes 38-41: Bitrate bytes/sec (u32)
+/// - Bytes 26-29: RTT ms (u32)
+/// - Bytes 30-33: NAK count (u32)
+/// - Bytes 34-37: Bitrate bytes/sec (u32)
 ///
 /// This packet is backwards compatible:
 /// - Old receivers read bytes 0-9 (type + timestamp) and ignore the rest
@@ -129,15 +129,15 @@ pub fn create_keepalive_packet_ext(info: ConnectionInfo) -> [u8; SRTLA_KEEPALIVE
     let ts = chrono::Utc::now().timestamp_millis() as u64;
     pkt[2..10].copy_from_slice(&ts.to_be_bytes());
 
-    // Extended data (bytes 10-41)
+    // Extended data (bytes 10-37)
     pkt[10..12].copy_from_slice(&SRTLA_KEEPALIVE_MAGIC.to_be_bytes());
     pkt[12..14].copy_from_slice(&SRTLA_KEEPALIVE_EXT_VERSION.to_be_bytes());
     pkt[14..18].copy_from_slice(&info.conn_id.to_be_bytes());
     pkt[18..22].copy_from_slice(&info.window.to_be_bytes());
     pkt[22..26].copy_from_slice(&info.in_flight.to_be_bytes());
-    pkt[26..34].copy_from_slice(&info.rtt_us.to_be_bytes());
-    pkt[34..38].copy_from_slice(&info.nak_count.to_be_bytes());
-    pkt[38..42].copy_from_slice(&info.bitrate_bytes_per_sec.to_be_bytes());
+    pkt[26..30].copy_from_slice(&info.rtt_ms.to_be_bytes());
+    pkt[30..34].copy_from_slice(&info.nak_count.to_be_bytes());
+    pkt[34..38].copy_from_slice(&info.bitrate_bytes_per_sec.to_be_bytes());
 
     pkt
 }
@@ -159,7 +159,7 @@ pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
 /// Extract connection info from extended keepalive packet
 ///
 /// Returns None if:
-/// - Packet is too short (< 42 bytes)
+/// - Packet is too short (< 38 bytes)
 /// - Not a KEEPALIVE packet
 /// - Magic number doesn't match (not an extended keepalive)
 /// - Version doesn't match
@@ -188,17 +188,15 @@ pub fn extract_keepalive_conn_info(buf: &[u8]) -> Option<ConnectionInfo> {
     let conn_id = u32::from_be_bytes([buf[14], buf[15], buf[16], buf[17]]);
     let window = i32::from_be_bytes([buf[18], buf[19], buf[20], buf[21]]);
     let in_flight = i32::from_be_bytes([buf[22], buf[23], buf[24], buf[25]]);
-    let rtt_us = u64::from_be_bytes([
-        buf[26], buf[27], buf[28], buf[29], buf[30], buf[31], buf[32], buf[33],
-    ]);
-    let nak_count = u32::from_be_bytes([buf[34], buf[35], buf[36], buf[37]]);
-    let bitrate_bytes_per_sec = u32::from_be_bytes([buf[38], buf[39], buf[40], buf[41]]);
+    let rtt_ms = u32::from_be_bytes([buf[26], buf[27], buf[28], buf[29]]);
+    let nak_count = u32::from_be_bytes([buf[30], buf[31], buf[32], buf[33]]);
+    let bitrate_bytes_per_sec = u32::from_be_bytes([buf[34], buf[35], buf[36], buf[37]]);
 
     Some(ConnectionInfo {
         conn_id,
         window,
         in_flight,
-        rtt_us,
+        rtt_ms,
         nak_count,
         bitrate_bytes_per_sec,
     })
@@ -320,7 +318,7 @@ mod tests {
             conn_id: 42,
             window: 25000,
             in_flight: 8,
-            rtt_us: 120_000,
+            rtt_ms: 120,
             nak_count: 5,
             bitrate_bytes_per_sec: 2_500_000,
         };
@@ -357,7 +355,7 @@ mod tests {
             conn_id: 1,
             window: 20000,
             in_flight: 5,
-            rtt_us: 100_000,
+            rtt_ms: 100,
             nak_count: 2,
             bitrate_bytes_per_sec: 1_000_000,
         };

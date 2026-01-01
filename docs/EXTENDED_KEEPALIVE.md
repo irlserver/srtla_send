@@ -24,7 +24,7 @@ Offset | Size | Field
 2-9    | 8    | Timestamp (u64 ms, big-endian)
 ```
 
-### Extended KEEPALIVE (42 bytes)
+### Extended KEEPALIVE (38 bytes)
 
 ```
 Offset | Size | Field
@@ -36,9 +36,9 @@ Offset | Size | Field
 14-17  | 4    | Connection ID (u32)
 18-21  | 4    | Window size (i32)
 22-25  | 4    | In-flight packets (i32)
-26-33  | 8    | Smooth RTT (u64 μs)
-34-37  | 4    | NAK count (u32)
-38-41  | 4    | Bitrate (u32 bytes/sec)
+26-29  | 4    | Smooth RTT (u32 ms)
+30-33  | 4    | NAK count (u32)
+34-37  | 4    | Bitrate (u32 bytes/sec)
 ```
 
 All multi-byte fields are **big-endian** (network byte order).
@@ -58,11 +58,11 @@ The magic number `0xC01F` serves as a format identifier for extended keepalives:
 **Old receivers (standard SRTLA):**
 1. Read packet type at bytes 0-1 → sees `0x9000` (KEEPALIVE)
 2. Read timestamp at bytes 2-9 → extracts valid timestamp
-3. **Ignore bytes 10-41** → UDP packets can be any length, extra data is simply ignored
+3. **Ignore bytes 10-37** → UDP packets can be any length, extra data is simply ignored
 4. Continue normal operation
 
 **New receivers (extended SRTLA):**
-1. Check packet length: `>= 42 bytes`?
+1. Check packet length: `>= 38 bytes`?
 2. Check magic at bytes 10-11: `== 0xC01F`?
 3. Check version at bytes 12-13: `== 0x0001`?
 4. If all checks pass: Parse connection info
@@ -90,7 +90,7 @@ let info = ConnectionInfo {
     conn_id: connection.conn_id as u32,
     window: connection.window,
     in_flight: connection.in_flight_packets,
-    rtt_us: (connection.rtt.smooth_rtt_ms * 1000.0) as u64,
+    rtt_ms: connection.rtt.smooth_rtt_ms as u32,
     nak_count: connection.congestion.nak_count as u32,
     bitrate_bytes_per_sec: (connection.bitrate.current_bitrate_bps / 8.0) as u32,
 };
@@ -114,11 +114,11 @@ if let Some(timestamp) = extract_keepalive_timestamp(&packet) {
 // Try to extract connection info (only works for extended)
 if let Some(info) = extract_keepalive_conn_info(&packet) {
     log::info!(
-        "Uplink {}: window={}, in_flight={}, rtt={}μs, naks={}, bitrate={}KB/s",
+        "Uplink {}: window={}, in_flight={}, rtt={}ms, naks={}, bitrate={}KB/s",
         info.conn_id,
         info.window,
         info.in_flight,
-        info.rtt_us,
+        info.rtt_ms,
         info.nak_count,
         info.bitrate_bytes_per_sec / 1000
     );
@@ -129,14 +129,14 @@ if let Some(info) = extract_keepalive_conn_info(&packet) {
 
 ```c
 #define SRTLA_KEEPALIVE_MAGIC 0xc01f
-#define SRTLA_KEEPALIVE_EXT_LEN 42
+#define SRTLA_KEEPALIVE_EXT_LEN 38
 #define SRTLA_KEEPALIVE_EXT_VERSION 0x0001
 
 typedef struct {
     uint32_t conn_id;
     int32_t window;
     int32_t in_flight;
-    uint64_t rtt_us;
+    uint32_t rtt_ms;
     uint32_t nak_count;
     uint32_t bitrate_bytes_per_sec;
 } connection_info_t;
@@ -159,12 +159,9 @@ bool parse_keepalive_conn_info(const uint8_t *buf, size_t len, connection_info_t
     info->conn_id = (buf[14] << 24) | (buf[15] << 16) | (buf[16] << 8) | buf[17];
     info->window = (int32_t)((buf[18] << 24) | (buf[19] << 16) | (buf[20] << 8) | buf[21]);
     info->in_flight = (int32_t)((buf[22] << 24) | (buf[23] << 16) | (buf[24] << 8) | buf[25]);
-    info->rtt_us = ((uint64_t)buf[26] << 56) | ((uint64_t)buf[27] << 48) | 
-                   ((uint64_t)buf[28] << 40) | ((uint64_t)buf[29] << 32) |
-                   ((uint64_t)buf[30] << 24) | ((uint64_t)buf[31] << 16) |
-                   ((uint64_t)buf[32] << 8)  | (uint64_t)buf[33];
-    info->nak_count = (buf[34] << 24) | (buf[35] << 16) | (buf[36] << 8) | buf[37];
-    info->bitrate_bytes_per_sec = (buf[38] << 24) | (buf[39] << 16) | (buf[40] << 8) | buf[41];
+    info->rtt_ms = (buf[26] << 24) | (buf[27] << 16) | (buf[28] << 8) | buf[29];
+    info->nak_count = (buf[30] << 24) | (buf[31] << 16) | (buf[32] << 8) | buf[33];
+    info->bitrate_bytes_per_sec = (buf[34] << 24) | (buf[35] << 16) | (buf[36] << 8) | buf[37];
     
     return true;
 }
@@ -194,8 +191,8 @@ Current congestion window size. Indicates the connection's estimated capacity in
 ### in_flight (i32)
 Number of packets currently in flight (sent but not acknowledged). Used for load calculation.
 
-### rtt_us (u64)
-Smoothed round-trip time in microseconds. Calculated from keepalive timestamps.
+### rtt_ms (u32)
+Smoothed round-trip time in milliseconds. Calculated from keepalive timestamps.
 
 ### nak_count (u32)
 Total number of NAKs received on this connection since startup. Indicates packet loss.
@@ -208,8 +205,8 @@ Current bitrate in bytes per second. Measured over recent send activity.
 For a typical 4-modem setup with keepalives every 1 second:
 
 - **Standard keepalive**: 10 bytes × 4 = 40 bytes/sec
-- **Extended keepalive**: 42 bytes × 4 = 168 bytes/sec
-- **Additional overhead**: 128 bytes/sec (0.001 Mbps)
+- **Extended keepalive**: 38 bytes × 4 = 152 bytes/sec
+- **Additional overhead**: 112 bytes/sec (0.001 Mbps)
 
 This is **negligible** compared to typical streaming bitrates (5-50 Mbps).
 
@@ -227,14 +224,14 @@ This is **negligible** compared to typical streaming bitrates (5-50 Mbps).
 If additional fields are needed in the future:
 
 1. **Increment version number** (e.g., 0x0002)
-2. **Add fields at the end** (bytes 42+)
+2. **Add fields at the end** (bytes 38+)
 3. **Receivers check version** and reject unknown versions
 4. **Old receivers ignore extra bytes** (backwards compatible)
 
-Example for version 2 (50 bytes):
+Example for version 2 (46 bytes):
 ```
-42-45  | 4    | Jitter (u32 μs)
-46-49  | 4    | Packet loss rate (f32)
+38-41  | 4    | Jitter (u32 ms)
+42-45  | 4    | Packet loss rate (f32)
 ```
 
 ## Security Considerations

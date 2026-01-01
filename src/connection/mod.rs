@@ -161,7 +161,7 @@ impl SrtlaConnection {
             conn_id: self.conn_id as u32,
             window: self.window,
             in_flight: self.in_flight_packets,
-            rtt_us: (self.rtt.smooth_rtt_ms * 1000.0) as u64, // Convert ms to μs
+            rtt_ms: self.rtt.smooth_rtt_ms as u32,
             nak_count: self.congestion.nak_count as u32,
             bitrate_bytes_per_sec: (self.bitrate.current_bitrate_bps / 8.0) as u32,
         };
