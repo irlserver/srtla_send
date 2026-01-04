@@ -33,7 +33,7 @@ pub fn spawn_reader(
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((n, _)) if n > 0 => {
-                    let packet = SmallVec::from_slice(&buf[..n]);
+                    let packet = SmallVec::from_slice_copy(&buf[..n]);
                     if packet_tx
                         .send(UplinkPacket {
                             conn_id,

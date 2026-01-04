@@ -290,7 +290,7 @@ impl SrtlaConnection {
                 if let Some(ack) = parse_srt_ack(data) {
                     incoming.ack_numbers.push(ack);
                 }
-                let ack_packet = SmallVec::from_slice(data);
+                let ack_packet = SmallVec::from_slice_copy(data);
                 // Send ACK immediately if we have a client address
                 if let Some(addr) = client_addr {
                     let _ = instant_forwarder.send((addr, ack_packet.clone()));
@@ -308,7 +308,9 @@ impl SrtlaConnection {
                         incoming.nak_numbers.push(seq);
                     }
                 }
-                incoming.forward_to_client.push(SmallVec::from_slice(data));
+                incoming
+                    .forward_to_client
+                    .push(SmallVec::from_slice_copy(data));
             } else if pt == SRTLA_TYPE_ACK {
                 let ack_list = parse_srtla_ack(data);
                 if !ack_list.is_empty() {
@@ -324,7 +326,9 @@ impl SrtlaConnection {
             } else if pt == SRTLA_TYPE_KEEPALIVE {
                 self.rtt.handle_keepalive_response(data, &self.label);
             } else {
-                incoming.forward_to_client.push(SmallVec::from_slice(data));
+                incoming
+                    .forward_to_client
+                    .push(SmallVec::from_slice_copy(data));
             }
         }
         Ok(())
