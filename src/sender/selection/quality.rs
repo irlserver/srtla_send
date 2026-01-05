@@ -47,6 +47,7 @@ const MAX_RTT_BONUS: f64 = 1.03;
 ///
 /// The `current_time_ms` parameter allows the caller to pass a cached timestamp
 /// to avoid repeated syscalls when processing multiple connections.
+#[inline(always)]
 pub fn calculate_quality_multiplier(conn: &SrtlaConnection, current_time_ms: u64) -> f64 {
     // Startup grace period: first 30 seconds after connection establishment
     // During this time, use simple scoring like original C version to go live fast

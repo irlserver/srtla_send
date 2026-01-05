@@ -504,6 +504,7 @@ impl SrtlaConnection {
             .perform_window_recovery(&mut self.window, self.connected, &self.label);
     }
 
+    #[inline(always)]
     pub fn is_timed_out(&self) -> bool {
         // During initial registration (not yet connected), allow grace period
         if !self.connected {
