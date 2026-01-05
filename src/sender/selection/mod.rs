@@ -45,6 +45,7 @@ pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 ///
 /// # Returns
 /// The index of the selected connection, or None if no valid connections
+#[inline(always)]
 pub fn select_connection_idx(
     conns: &[SrtlaConnection],
     last_idx: Option<usize>,

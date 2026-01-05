@@ -40,6 +40,7 @@ const SWITCH_THRESHOLD: f64 = 1.02; // New connection must be 2% better
 /// * `current_time_ms` - Current timestamp in milliseconds
 /// * `enable_quality` - Whether to apply quality scoring
 /// * `enable_explore` - Whether to enable smart exploration
+#[inline(always)]
 pub fn select_connection(
     conns: &[SrtlaConnection],
     last_idx: Option<usize>,

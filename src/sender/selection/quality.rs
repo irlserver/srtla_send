@@ -101,6 +101,7 @@ pub fn calculate_quality_multiplier(conn: &SrtlaConnection, current_time_ms: u64
 ///
 /// Returns a multiplier between 1.0 (slow RTT) and MAX_RTT_BONUS (fast RTT)
 /// Bonus is very small to avoid causing instability
+#[inline(always)]
 fn calculate_rtt_bonus(conn: &SrtlaConnection) -> f64 {
     let smooth_rtt = conn.get_smooth_rtt_ms();
 
