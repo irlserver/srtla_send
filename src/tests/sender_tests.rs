@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
 
-    use std::collections::{HashMap, VecDeque};
     use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::Ordering;
@@ -323,25 +322,11 @@ mod tests {
         ];
 
         let mut last_selected_idx = Some(1);
-        let mut seq_to_conn = HashMap::new();
+        let mut seq_tracker = SequenceTracker::new();
         let now = now_ms();
-        seq_to_conn.insert(
-            100,
-            SequenceTrackingEntry {
-                conn_id: connections[1].conn_id,
-                timestamp_ms: now,
-            },
-        );
-        seq_to_conn.insert(
-            200,
-            SequenceTrackingEntry {
-                conn_id: connections[2].conn_id,
-                timestamp_ms: now,
-            },
-        );
-        let mut seq_order = VecDeque::new();
-        seq_order.push_back(100);
-        seq_order.push_back(200);
+        // Insert entries for connections that will be removed
+        seq_tracker.insert(100, connections[1].conn_id, now);
+        seq_tracker.insert(200, connections[2].conn_id, now);
 
         rt.block_on(apply_connection_changes(
             &mut connections,
@@ -349,8 +334,7 @@ mod tests {
             "127.0.0.1",
             8080,
             &mut last_selected_idx,
-            &mut seq_to_conn,
-            &mut seq_order,
+            &mut seq_tracker,
         ));
 
         // Should have removed some connections
@@ -359,11 +343,10 @@ mod tests {
         // Should have reset selection
         assert_eq!(last_selected_idx, None);
 
-        // Should have cleaned up sequence tracking
-        assert!(seq_to_conn.len() < 2);
-
-        // Should have cleaned up seq_order to match seq_to_conn
-        assert_eq!(seq_order.len(), seq_to_conn.len());
+        // Entries for removed connections should now return None
+        // (they were cleaned up by remove_connection)
+        assert!(seq_tracker.get(100, now).is_none());
+        assert!(seq_tracker.get(200, now).is_none());
     }
 
     #[test]
@@ -383,11 +366,11 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert!(MAX_SEQUENCE_TRACKING > 0);
+        assert!(SEQ_TRACKING_SIZE > 0);
         assert!(GLOBAL_TIMEOUT_MS > 0);
 
-        // Should handle decent throughput
-        assert!(MAX_SEQUENCE_TRACKING >= 1000);
+        // Should handle decent throughput (16384 entries)
+        assert!(SEQ_TRACKING_SIZE >= 1000);
         // Should allow time for connections
         assert!(GLOBAL_TIMEOUT_MS >= 5000);
     }
@@ -408,24 +391,21 @@ mod tests {
 
     #[test]
     fn test_sequence_tracking_limits() {
-        let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
-        let mut seq_order: std::collections::VecDeque<u32> =
-            std::collections::VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
+        let mut seq_tracker = SequenceTracker::new();
+        let now = now_ms();
 
-        // Fill beyond capacity
-        for i in 0..(MAX_SEQUENCE_TRACKING + 100) {
-            if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
-                && let Some(old) = seq_order.pop_front()
-            {
-                seq_to_conn.remove(&old);
-            }
-            seq_to_conn.insert(i as u32, 0);
-            seq_order.push_back(i as u32);
+        // Fill beyond capacity - ring buffer naturally handles this
+        for i in 0..(SEQ_TRACKING_SIZE + 100) {
+            seq_tracker.insert(i as u32, 1, now);
         }
 
-        // Should not exceed maximum
-        assert!(seq_to_conn.len() <= MAX_SEQUENCE_TRACKING);
-        assert!(seq_order.len() <= MAX_SEQUENCE_TRACKING + 100); // VecDeque grows but HashMap doesn't
+        // Ring buffer should have overwritten older entries
+        // The len() is approximate but should be around SEQ_TRACKING_SIZE
+        assert!(seq_tracker.len() <= SEQ_TRACKING_SIZE);
+
+        // Recent entries should still be accessible
+        let recent_seq = (SEQ_TRACKING_SIZE + 50) as u32;
+        assert!(seq_tracker.get(recent_seq, now).is_some());
     }
 
     #[test]

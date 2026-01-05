@@ -4,7 +4,7 @@ mod selection;
 mod sequence;
 mod uplink;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
@@ -20,10 +20,7 @@ use packet_handler::{drain_packet_queue, handle_srt_packet, handle_uplink_packet
 #[allow(unused_imports)]
 pub use selection::{calculate_quality_multiplier, select_connection_idx};
 #[allow(unused_imports)]
-pub use sequence::{
-    MAX_SEQUENCE_TRACKING, SEQUENCE_MAP_CLEANUP_INTERVAL_MS, SEQUENCE_TRACKING_MAX_AGE_MS,
-    SequenceTrackingEntry,
-};
+pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 #[cfg(unix)]
@@ -114,10 +111,8 @@ pub async fn run_sender_with_toggles(
     housekeeping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut status_elapsed_ms: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
-    let mut seq_to_conn: HashMap<u32, sequence::SequenceTrackingEntry> =
-        HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
-    let mut seq_order: VecDeque<u32> = VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
-    let mut last_sequence_cleanup_ms: u64 = 0;
+    // Zero-allocation ring buffer for sequence tracking
+    let mut seq_tracker = SequenceTracker::new();
     let mut last_selected_idx: Option<usize> = None;
     let mut last_switch_time_ms: u64 = 0; // Track time of last connection switch
     let mut all_failed_at: Option<Instant> = None;
@@ -137,9 +132,6 @@ pub async fn run_sender_with_toggles(
         if let Err(err) = handle_housekeeping(
             &mut connections,
             &mut reg,
-            &mut seq_to_conn,
-            &mut seq_order,
-            &mut last_sequence_cleanup_ms,
             classic,
             &mut all_failed_at,
             &mut reader_handles,
@@ -163,8 +155,7 @@ pub async fn run_sender_with_toggles(
                     &mut connections,
                     &mut last_selected_idx,
                     &mut last_switch_time_ms,
-                    &mut seq_to_conn,
-                    &mut seq_order,
+                    &mut seq_tracker,
                     &mut last_client_addr,
                     reg.has_connected,
                     &toggle_snap,
@@ -177,8 +168,7 @@ pub async fn run_sender_with_toggles(
                     &instant_tx,
                     last_client_addr,
                     &local_listener,
-                    &mut seq_to_conn,
-                    &mut seq_order,
+                    &seq_tracker,
                     &toggle_snap,
                 )
                 .await;
@@ -194,8 +184,7 @@ pub async fn run_sender_with_toggles(
                         &instant_tx,
                         last_client_addr,
                         &local_listener,
-                        &mut seq_to_conn,
-                        &mut seq_order,
+                        &seq_tracker,
                         &toggle_snap,
                     ).await;
                     drain_packet_queue(
@@ -205,8 +194,7 @@ pub async fn run_sender_with_toggles(
                         &instant_tx,
                         last_client_addr,
                         &local_listener,
-                        &mut seq_to_conn,
-                        &mut seq_order,
+                        &seq_tracker,
                         &toggle_snap,
                     ).await;
                 } else {
@@ -220,9 +208,6 @@ pub async fn run_sender_with_toggles(
                 if let Err(err) = handle_housekeeping(
                     &mut connections,
                     &mut reg,
-                    &mut seq_to_conn,
-                    &mut seq_order,
-                    &mut last_sequence_cleanup_ms,
                     classic,
                     &mut all_failed_at,
                     &mut reader_handles,
@@ -241,8 +226,7 @@ pub async fn run_sender_with_toggles(
                         &changes.receiver_host,
                         changes.receiver_port,
                         &mut last_selected_idx,
-                        &mut seq_to_conn,
-                        &mut seq_order,
+                        &mut seq_tracker,
                     ).await;
                     info!("connection changes applied successfully");
                     sync_readers(&connections, &mut reader_handles, &packet_tx);
@@ -250,7 +234,7 @@ pub async fn run_sender_with_toggles(
 
                 status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
                 if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
-                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                    log_connection_status(&connections, &seq_tracker, last_selected_idx, &toggles);
                     status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
 
@@ -264,8 +248,7 @@ pub async fn run_sender_with_toggles(
                     &instant_tx,
                     last_client_addr,
                     &local_listener,
-                    &mut seq_to_conn,
-                    &mut seq_order,
+                    &seq_tracker,
                     &toggle_snap,
                 )
                 .await;
@@ -289,8 +272,7 @@ pub async fn run_sender_with_toggles(
                     &instant_tx,
                     last_client_addr,
                     &local_listener,
-                    &mut seq_to_conn,
-                    &mut seq_order,
+                    &seq_tracker,
                     &toggle_snap,
                 )
                 .await;
@@ -310,8 +292,7 @@ pub async fn run_sender_with_toggles(
                     &mut connections,
                     &mut last_selected_idx,
                     &mut last_switch_time_ms,
-                    &mut seq_to_conn,
-                    &mut seq_order,
+                    &mut seq_tracker,
                     &mut last_client_addr,
                     reg.has_connected,
                     &toggle_snap,
@@ -324,8 +305,7 @@ pub async fn run_sender_with_toggles(
                     &instant_tx,
                     last_client_addr,
                     &local_listener,
-                    &mut seq_to_conn,
-                    &mut seq_order,
+                    &seq_tracker,
                     &toggle_snap,
                 )
                 .await;
@@ -341,8 +321,7 @@ pub async fn run_sender_with_toggles(
                         &instant_tx,
                         last_client_addr,
                         &local_listener,
-                        &mut seq_to_conn,
-                        &mut seq_order,
+                        &seq_tracker,
                         &toggle_snap,
                     ).await;
                     drain_packet_queue(
@@ -352,8 +331,7 @@ pub async fn run_sender_with_toggles(
                         &instant_tx,
                         last_client_addr,
                         &local_listener,
-                        &mut seq_to_conn,
-                        &mut seq_order,
+                        &seq_tracker,
                         &toggle_snap,
                     ).await;
                 } else {
@@ -367,9 +345,6 @@ pub async fn run_sender_with_toggles(
                 if let Err(err) = handle_housekeeping(
                     &mut connections,
                     &mut reg,
-                    &mut seq_to_conn,
-                    &mut seq_order,
-                    &mut last_sequence_cleanup_ms,
                     classic,
                     &mut all_failed_at,
                     &mut reader_handles,
@@ -388,8 +363,7 @@ pub async fn run_sender_with_toggles(
                        &changes.receiver_host,
                        changes.receiver_port,
                        &mut last_selected_idx,
-                       &mut seq_to_conn,
-                       &mut seq_order,
+                       &mut seq_tracker,
                    )
                    .await;
                    info!("connection changes applied successfully");
@@ -398,7 +372,7 @@ pub async fn run_sender_with_toggles(
 
                 status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
                 if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
-                    log_connection_status(&connections, &seq_to_conn, &seq_order, last_selected_idx, &toggles);
+                    log_connection_status(&connections, &seq_tracker, last_selected_idx, &toggles);
                     status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
 
@@ -412,8 +386,7 @@ pub async fn run_sender_with_toggles(
                     &instant_tx,
                     last_client_addr,
                     &local_listener,
-                    &mut seq_to_conn,
-                    &mut seq_order,
+                    &seq_tracker,
                     &toggle_snap,
                 )
                 .await;
@@ -444,8 +417,7 @@ pub(crate) async fn apply_connection_changes(
     receiver_host: &str,
     receiver_port: u16,
     last_selected_idx: &mut Option<usize>,
-    seq_to_conn: &mut HashMap<u32, sequence::SequenceTrackingEntry>,
-    seq_order: &mut VecDeque<u32>,
+    seq_tracker: &mut SequenceTracker,
 ) {
     let current_labels: HashSet<String> = connections.iter().map(|c| c.label.clone()).collect();
     let desired_labels: HashSet<String> = new_ips
@@ -455,20 +427,23 @@ pub(crate) async fn apply_connection_changes(
 
     // Remove stale connections
     let old_len = connections.len();
+    let removed_conn_ids: Vec<u64> = connections
+        .iter()
+        .filter(|c| !desired_labels.contains(&c.label))
+        .map(|c| c.conn_id)
+        .collect();
+
     connections.retain(|c| desired_labels.contains(&c.label));
 
-    // If connections were removed, reset selection state and remap sequence
-    // tracking to use stable conn_id instead of stale conn_idx
+    // If connections were removed, reset selection state and clean up sequence tracker
     if connections.len() != old_len {
         info!("removed {} stale connections", old_len - connections.len());
         *last_selected_idx = None;
 
-        // Retain only entries whose conn_id still exists in the connections vector
-        let valid_conn_ids: std::collections::HashSet<u64> =
-            connections.iter().map(|c| c.conn_id).collect();
-        seq_to_conn.retain(|_, entry| valid_conn_ids.contains(&entry.conn_id));
-
-        seq_order.retain(|seq| seq_to_conn.contains_key(seq));
+        // Remove entries for removed connections from the ring buffer
+        for conn_id in removed_conn_ids {
+            seq_tracker.remove_connection(conn_id);
+        }
     }
 
     // Add new connections
@@ -518,8 +493,7 @@ pub async fn create_connections_from_ips(
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn log_connection_status(
     connections: &[SrtlaConnection],
-    seq_to_conn: &HashMap<u32, sequence::SequenceTrackingEntry>,
-    seq_order: &VecDeque<u32>,
+    seq_tracker: &SequenceTracker,
     last_selected_idx: Option<usize>,
     toggles: &DynamicToggles,
 ) {
@@ -553,10 +527,9 @@ pub(crate) fn log_connection_status(
     );
 
     info!(
-        "  Sequence tracking: {} mappings ({:.1}% capacity), {} in queue",
-        seq_to_conn.len(),
-        (seq_to_conn.len() as f64 / MAX_SEQUENCE_TRACKING as f64) * 100.0,
-        seq_order.len()
+        "  Sequence tracking: ~{} entries ({:.1}% capacity)",
+        seq_tracker.len(),
+        seq_tracker.utilization_percent()
     );
 
     // Show packet log utilization

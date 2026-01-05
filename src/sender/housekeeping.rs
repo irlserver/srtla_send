@@ -1,11 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-use super::sequence::{SequenceTrackingEntry, cleanup_expired_sequence_tracking};
 use super::uplink::{ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
 use crate::connection::SrtlaConnection;
 use crate::registration::SrtlaRegistrationManager;
@@ -13,13 +12,14 @@ use crate::utils::now_ms;
 
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
+/// Handle periodic housekeeping tasks.
+///
+/// With the ring buffer sequence tracker, we no longer need periodic cleanup
+/// since old entries are naturally overwritten.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
     reg: &mut SrtlaRegistrationManager,
-    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
-    seq_order: &mut VecDeque<u32>,
-    last_sequence_cleanup_ms: &mut u64,
     classic: bool,
     all_failed_at: &mut Option<Instant>,
     reader_handles: &mut HashMap<ConnectionId, ReaderHandle>,
@@ -134,7 +134,8 @@ pub async fn handle_housekeeping(
         *all_failed_at = None;
     }
 
-    cleanup_expired_sequence_tracking(seq_to_conn, seq_order, last_sequence_cleanup_ms);
+    // NOTE: With the ring buffer sequence tracker, no cleanup is needed.
+    // Old entries are naturally overwritten when the buffer wraps around.
 
     Ok(())
 }

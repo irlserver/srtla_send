@@ -1,4 +1,3 @@
-use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 
 use anyhow::Result;
@@ -8,7 +7,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, warn};
 
 use super::selection::select_connection_idx;
-use super::sequence::{MAX_SEQUENCE_TRACKING, SequenceTrackingEntry};
+use super::sequence::SequenceTracker;
 use super::uplink::UplinkPacket;
 use crate::connection::{SrtlaConnection, SrtlaIncoming};
 use crate::protocol;
@@ -26,8 +25,7 @@ pub async fn process_connection_events(
     instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
-    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
-    _seq_order: &mut VecDeque<u32>,
+    seq_tracker: &SequenceTracker,
     classic: bool,
     incoming_override: Option<SrtlaIncoming>,
 ) -> Result<()> {
@@ -73,12 +71,12 @@ pub async fn process_connection_events(
     let current_time_ms = crate::utils::now_ms();
     for nak in incoming.nak_numbers.iter() {
         let mut handled = false;
-        if let Some(entry) = seq_to_conn.get(nak) {
-            if !entry.is_expired(current_time_ms) {
-                if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id) {
-                    conn.handle_nak(*nak as i32);
-                    handled = true;
-                }
+
+        // O(1) lookup in the ring buffer
+        if let Some(conn_id) = seq_tracker.get(*nak, current_time_ms) {
+            if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == conn_id) {
+                conn.handle_nak(*nak as i32);
+                handled = true;
             }
         }
 
@@ -108,8 +106,7 @@ pub async fn handle_uplink_packet(
     instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
-    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
-    seq_order: &mut VecDeque<u32>,
+    seq_tracker: &SequenceTracker,
     toggle_snap: &ToggleSnapshot,
 ) {
     if packet.bytes.is_empty() {
@@ -128,8 +125,7 @@ pub async fn handle_uplink_packet(
                     instant_tx,
                     last_client_addr,
                     local_listener,
-                    seq_to_conn,
-                    seq_order,
+                    seq_tracker,
                     toggle_snap.classic_mode,
                     Some(incoming),
                 )
@@ -154,8 +150,7 @@ pub async fn drain_packet_queue(
     instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
-    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
-    seq_order: &mut VecDeque<u32>,
+    seq_tracker: &SequenceTracker,
     toggle_snap: &ToggleSnapshot,
 ) {
     while let Ok(packet) = packet_rx.try_recv() {
@@ -166,8 +161,7 @@ pub async fn drain_packet_queue(
             instant_tx,
             last_client_addr,
             local_listener,
-            seq_to_conn,
-            seq_order,
+            seq_tracker,
             toggle_snap,
         )
         .await;
@@ -212,8 +206,7 @@ pub async fn handle_srt_packet(
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
     last_switch_time_ms: &mut u64,
-    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
-    seq_order: &mut VecDeque<u32>,
+    seq_tracker: &mut SequenceTracker,
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
     toggle_snap: &ToggleSnapshot,
@@ -238,8 +231,7 @@ pub async fn handle_srt_packet(
                         connections,
                         last_selected_idx,
                         last_switch_time_ms,
-                        seq_to_conn,
-                        seq_order,
+                        seq_tracker,
                         packet_time_ms,
                     )
                     .await;
@@ -270,8 +262,7 @@ pub async fn handle_srt_packet(
                     connections,
                     last_selected_idx,
                     last_switch_time_ms,
-                    seq_to_conn,
-                    seq_order,
+                    seq_tracker,
                     packet_time_ms,
                 )
                 .await;
@@ -292,8 +283,7 @@ pub async fn forward_via_connection(
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
     last_switch_time_ms: &mut u64,
-    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
-    seq_order: &mut VecDeque<u32>,
+    seq_tracker: &mut SequenceTracker,
     packet_time_ms: u64,
 ) {
     if sel_idx >= connections.len() {
@@ -324,19 +314,9 @@ pub async fn forward_via_connection(
         );
         conn.mark_for_recovery();
     }
+
+    // O(1) insert into ring buffer - no allocation
     if let Some(s) = seq {
-        if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
-            && let Some(old) = seq_order.pop_front()
-        {
-            seq_to_conn.remove(&old);
-        }
-        seq_to_conn.insert(
-            s,
-            SequenceTrackingEntry {
-                conn_id: connections[sel_idx].conn_id,
-                timestamp_ms: packet_time_ms, // Use cached timestamp
-            },
-        );
-        seq_order.push_back(s);
+        seq_tracker.insert(s, connections[sel_idx].conn_id, packet_time_ms);
     }
 }
