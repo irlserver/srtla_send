@@ -241,9 +241,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
-        connections[0].register_packet(100);
-        connections[1].register_packet(200);
-        connections[2].register_packet(300);
+        let current_time = now_ms();
+        connections[0].register_packet(100, current_time);
+        connections[1].register_packet(200, current_time);
+        connections[2].register_packet(300, current_time);
 
         let initial_counts = [
             connections[0].congestion.nak_count,
@@ -478,17 +479,18 @@ mod tests {
             .next()
             .unwrap();
 
-        conn.reconnection.connection_established_ms = now_ms() - 35000;
+        let current_time = now_ms();
+        conn.reconnection.connection_established_ms = current_time - 35000;
 
-        assert_eq!(calculate_quality_multiplier(&conn), 1.1);
+        assert_eq!(calculate_quality_multiplier(&conn, current_time), 1.1);
 
         // Test connection with recent NAK - exponential decay formula
         // With exponential decay: penalty = 0.5 * e^(-age_ms / 2000), multiplier = 1.0 - penalty
         conn.congestion.nak_count = 1;
 
         // 500ms ago: multiplier ≈ 0.61 (strong penalty, recent NAK)
-        conn.congestion.last_nak_time_ms = now_ms() - 500;
-        let mult_500 = calculate_quality_multiplier(&conn);
+        conn.congestion.last_nak_time_ms = current_time - 500;
+        let mult_500 = calculate_quality_multiplier(&conn, current_time);
         assert!(
             (mult_500 - 0.61).abs() < 0.02,
             "Expected ~0.61, got {}",
@@ -496,8 +498,8 @@ mod tests {
         );
 
         // 2000ms ago (half-life): multiplier ≈ 0.816 (moderate penalty)
-        conn.congestion.last_nak_time_ms = now_ms() - 2000;
-        let mult_2000 = calculate_quality_multiplier(&conn);
+        conn.congestion.last_nak_time_ms = current_time - 2000;
+        let mult_2000 = calculate_quality_multiplier(&conn, current_time);
         assert!(
             (mult_2000 - 0.816).abs() < 0.02,
             "Expected ~0.816, got {}",
@@ -505,8 +507,8 @@ mod tests {
         );
 
         // 5000ms ago: multiplier ≈ 0.96 (light penalty)
-        conn.congestion.last_nak_time_ms = now_ms() - 5000;
-        let mult_5000 = calculate_quality_multiplier(&conn);
+        conn.congestion.last_nak_time_ms = current_time - 5000;
+        let mult_5000 = calculate_quality_multiplier(&conn, current_time);
         assert!(
             (mult_5000 - 0.96).abs() < 0.02,
             "Expected ~0.96, got {}",
@@ -514,8 +516,8 @@ mod tests {
         );
 
         // 15000ms ago: multiplier ≈ 1.0 (essentially recovered)
-        conn.congestion.last_nak_time_ms = now_ms() - 15000;
-        let mult_15000 = calculate_quality_multiplier(&conn);
+        conn.congestion.last_nak_time_ms = current_time - 15000;
+        let mult_15000 = calculate_quality_multiplier(&conn, current_time);
         assert!(
             (mult_15000 - 1.0).abs() < 0.02,
             "Expected ~1.0, got {}",
@@ -526,14 +528,14 @@ mod tests {
         // Need to clear the last_nak_time_ms to simulate truly no NAKs
         conn.congestion.nak_count = 0;
         conn.congestion.last_nak_time_ms = 0; // Clear NAK history
-        assert_eq!(calculate_quality_multiplier(&conn), 1.1);
+        assert_eq!(calculate_quality_multiplier(&conn, current_time), 1.1);
 
         // Test burst NAK penalty (requires ≥5 NAKs in burst, within 3s)
         // Burst penalty is 0.7x additional multiplier
         conn.congestion.nak_count = 5;
-        conn.congestion.last_nak_time_ms = now_ms() - 2000;
+        conn.congestion.last_nak_time_ms = current_time - 2000;
         conn.congestion.nak_burst_count = 5;
-        let mult_burst = calculate_quality_multiplier(&conn);
+        let mult_burst = calculate_quality_multiplier(&conn, current_time);
         // At 2000ms: base multiplier ≈ 0.816, with burst: 0.816 * 0.7 ≈ 0.571
         assert!(
             (mult_burst - 0.571).abs() < 0.02,

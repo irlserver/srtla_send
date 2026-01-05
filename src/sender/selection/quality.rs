@@ -3,7 +3,6 @@
 //! This module calculates quality multipliers based on NAK history, RTT, and connection age.
 
 use crate::connection::SrtlaConnection;
-use crate::utils::now_ms;
 
 /// Startup grace period in milliseconds - prevents early NAKs from degrading connections
 const STARTUP_GRACE_PERIOD_MS: u64 = 30_000;
@@ -45,11 +44,14 @@ const MAX_RTT_BONUS: f64 = 1.03;
 /// - 0.5x-1.0x penalty for connections with recent NAKs (exponential decay)
 /// - 0.7x additional multiplier for NAK bursts (30% reduction for 5+ NAKs in short time)
 /// - 1.0x-1.03x RTT bonus for low-latency connections
-pub fn calculate_quality_multiplier(conn: &SrtlaConnection) -> f64 {
+///
+/// The `current_time_ms` parameter allows the caller to pass a cached timestamp
+/// to avoid repeated syscalls when processing multiple connections.
+pub fn calculate_quality_multiplier(conn: &SrtlaConnection, current_time_ms: u64) -> f64 {
     // Startup grace period: first 30 seconds after connection establishment
     // During this time, use simple scoring like original C version to go live fast
     // This prevents early NAKs from permanently degrading connections
-    let connection_age_ms = now_ms().saturating_sub(conn.connection_established_ms());
+    let connection_age_ms = current_time_ms.saturating_sub(conn.connection_established_ms());
     if connection_age_ms < STARTUP_GRACE_PERIOD_MS {
         // During startup grace period, only apply light penalties to prevent permanent
         // degradation

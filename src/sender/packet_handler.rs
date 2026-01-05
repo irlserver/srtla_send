@@ -14,7 +14,6 @@ use crate::connection::{SrtlaConnection, SrtlaIncoming};
 use crate::protocol;
 use crate::registration::SrtlaRegistrationManager;
 use crate::toggles::DynamicToggles;
-use crate::utils::now_ms;
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -70,11 +69,12 @@ pub async fn process_connection_events(
         }
     }
 
+    // Get current time once for all NAK processing
+    let current_time_ms = crate::utils::now_ms();
     for nak in incoming.nak_numbers.iter() {
         let mut handled = false;
         if let Some(entry) = seq_to_conn.get(nak) {
-            let current_time = now_ms();
-            if !entry.is_expired(current_time) {
+            if !entry.is_expired(current_time_ms) {
                 if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == entry.conn_id) {
                     conn.handle_nak(*nak as i32);
                     handled = true;
@@ -222,6 +222,9 @@ pub async fn handle_srt_packet(
             if n == 0 {
                 return;
             }
+            // Capture timestamp once at packet entry - reduces syscalls from 3-5 to 1 per packet
+            let packet_time_ms = crate::utils::now_ms();
+
             let pkt = &recv_buf[..n];
             let seq = protocol::get_srt_sequence_number(pkt);
             if !registration_complete {
@@ -236,6 +239,7 @@ pub async fn handle_srt_packet(
                         last_switch_time_ms,
                         seq_to_conn,
                         seq_order,
+                        packet_time_ms,
                     )
                     .await;
                 }
@@ -255,12 +259,11 @@ pub async fn handle_srt_packet(
             let effective_enable_quality = enable_quality && !classic;
             let effective_enable_explore = enable_explore && !classic;
 
-            let current_time_ms = now_ms();
             let sel_idx = select_connection_idx(
                 connections,
                 *last_selected_idx,
                 *last_switch_time_ms,
-                current_time_ms,
+                packet_time_ms,
                 effective_enable_quality,
                 effective_enable_explore,
                 classic,
@@ -275,6 +278,7 @@ pub async fn handle_srt_packet(
                     last_switch_time_ms,
                     seq_to_conn,
                     seq_order,
+                    packet_time_ms,
                 )
                 .await;
             } else {
@@ -296,6 +300,7 @@ pub async fn forward_via_connection(
     last_switch_time_ms: &mut u64,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
+    packet_time_ms: u64,
 ) {
     if sel_idx >= connections.len() {
         return;
@@ -315,10 +320,10 @@ pub async fn forward_via_connection(
             );
         }
         *last_selected_idx = Some(sel_idx);
-        *last_switch_time_ms = now_ms(); // Track when switch occurred
+        *last_switch_time_ms = packet_time_ms; // Track when switch occurred (use cached timestamp)
     }
     let conn = &mut connections[sel_idx];
-    if let Err(e) = conn.send_data_with_tracking(pkt, seq).await {
+    if let Err(e) = conn.send_data_with_tracking(pkt, seq, packet_time_ms).await {
         warn!(
             "{}: sendto() failed, marking for recovery: {}",
             conn.label, e
@@ -335,7 +340,7 @@ pub async fn forward_via_connection(
             s,
             SequenceTrackingEntry {
                 conn_id: connections[sel_idx].conn_id,
-                timestamp_ms: now_ms(),
+                timestamp_ms: packet_time_ms, // Use cached timestamp
             },
         );
         seq_order.push_back(s);

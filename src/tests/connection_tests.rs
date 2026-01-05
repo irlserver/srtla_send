@@ -32,12 +32,13 @@ mod tests {
     fn test_packet_tracking() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         // Test packet registration using the public register_packet method
         let initial_in_flight = conn.in_flight_packets;
 
         // Register a packet directly
-        conn.register_packet(100);
+        conn.register_packet(100, current_time);
 
         assert_eq!(conn.in_flight_packets, initial_in_flight + 1);
         assert_eq!(conn.packet_log[0], 100);
@@ -45,7 +46,7 @@ mod tests {
 
         // Test multiple packets
         for i in 1..=5 {
-            conn.register_packet(100 + i);
+            conn.register_packet(100 + i, current_time);
         }
         assert_eq!(conn.in_flight_packets, initial_in_flight + 6);
     }
@@ -54,10 +55,11 @@ mod tests {
     fn test_srt_ack_handling() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         // Register some packets
         for i in 1..=5 {
-            conn.register_packet(i * 10);
+            conn.register_packet(i * 10, current_time);
         }
         let initial_in_flight = conn.in_flight_packets;
         assert_eq!(initial_in_flight, 5);
@@ -82,12 +84,13 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
         let initial_window = conn.window;
+        let current_time = now_ms();
 
         // Register packets first (simulate sending them)
-        conn.register_packet(100);
-        conn.register_packet(101);
-        conn.register_packet(102);
-        conn.register_packet(103);
+        conn.register_packet(100, current_time);
+        conn.register_packet(101, current_time);
+        conn.register_packet(102, current_time);
+        conn.register_packet(103, current_time);
 
         // Test single NAK
         conn.handle_nak(100);
@@ -119,9 +122,10 @@ mod tests {
         let mut conn = rt.block_on(create_test_connection());
         let initial_window = conn.window;
         let initial_nak_count = conn.congestion.nak_count;
+        let current_time = now_ms();
 
         // Register a packet (simulate sending it)
-        conn.register_packet(100);
+        conn.register_packet(100, current_time);
 
         // Now handle a NAK for that same packet
         conn.handle_nak(100);
@@ -138,9 +142,10 @@ mod tests {
     fn test_nak_burst_timing() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         for i in 100..110 {
-            conn.register_packet(i);
+            conn.register_packet(i, current_time);
         }
 
         conn.handle_nak(100);
@@ -166,9 +171,10 @@ mod tests {
     fn test_nak_burst_reset_on_timeout() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         for i in 100..110 {
-            conn.register_packet(i);
+            conn.register_packet(i, current_time);
         }
 
         conn.handle_nak(100);
@@ -189,8 +195,9 @@ mod tests {
     fn test_nak_not_found_doesnt_affect_stats() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
-        conn.register_packet(100);
+        conn.register_packet(100, current_time);
 
         let initial_nak_count = conn.congestion.nak_count;
         let initial_burst_count = conn.congestion.nak_burst_count;
@@ -207,9 +214,10 @@ mod tests {
     fn test_nak_burst_warning_threshold() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         for i in 100..110 {
-            conn.register_packet(i);
+            conn.register_packet(i, current_time);
         }
 
         conn.handle_nak(100);
@@ -228,9 +236,10 @@ mod tests {
     fn test_nak_burst_reconnect_reset() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         for i in 100..105 {
-            conn.register_packet(i);
+            conn.register_packet(i, current_time);
         }
 
         conn.handle_nak(100);
@@ -251,10 +260,11 @@ mod tests {
     fn test_srtla_ack_handling() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         // Register some packets
         for i in 1..=3 {
-            conn.register_packet(i * 100);
+            conn.register_packet(i * 100, current_time);
         }
         assert_eq!(conn.in_flight_packets, 3);
 
@@ -278,11 +288,12 @@ mod tests {
     fn test_classic_vs_enhanced_mode_ack_handling() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         // Set up connection with some packets in flight
-        conn.register_packet(100);
-        conn.register_packet(200);
-        conn.register_packet(300);
+        conn.register_packet(100, current_time);
+        conn.register_packet(200, current_time);
+        conn.register_packet(300, current_time);
         assert_eq!(conn.in_flight_packets, 3);
 
         // Set window to a moderate value
@@ -299,7 +310,7 @@ mod tests {
 
         // Reset for enhanced mode test
         conn.window = initial_window;
-        conn.register_packet(400); // Add another packet
+        conn.register_packet(400, current_time); // Add another packet
         assert_eq!(conn.in_flight_packets, 3);
 
         // Test ENHANCED MODE: Should behave identically to classic for window growth
@@ -309,12 +320,12 @@ mod tests {
         conn.in_flight_packets = 0;
 
         // Add packets for testing
-        conn.register_packet(200);
-        conn.register_packet(300);
-        conn.register_packet(400);
-        conn.register_packet(500);
-        conn.register_packet(600);
-        conn.register_packet(700);
+        conn.register_packet(200, current_time);
+        conn.register_packet(300, current_time);
+        conn.register_packet(400, current_time);
+        conn.register_packet(500, current_time);
+        conn.register_packet(600, current_time);
+        conn.register_packet(700, current_time);
         assert_eq!(conn.in_flight_packets, 6);
 
         // First ACK - should NOT increase window immediately (boundary case: 5*1000 > 5000 is false)
@@ -325,8 +336,8 @@ mod tests {
         assert_eq!(conn.in_flight_packets, 5);
 
         // Add more to get above threshold
-        conn.register_packet(800);
-        conn.register_packet(900);
+        conn.register_packet(800, current_time);
+        conn.register_packet(900, current_time);
         assert_eq!(conn.in_flight_packets, 7);
 
         // Second ACK - decrements 7→6, check: 6*1000 > 5000 → TRUE, increase!
@@ -478,12 +489,13 @@ mod tests {
     fn test_nak_statistics() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         assert_eq!(conn.congestion.nak_count, 0);
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.time_since_last_nak_ms(), None);
 
-        conn.register_packet(100);
+        conn.register_packet(100, current_time);
         conn.handle_nak(100);
         assert_eq!(conn.congestion.nak_count, 1);
         assert_eq!(conn.congestion.nak_burst_count, 0);
@@ -511,11 +523,12 @@ mod tests {
     fn test_fast_recovery_mode() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         assert!(!conn.congestion.fast_recovery_mode);
 
         // Register packet first, then reduce window to trigger fast recovery
-        conn.register_packet(100);
+        conn.register_packet(100, current_time);
         conn.window = 1500;
         conn.handle_nak(100);
 
@@ -523,7 +536,7 @@ mod tests {
 
         // Test recovery exit condition
         conn.window = 15_000;
-        conn.register_packet(200);
+        conn.register_packet(200, current_time);
         conn.handle_srtla_ack_specific(200, false);
 
         assert!(!conn.congestion.fast_recovery_mode);
@@ -533,10 +546,11 @@ mod tests {
     fn test_packet_log_wraparound() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         // Fill up the packet log beyond its size
         for i in 0..(PKT_LOG_SIZE + 10) {
-            conn.register_packet(i as i32);
+            conn.register_packet(i as i32, current_time);
         }
 
         // Should have wrapped around
@@ -555,9 +569,10 @@ mod tests {
     fn test_progressive_window_recovery_rates() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         // Reduce window through NAKs
-        conn.register_packet(100);
+        conn.register_packet(100, current_time);
         conn.handle_nak(100);
         let reduced_window = conn.window;
 
@@ -625,9 +640,10 @@ mod tests {
     fn test_progressive_recovery_with_fast_mode() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         // Reduce window and trigger fast recovery mode
-        conn.register_packet(100);
+        conn.register_packet(100, current_time);
         conn.window = 1500;
         conn.handle_nak(100);
         assert!(conn.congestion.fast_recovery_mode);
@@ -669,9 +685,10 @@ mod tests {
     fn test_progressive_recovery_timing_constraints() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
+        let current_time = now_ms();
 
         // Reduce window
-        conn.register_packet(100);
+        conn.register_packet(100, current_time);
         conn.handle_nak(100);
         let reduced_window = conn.window;
 

@@ -143,14 +143,19 @@ impl SrtlaConnection {
     }
 
     #[inline]
-    pub async fn send_data_with_tracking(&mut self, data: &[u8], seq: Option<u32>) -> Result<()> {
+    pub async fn send_data_with_tracking(
+        &mut self,
+        data: &[u8],
+        seq: Option<u32>,
+        send_time_ms: u64,
+    ) -> Result<()> {
         self.socket.send(data).await?;
         // Track bytes sent for bitrate calculation
         self.bitrate.update_on_send(data.len() as u64);
         // Update last_sent timestamp
         self.last_sent = Some(Instant::now());
         if let Some(s) = seq {
-            self.register_packet(s as i32);
+            self.register_packet(s as i32, send_time_ms);
         }
         Ok(())
     }
@@ -334,10 +339,10 @@ impl SrtlaConnection {
         Ok(())
     }
 
-    pub fn register_packet(&mut self, seq: i32) {
+    pub fn register_packet(&mut self, seq: i32, send_time_ms: u64) {
         let idx = self.packet_idx % PKT_LOG_SIZE;
         self.packet_log[idx] = seq;
-        self.packet_send_times_ms[idx] = now_ms();
+        self.packet_send_times_ms[idx] = send_time_ms; // Use passed timestamp instead of syscall
 
         // Debug when packet log wraps around
         let old_idx = self.packet_idx;

@@ -63,7 +63,7 @@ pub fn select_connection(
         let score = if !enable_quality {
             base
         } else {
-            let quality_mult = calculate_quality_multiplier(c);
+            let quality_mult = calculate_quality_multiplier(c, current_time_ms);
             let final_score = base * quality_mult;
 
             // Log quality issues and recoveries for debugging
