@@ -130,7 +130,7 @@ impl SrtlaConnection {
         })
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn get_score(&self) -> i32 {
         if !self.connected {
             return -1;
