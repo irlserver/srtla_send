@@ -35,7 +35,8 @@ use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 use crate::connection::SrtlaConnection;
 use crate::protocol::PKT_LOG_SIZE;
 use crate::registration::SrtlaRegistrationManager;
-use crate::toggles::DynamicToggles;
+#[allow(unused_imports)]
+use crate::toggles::{DynamicToggles, ToggleSnapshot};
 use crate::utils::now_ms;
 
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
@@ -154,6 +155,8 @@ pub async fn run_sender_with_toggles(
     loop {
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
+                // Cache toggle state once per select iteration to avoid atomic loads per packet
+                let toggle_snap = toggles.snapshot();
                 handle_srt_packet(
                     res,
                     &mut recv_buf,
@@ -164,7 +167,7 @@ pub async fn run_sender_with_toggles(
                     &mut seq_order,
                     &mut last_client_addr,
                     reg.has_connected,
-                    &toggles,
+                    &toggle_snap,
                 )
                 .await;
                 drain_packet_queue(
@@ -176,11 +179,13 @@ pub async fn run_sender_with_toggles(
                     &local_listener,
                     &mut seq_to_conn,
                     &mut seq_order,
-                    &toggles,
+                    &toggle_snap,
                 )
                 .await;
             }
             packet = packet_rx.recv() => {
+                // Cache toggle state once per select iteration
+                let toggle_snap = toggles.snapshot();
                 if let Some(packet) = packet {
                     handle_uplink_packet(
                         packet,
@@ -191,7 +196,7 @@ pub async fn run_sender_with_toggles(
                         &local_listener,
                         &mut seq_to_conn,
                         &mut seq_order,
-                        &toggles,
+                        &toggle_snap,
                     ).await;
                     drain_packet_queue(
                         &mut packet_rx,
@@ -202,7 +207,7 @@ pub async fn run_sender_with_toggles(
                         &local_listener,
                         &mut seq_to_conn,
                         &mut seq_order,
-                        &toggles,
+                        &toggle_snap,
                     ).await;
                 } else {
                     return Ok(());
@@ -250,6 +255,8 @@ pub async fn run_sender_with_toggles(
                 }
 
                 sync_readers(&connections, &mut reader_handles, &packet_tx);
+                // Cache toggle state for drain
+                let toggle_snap = toggles.snapshot();
                 drain_packet_queue(
                     &mut packet_rx,
                     &mut connections,
@@ -259,7 +266,7 @@ pub async fn run_sender_with_toggles(
                     &local_listener,
                     &mut seq_to_conn,
                     &mut seq_order,
-                    &toggles,
+                    &toggle_snap,
                 )
                 .await;
             }
@@ -273,6 +280,8 @@ pub async fn run_sender_with_toggles(
                     });
                     info!("uplink IP changes queued for next processing cycle");
                 }
+                // Cache toggle state for drain
+                let toggle_snap = toggles.snapshot();
                 drain_packet_queue(
                     &mut packet_rx,
                     &mut connections,
@@ -282,7 +291,7 @@ pub async fn run_sender_with_toggles(
                     &local_listener,
                     &mut seq_to_conn,
                     &mut seq_order,
-                    &toggles,
+                    &toggle_snap,
                 )
                 .await;
             }
@@ -293,6 +302,8 @@ pub async fn run_sender_with_toggles(
     loop {
         tokio::select! {
             res = local_listener.recv_from(&mut recv_buf) => {
+                // Cache toggle state once per select iteration to avoid atomic loads per packet
+                let toggle_snap = toggles.snapshot();
                 handle_srt_packet(
                     res,
                     &mut recv_buf,
@@ -303,7 +314,7 @@ pub async fn run_sender_with_toggles(
                     &mut seq_order,
                     &mut last_client_addr,
                     reg.has_connected,
-                    &toggles,
+                    &toggle_snap,
                 )
                 .await;
                 drain_packet_queue(
@@ -315,11 +326,13 @@ pub async fn run_sender_with_toggles(
                     &local_listener,
                     &mut seq_to_conn,
                     &mut seq_order,
-                    &toggles,
+                    &toggle_snap,
                 )
                 .await;
             }
             packet = packet_rx.recv() => {
+                // Cache toggle state once per select iteration
+                let toggle_snap = toggles.snapshot();
                 if let Some(packet) = packet {
                     handle_uplink_packet(
                         packet,
@@ -330,7 +343,7 @@ pub async fn run_sender_with_toggles(
                         &local_listener,
                         &mut seq_to_conn,
                         &mut seq_order,
-                        &toggles,
+                        &toggle_snap,
                     ).await;
                     drain_packet_queue(
                         &mut packet_rx,
@@ -341,7 +354,7 @@ pub async fn run_sender_with_toggles(
                         &local_listener,
                         &mut seq_to_conn,
                         &mut seq_order,
-                        &toggles,
+                        &toggle_snap,
                     ).await;
                 } else {
                     return Ok(());
@@ -390,6 +403,8 @@ pub async fn run_sender_with_toggles(
                 }
 
                 sync_readers(&connections, &mut reader_handles, &packet_tx);
+                // Cache toggle state for drain
+                let toggle_snap = toggles.snapshot();
                 drain_packet_queue(
                     &mut packet_rx,
                     &mut connections,
@@ -399,7 +414,7 @@ pub async fn run_sender_with_toggles(
                     &local_listener,
                     &mut seq_to_conn,
                     &mut seq_order,
-                    &toggles,
+                    &toggle_snap,
                 )
                 .await;
             }

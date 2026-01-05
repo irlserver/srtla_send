@@ -13,7 +13,7 @@ use super::uplink::UplinkPacket;
 use crate::connection::{SrtlaConnection, SrtlaIncoming};
 use crate::protocol;
 use crate::registration::SrtlaRegistrationManager;
-use crate::toggles::{DynamicToggles, ToggleSnapshot};
+use crate::toggles::ToggleSnapshot;
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -110,7 +110,7 @@ pub async fn handle_uplink_packet(
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
-    toggles: &DynamicToggles,
+    toggle_snap: &ToggleSnapshot,
 ) {
     if packet.bytes.is_empty() {
         return;
@@ -121,9 +121,6 @@ pub async fn handle_uplink_packet(
             .await
         {
             Ok(incoming) => {
-                let classic = toggles
-                    .classic_mode
-                    .load(std::sync::atomic::Ordering::Relaxed);
                 if let Err(err) = process_connection_events(
                     idx,
                     connections,
@@ -133,7 +130,7 @@ pub async fn handle_uplink_packet(
                     local_listener,
                     seq_to_conn,
                     seq_order,
-                    classic,
+                    toggle_snap.classic_mode,
                     Some(incoming),
                 )
                 .await
@@ -159,7 +156,7 @@ pub async fn drain_packet_queue(
     local_listener: &UdpSocket,
     seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
     seq_order: &mut VecDeque<u32>,
-    toggles: &DynamicToggles,
+    toggle_snap: &ToggleSnapshot,
 ) {
     while let Ok(packet) = packet_rx.try_recv() {
         handle_uplink_packet(
@@ -171,7 +168,7 @@ pub async fn drain_packet_queue(
             local_listener,
             seq_to_conn,
             seq_order,
-            toggles,
+            toggle_snap,
         )
         .await;
     }
@@ -204,12 +201,12 @@ fn select_pre_registration_connection(
         .map(|(i, _)| i)
 }
 
-/// Handle incoming SRT packet with pre-cached toggle snapshot
+/// Handle incoming SRT packet
 ///
-/// This variant accepts a pre-cached `ToggleSnapshot` to avoid atomic loads per packet.
-/// Use this when processing multiple packets in a batch.
+/// Uses a pre-cached `ToggleSnapshot` to avoid atomic loads per packet.
+/// The caller should create a snapshot once per select iteration for optimal performance.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle_srt_packet_with_snapshot(
+pub async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
@@ -285,39 +282,6 @@ pub async fn handle_srt_packet_with_snapshot(
         }
         Err(e) => warn!("error reading local SRT: {}", e),
     }
-}
-
-/// Handle incoming SRT packet
-///
-/// This variant loads toggles atomically per packet. For batch processing,
-/// prefer `handle_srt_packet_with_snapshot` with a pre-cached snapshot.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_srt_packet(
-    res: Result<(usize, SocketAddr), std::io::Error>,
-    recv_buf: &mut [u8],
-    connections: &mut [SrtlaConnection],
-    last_selected_idx: &mut Option<usize>,
-    last_switch_time_ms: &mut u64,
-    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
-    seq_order: &mut VecDeque<u32>,
-    last_client_addr: &mut Option<SocketAddr>,
-    registration_complete: bool,
-    toggles: &DynamicToggles,
-) {
-    let snap = toggles.snapshot();
-    handle_srt_packet_with_snapshot(
-        res,
-        recv_buf,
-        connections,
-        last_selected_idx,
-        last_switch_time_ms,
-        seq_to_conn,
-        seq_order,
-        last_client_addr,
-        registration_complete,
-        &snap,
-    )
-    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
