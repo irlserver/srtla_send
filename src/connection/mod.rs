@@ -221,6 +221,7 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
+        local_listener: &UdpSocket,
         instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
         client_addr: Option<SocketAddr>,
     ) -> Result<SrtlaIncoming> {
@@ -235,6 +236,7 @@ impl SrtlaConnection {
                     self.process_packet_internal(
                         conn_idx,
                         reg,
+                        local_listener,
                         instant_forwarder,
                         client_addr,
                         &buf[..n],
@@ -256,6 +258,7 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
+        local_listener: &UdpSocket,
         instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
         client_addr: Option<SocketAddr>,
         data: &[u8],
@@ -264,6 +267,7 @@ impl SrtlaConnection {
         self.process_packet_internal(
             conn_idx,
             reg,
+            local_listener,
             instant_forwarder,
             client_addr,
             data,
@@ -277,6 +281,7 @@ impl SrtlaConnection {
         &mut self,
         conn_idx: usize,
         reg: &mut SrtlaRegistrationManager,
+        local_listener: &UdpSocket,
         instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
         client_addr: Option<SocketAddr>,
         data: &[u8],
@@ -315,9 +320,17 @@ impl SrtlaConnection {
                     incoming.ack_numbers.push(ack);
                 }
                 let ack_packet = SmallVec::from_slice_copy(data);
-                // Send ACK immediately if we have a client address
+                // Try synchronous send first (avoids task context switch)
+                // Only fall back to channel if socket would block
                 if let Some(addr) = client_addr {
-                    let _ = instant_forwarder.send((addr, ack_packet.clone()));
+                    match local_listener.try_send_to(&ack_packet, addr) {
+                        Ok(_) => {} // Fast path: sent directly
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Slow path: socket busy, use channel
+                            let _ = instant_forwarder.send((addr, ack_packet.clone()));
+                        }
+                        Err(_) => {} // Other errors: drop silently (same as before)
+                    }
                 }
                 incoming.forward_to_client.push(ack_packet);
             } else if pt == SRT_TYPE_NAK {

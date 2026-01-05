@@ -37,7 +37,7 @@ pub async fn process_connection_events(
         overridden
     } else {
         connections[idx]
-            .drain_incoming(idx, reg, instant_tx, last_client_addr)
+            .drain_incoming(idx, reg, local_listener, instant_tx, last_client_addr)
             .await?
     };
 
@@ -114,7 +114,14 @@ pub async fn handle_uplink_packet(
     }
     if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
         match connections[idx]
-            .process_packet(idx, reg, instant_tx, last_client_addr, &packet.bytes)
+            .process_packet(
+                idx,
+                reg,
+                local_listener,
+                instant_tx,
+                last_client_addr,
+                &packet.bytes,
+            )
             .await
         {
             Ok(incoming) => {
