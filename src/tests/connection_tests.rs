@@ -41,8 +41,9 @@ mod tests {
         conn.register_packet(100, current_time);
 
         assert_eq!(conn.in_flight_packets, initial_in_flight + 1);
-        assert_eq!(conn.packet_log[0], 100);
-        assert!(conn.packet_send_times_ms[0] > 0);
+        // packet_log is now a HashMap: seq -> send_time_ms
+        assert!(conn.packet_log.contains_key(&100));
+        assert!(conn.packet_log.get(&100).unwrap() > &0);
 
         // Test multiple packets
         for i in 1..=5 {
@@ -543,25 +544,25 @@ mod tests {
     }
 
     #[test]
-    fn test_packet_log_wraparound() {
+    fn test_packet_log_capacity() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
         let current_time = now_ms();
 
-        // Fill up the packet log beyond its size
+        // Add more packets than default capacity - HashMap grows dynamically
         for i in 0..(PKT_LOG_SIZE + 10) {
             conn.register_packet(i as i32, current_time);
         }
 
-        // Should have wrapped around
-        assert_eq!(conn.packet_idx, 10);
+        // HashMap stores all packets (no wraparound like fixed array)
+        assert_eq!(conn.packet_log.len(), PKT_LOG_SIZE + 10);
         assert_eq!(conn.in_flight_packets, PKT_LOG_SIZE as i32 + 10);
 
-        // Verify that old packets can still be found and acknowledged
+        // Verify that packets can be found and acknowledged
         let recent_seq = (PKT_LOG_SIZE + 5) as i32;
         conn.handle_srt_ack(recent_seq);
 
-        // Should have reduced in-flight count
+        // Should have reduced in-flight count and removed acked packets from log
         assert!(conn.in_flight_packets < PKT_LOG_SIZE as i32 + 10);
     }
 

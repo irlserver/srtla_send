@@ -4,6 +4,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
@@ -32,9 +33,7 @@ pub async fn create_test_connection() -> SrtlaConnection {
         connected: true,
         window: WINDOW_DEF * WINDOW_MULT,
         in_flight_packets: 0,
-        packet_log: [-1; PKT_LOG_SIZE],
-        packet_send_times_ms: [0; PKT_LOG_SIZE],
-        packet_idx: 0,
+        packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
         last_received: Some(Instant::now()),
         last_sent: None,
         rtt: RttTracker::default(),
@@ -69,9 +68,7 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
             connected: true,
             window: WINDOW_DEF * WINDOW_MULT,
             in_flight_packets: 0,
-            packet_log: [-1; PKT_LOG_SIZE],
-            packet_send_times_ms: [0; PKT_LOG_SIZE],
-            packet_idx: 0,
+            packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
             last_received: Some(Instant::now()),
             last_sent: None,
             rtt: RttTracker::default(),

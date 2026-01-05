@@ -15,6 +15,7 @@ pub use congestion::CongestionControl;
 pub use incoming::SrtlaIncoming;
 pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 pub use socket::{bind_from_ip, resolve_remote};
 use tokio::net::UdpSocket;
@@ -56,18 +57,12 @@ pub struct SrtlaConnection {
     pub in_flight_packets: i32,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) in_flight_packets: i32,
+    /// Packet log: maps sequence number -> send timestamp (ms).
+    /// Uses FxHashMap for O(1) insert/remove instead of O(256) linear scan.
     #[cfg(feature = "test-internals")]
-    pub packet_log: [i32; PKT_LOG_SIZE],
+    pub packet_log: FxHashMap<i32, u64>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) packet_log: [i32; PKT_LOG_SIZE],
-    #[cfg(feature = "test-internals")]
-    pub packet_send_times_ms: [u64; PKT_LOG_SIZE],
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) packet_send_times_ms: [u64; PKT_LOG_SIZE],
-    #[cfg(feature = "test-internals")]
-    pub packet_idx: usize,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) packet_idx: usize,
+    pub(crate) packet_log: FxHashMap<i32, u64>,
     #[cfg(feature = "test-internals")]
     pub last_received: Option<Instant>,
     #[cfg(not(feature = "test-internals"))]
@@ -115,9 +110,7 @@ impl SrtlaConnection {
             connected: false,
             window: WINDOW_DEF * WINDOW_MULT,
             in_flight_packets: 0,
-            packet_log: [-1; PKT_LOG_SIZE],
-            packet_send_times_ms: [0; PKT_LOG_SIZE],
-            packet_idx: 0,
+            packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
             last_received: None,
             last_sent: None,
             rtt: RttTracker::default(),
@@ -339,43 +332,24 @@ impl SrtlaConnection {
         Ok(())
     }
 
+    /// Register a packet as in-flight. O(1) insert.
+    #[inline]
     pub fn register_packet(&mut self, seq: i32, send_time_ms: u64) {
-        let idx = self.packet_idx % PKT_LOG_SIZE;
-        self.packet_log[idx] = seq;
-        self.packet_send_times_ms[idx] = send_time_ms; // Use passed timestamp instead of syscall
-
-        // Debug when packet log wraps around
-        let old_idx = self.packet_idx;
-        self.packet_idx = self.packet_idx.wrapping_add(1) % PKT_LOG_SIZE;
-        if old_idx == PKT_LOG_SIZE - 1 && self.packet_idx == 0 {
-            debug!("{}: packet log wrapped around (seq={})", self.label, seq);
-        }
-
-        self.in_flight_packets = self.in_flight_packets.saturating_add(1);
+        self.packet_log.insert(seq, send_time_ms);
+        self.in_flight_packets = self.packet_log.len() as i32;
     }
 
+    /// Handle SRT cumulative ACK - clears all packets with seq <= ack.
+    /// This is O(n) due to cumulative ACK semantics, but uses efficient retain().
     pub fn handle_srt_ack(&mut self, ack: i32) {
-        let mut ack_send_time_ms: Option<u64> = None;
-        let mut remaining_count = 0;
+        // Get send time for RTT calculation before removing
+        let ack_send_time_ms = self.packet_log.get(&ack).copied();
 
-        for i in 0..PKT_LOG_SIZE {
-            let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
-            let val = self.packet_log[idx];
-            if val == ack {
-                self.packet_log[idx] = -1;
-                let t = self.packet_send_times_ms[idx];
-                if t != 0 {
-                    ack_send_time_ms = Some(t);
-                }
-            } else if val > 0 && val < ack {
-                self.packet_log[idx] = -1;
-            } else if val > 0 {
-                remaining_count += 1;
-            }
-        }
+        // Remove all packets with seq <= ack (cumulative ACK)
+        self.packet_log.retain(|&seq, _| seq > ack);
+        self.in_flight_packets = self.packet_log.len() as i32;
 
-        self.in_flight_packets = remaining_count;
-
+        // Update RTT estimate if we found the acked packet
         if let Some(sent_ms) = ack_send_time_ms {
             let now = now_ms();
             let rtt = now.saturating_sub(sent_ms);
@@ -385,59 +359,40 @@ impl SrtlaConnection {
         }
     }
 
+    /// Handle NAK for a specific sequence. O(1) remove.
+    #[inline]
     pub fn handle_nak(&mut self, seq: i32) -> bool {
-        let mut found = false;
-        for i in 0..PKT_LOG_SIZE {
-            let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
-            if self.packet_log[idx] == seq {
-                self.packet_log[idx] = -1;
-                found = true;
-                break;
-            }
+        let found = self.packet_log.remove(&seq).is_some();
+        if found {
+            self.in_flight_packets = self.packet_log.len() as i32;
+            self.congestion
+                .handle_nak(&mut self.window, seq, &self.label);
         }
-
-        if !found {
-            return false;
-        }
-
-        self.congestion
-            .handle_nak(&mut self.window, seq, &self.label)
+        found
     }
 
+    /// Handle SRTLA ACK for a specific sequence. O(1) remove.
+    #[inline]
     pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool) -> bool {
-        // Find the specific packet in the log and handle targeted logic
-        // This mimics the first phase of the original implementation's
-        // register_srtla_ack
-        let mut found = false;
+        let found = self.packet_log.remove(&seq).is_some();
+        if found {
+            self.in_flight_packets = self.packet_log.len() as i32;
 
-        // Search backwards through the packet log (most recent first)
-        for i in 0..PKT_LOG_SIZE {
-            let idx = (self.packet_idx + PKT_LOG_SIZE - 1 - i) % PKT_LOG_SIZE;
-            if self.packet_log[idx] == seq {
-                found = true;
-                if self.in_flight_packets > 0 {
-                    self.in_flight_packets -= 1;
-                }
-                self.packet_log[idx] = -1;
-
-                if classic_mode {
-                    self.congestion.handle_srtla_ack_specific_classic(
-                        &mut self.window,
-                        self.in_flight_packets,
-                        seq,
-                        &self.label,
-                    );
-                } else {
-                    self.congestion.handle_srtla_ack_enhanced(
-                        &mut self.window,
-                        self.in_flight_packets,
-                        &self.label,
-                    );
-                }
-                break;
+            if classic_mode {
+                self.congestion.handle_srtla_ack_specific_classic(
+                    &mut self.window,
+                    self.in_flight_packets,
+                    seq,
+                    &self.label,
+                );
+            } else {
+                self.congestion.handle_srtla_ack_enhanced(
+                    &mut self.window,
+                    self.in_flight_packets,
+                    &self.label,
+                );
             }
         }
-
         found
     }
 
@@ -544,7 +499,7 @@ impl SrtlaConnection {
         // links can ramp quickly once registration completes.
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
-        self.packet_log = [-1; PKT_LOG_SIZE];
+        self.packet_log.clear();
         // Set grace deadline to 0 to indicate this connection is immediately timed out
         // (matches C behavior of setting last_rcvd = 1)
         self.reconnection.startup_grace_deadline_ms = 0;
@@ -599,9 +554,7 @@ impl SrtlaConnection {
         self.last_received = None;
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
-        self.packet_log = [-1; PKT_LOG_SIZE];
-        self.packet_idx = 0;
-        self.packet_send_times_ms = [0; PKT_LOG_SIZE];
+        self.packet_log.clear();
 
         // Use encapsulated reset methods for submodules
         self.congestion.reset();
