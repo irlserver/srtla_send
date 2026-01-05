@@ -28,6 +28,28 @@ use crate::utils::now_ms;
 
 const STARTUP_GRACE_MS: u64 = 1_500;
 
+/// Interval in milliseconds between quality multiplier recalculations.
+/// Caching reduces expensive exp() calls from every packet to ~20 times per second.
+pub const QUALITY_CACHE_INTERVAL_MS: u64 = 50;
+
+/// Cached quality multiplier to avoid expensive recalculations on every packet.
+#[derive(Clone, Copy, Debug)]
+pub struct CachedQuality {
+    /// The cached quality multiplier value
+    pub multiplier: f64,
+    /// Timestamp when the multiplier was last calculated
+    pub last_calculated_ms: u64,
+}
+
+impl Default for CachedQuality {
+    fn default() -> Self {
+        Self {
+            multiplier: 1.0,
+            last_calculated_ms: 0,
+        }
+    }
+}
+
 pub struct SrtlaConnection {
     pub(crate) conn_id: u64,
     #[cfg(feature = "test-internals")]
@@ -88,6 +110,9 @@ pub struct SrtlaConnection {
     pub reconnection: ReconnectionState,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) reconnection: ReconnectionState,
+    /// Cached quality multiplier for performance optimization.
+    /// Recalculated every 50ms instead of on every packet.
+    pub(crate) quality_cache: CachedQuality,
 }
 
 impl SrtlaConnection {
@@ -120,6 +145,7 @@ impl SrtlaConnection {
                 startup_grace_deadline_ms: startup_deadline,
                 ..Default::default()
             },
+            quality_cache: CachedQuality::default(),
         })
     }
 
@@ -519,6 +545,23 @@ impl SrtlaConnection {
 
     pub fn connection_established_ms(&self) -> u64 {
         self.reconnection.connection_established_ms
+    }
+
+    /// Get the cached quality multiplier, recalculating if stale.
+    ///
+    /// This is more efficient than calling `calculate_quality_multiplier()` on every packet
+    /// because it only recalculates every 50ms.
+    #[inline(always)]
+    pub fn get_cached_quality_multiplier(&mut self, current_time_ms: u64) -> f64 {
+        use crate::sender::calculate_quality_multiplier;
+
+        if current_time_ms.saturating_sub(self.quality_cache.last_calculated_ms)
+            >= QUALITY_CACHE_INTERVAL_MS
+        {
+            self.quality_cache.multiplier = calculate_quality_multiplier(self, current_time_ms);
+            self.quality_cache.last_calculated_ms = current_time_ms;
+        }
+        self.quality_cache.multiplier
     }
 
     pub fn should_attempt_reconnect(&self) -> bool {

@@ -23,7 +23,7 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&connections, None, 0, 0, false, false, true);
+        let selected = select_connection_idx(&mut connections, None, 0, 0, false, false, true);
         assert_eq!(selected, Some(1));
     }
 
@@ -31,19 +31,21 @@ mod tests {
     fn test_select_connection_idx_quality_scoring() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
 
         // Connection 0: Recent NAKs - should get low score
         connections[0].congestion.nak_count = 5;
-        connections[0].congestion.last_nak_time_ms = now_ms() - 1000; // 1 second ago
+        connections[0].congestion.last_nak_time_ms = current_time - 1000; // 1 second ago
 
         // Connection 1: No NAKs - should get bonus
         connections[1].congestion.nak_count = 0;
 
         // Connection 2: Old NAKs - should get partial penalty
         connections[2].congestion.nak_count = 3;
-        connections[2].congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
+        connections[2].congestion.last_nak_time_ms = current_time - 8000; // 8 seconds ago
 
-        let selected = select_connection_idx(&connections, None, 0, 0, true, false, false);
+        let selected =
+            select_connection_idx(&mut connections, None, 0, current_time, true, false, false);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -53,18 +55,20 @@ mod tests {
     fn test_select_connection_idx_burst_nak_penalty() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
 
         // Connection 0: NAK burst
         connections[0].congestion.nak_count = 5;
         connections[0].congestion.nak_burst_count = 3;
-        connections[0].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
+        connections[0].congestion.last_nak_time_ms = current_time - 2000; // 2 seconds ago
 
         // Connection 1: Same NAK count but no burst
         connections[1].congestion.nak_count = 5;
         connections[1].congestion.nak_burst_count = 0;
-        connections[1].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
+        connections[1].congestion.last_nak_time_ms = current_time - 2000; // 2 seconds ago
 
-        let selected = select_connection_idx(&connections, None, 0, 0, true, false, false);
+        let selected =
+            select_connection_idx(&mut connections, None, 0, current_time, true, false, false);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -86,7 +90,7 @@ mod tests {
         // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
         // This prevents rapid thrashing between connections under bursty score changes
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -117,7 +121,7 @@ mod tests {
         // After cooldown: per-packet selection can now choose the better connection
         // From this point forward, all subsequent packets will route via connection 1
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -152,7 +156,7 @@ mod tests {
         // Cooldown is bypassed when current connection is invalid/timed out
         // Per-packet selection immediately switches to valid connection
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -184,7 +188,7 @@ mod tests {
         // Enable exploration, but should be blocked by cooldown
         // This prevents exploration from causing rapid per-packet routing changes
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -217,7 +221,7 @@ mod tests {
         // Classic mode: per-packet selection ALWAYS picks highest score connection
         // No dampening, no hysteresis - matches original C implementation
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -418,7 +422,7 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&connections, None, 0, 0, false, false, false);
+        let selected = select_connection_idx(&mut connections, None, 0, 0, false, false, false);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -427,10 +431,10 @@ mod tests {
     #[test]
     fn test_exploration_mode() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let connections = rt.block_on(create_test_connections(3));
+        let mut connections = rt.block_on(create_test_connections(3));
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&connections, None, 0, 0, false, true, false);
+        let _selected = select_connection_idx(&mut connections, None, 0, 0, false, true, false);
 
         // The result depends on timing, but should not panic
     }
