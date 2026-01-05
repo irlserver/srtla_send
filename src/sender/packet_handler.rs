@@ -13,7 +13,7 @@ use super::uplink::UplinkPacket;
 use crate::connection::{SrtlaConnection, SrtlaIncoming};
 use crate::protocol;
 use crate::registration::SrtlaRegistrationManager;
-use crate::toggles::DynamicToggles;
+use crate::toggles::{DynamicToggles, ToggleSnapshot};
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -204,8 +204,12 @@ fn select_pre_registration_connection(
         .map(|(i, _)| i)
 }
 
+/// Handle incoming SRT packet with pre-cached toggle snapshot
+///
+/// This variant accepts a pre-cached `ToggleSnapshot` to avoid atomic loads per packet.
+/// Use this when processing multiple packets in a batch.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle_srt_packet(
+pub async fn handle_srt_packet_with_snapshot(
     res: Result<(usize, SocketAddr), std::io::Error>,
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
@@ -215,7 +219,7 @@ pub async fn handle_srt_packet(
     seq_order: &mut VecDeque<u32>,
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
-    toggles: &DynamicToggles,
+    toggle_snap: &ToggleSnapshot,
 ) {
     match res {
         Ok((n, src)) => {
@@ -246,18 +250,11 @@ pub async fn handle_srt_packet(
                 *last_client_addr = Some(src);
                 return;
             }
-            let enable_quality = toggles
-                .quality_scoring_enabled
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let enable_explore = toggles
-                .exploration_enabled
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let classic = toggles
-                .classic_mode
-                .load(std::sync::atomic::Ordering::Relaxed);
 
-            let effective_enable_quality = enable_quality && !classic;
-            let effective_enable_explore = enable_explore && !classic;
+            let effective_enable_quality =
+                toggle_snap.quality_scoring_enabled && !toggle_snap.classic_mode;
+            let effective_enable_explore =
+                toggle_snap.exploration_enabled && !toggle_snap.classic_mode;
 
             let sel_idx = select_connection_idx(
                 connections,
@@ -266,7 +263,7 @@ pub async fn handle_srt_packet(
                 packet_time_ms,
                 effective_enable_quality,
                 effective_enable_explore,
-                classic,
+                toggle_snap.classic_mode,
             );
             if let Some(sel_idx) = sel_idx {
                 forward_via_connection(
@@ -288,6 +285,39 @@ pub async fn handle_srt_packet(
         }
         Err(e) => warn!("error reading local SRT: {}", e),
     }
+}
+
+/// Handle incoming SRT packet
+///
+/// This variant loads toggles atomically per packet. For batch processing,
+/// prefer `handle_srt_packet_with_snapshot` with a pre-cached snapshot.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_srt_packet(
+    res: Result<(usize, SocketAddr), std::io::Error>,
+    recv_buf: &mut [u8],
+    connections: &mut [SrtlaConnection],
+    last_selected_idx: &mut Option<usize>,
+    last_switch_time_ms: &mut u64,
+    seq_to_conn: &mut HashMap<u32, SequenceTrackingEntry>,
+    seq_order: &mut VecDeque<u32>,
+    last_client_addr: &mut Option<SocketAddr>,
+    registration_complete: bool,
+    toggles: &DynamicToggles,
+) {
+    let snap = toggles.snapshot();
+    handle_srt_packet_with_snapshot(
+        res,
+        recv_buf,
+        connections,
+        last_selected_idx,
+        last_switch_time_ms,
+        seq_to_conn,
+        seq_order,
+        last_client_addr,
+        registration_complete,
+        &snap,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
