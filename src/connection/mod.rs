@@ -277,6 +277,7 @@ impl SrtlaConnection {
         Ok(incoming)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_packet_internal(
         &mut self,
         conn_idx: usize,
