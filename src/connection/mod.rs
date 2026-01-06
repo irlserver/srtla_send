@@ -93,6 +93,8 @@ pub struct SrtlaConnection {
     pub last_sent: Option<Instant>,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) last_sent: Option<Instant>,
+    /// Timestamp of the last keepalive sent (for periodic telemetry)
+    pub(crate) last_keepalive_sent: Option<Instant>,
     // Sub-structs for organized state management
     #[cfg(feature = "test-internals")]
     pub rtt: RttTracker,
@@ -138,6 +140,7 @@ impl SrtlaConnection {
             packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
             last_received: None,
             last_sent: None,
+            last_keepalive_sent: None,
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
             bitrate: BitrateTracker::default(),
@@ -180,7 +183,7 @@ impl SrtlaConnection {
     }
 
     pub async fn send_keepalive(&mut self) -> Result<()> {
-        // Create extended keepalive with connection info
+        // Create extended keepalive with connection info (telemetry for receiver)
         let info = ConnectionInfo {
             conn_id: self.conn_id as u32,
             window: self.window,
@@ -191,8 +194,10 @@ impl SrtlaConnection {
         };
         let pkt = create_keepalive_packet_ext(info);
         self.socket.send(&pkt).await?;
+        let now_instant = Instant::now();
         let now = now_ms();
-        self.last_sent = Some(Instant::now()); // Track all sends, including keepalives
+        self.last_sent = Some(now_instant);
+        self.last_keepalive_sent = Some(now_instant);
         // Only set waiting flag and timestamp when we intend to measure RTT
         if !self.rtt.waiting_for_keepalive_response
             && (self.rtt.last_rtt_measurement_ms == 0
@@ -480,17 +485,16 @@ impl SrtlaConnection {
     }
 
     pub fn needs_keepalive(&self) -> bool {
-        // Match C implementation: send keepalive if we haven't sent ANY data (not just
-        // keepalives) in IDLE_TIME. This prevents unnecessary keepalives during active
-        // transmission.
-        let now = Instant::now();
+        // Send keepalive every IDLE_TIME (1s) unconditionally on all connections.
+        // Moblin does this with standard 10-byte keepalives; we use extended 38-byte
+        // keepalives to provide the receiver with telemetry (window, RTT, NAKs, bitrate).
         if !self.connected {
             return false;
         }
 
-        match self.last_sent {
-            None => true, // Never sent anything, need keepalive
-            Some(last) => now.duration_since(last).as_secs() >= IDLE_TIME,
+        match self.last_keepalive_sent {
+            None => true,
+            Some(last) => last.elapsed().as_secs() >= IDLE_TIME,
         }
     }
 
@@ -531,6 +535,7 @@ impl SrtlaConnection {
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
     pub fn mark_for_recovery(&mut self) {
         self.last_received = None;
+        self.last_keepalive_sent = None;
         self.rtt.last_keepalive_sent_ms = 0;
         self.rtt.waiting_for_keepalive_response = false;
         self.connected = false;
