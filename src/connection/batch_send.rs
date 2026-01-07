@@ -12,9 +12,10 @@
 use std::sync::Arc;
 
 use smallvec::SmallVec;
-use tokio::net::UdpSocket;
 use tokio::time::Instant;
 use tracing::debug;
+
+use super::batch_recv::BatchUdpSocket;
 
 /// Maximum number of packets to buffer before flushing (Moblin uses 15+1=16)
 pub const BATCH_SIZE_THRESHOLD: usize = 16;
@@ -86,7 +87,7 @@ impl BatchSender {
     /// The caller should update in-flight tracking based on these.
     pub async fn flush(
         &mut self,
-        socket: &Arc<UdpSocket>,
+        socket: &Arc<BatchUdpSocket>,
     ) -> std::io::Result<Vec<(Option<u32>, u64)>> {
         if self.queue.is_empty() {
             return Ok(Vec::new());

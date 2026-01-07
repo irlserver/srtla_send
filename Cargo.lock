@@ -536,6 +536,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "libc",
  "mimalloc",
  "rand",
  "rustc-hash",
