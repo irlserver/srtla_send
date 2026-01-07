@@ -217,55 +217,6 @@ impl SrtlaConnection {
         }
     }
 
-    /// Try to flush using non-blocking sends (for use when we can't await)
-    #[allow(dead_code)]
-    pub fn try_flush_batch(&mut self) -> Result<()> {
-        if !self.batch_sender.has_queued_packets() {
-            return Ok(());
-        }
-
-        match self.batch_sender.try_flush(&self.socket) {
-            Ok(tracking_info) => {
-                if !tracking_info.is_empty() {
-                    for (seq, send_time_ms) in tracking_info {
-                        if let Some(s) = seq {
-                            self.register_packet(s as i32, send_time_ms);
-                        }
-                    }
-                    self.last_sent = Some(Instant::now());
-                }
-                Ok(())
-            }
-            Err(e) => Err(anyhow::anyhow!("batch try_flush failed: {}", e)),
-        }
-    }
-
-    /// Get batch efficiency statistics
-    #[allow(dead_code)]
-    pub fn batch_efficiency(&self) -> f64 {
-        self.batch_sender.efficiency()
-    }
-
-    /// Legacy method for immediate sending (kept for control packets)
-    #[inline]
-    #[allow(dead_code)]
-    pub async fn send_data_with_tracking(
-        &mut self,
-        data: &[u8],
-        seq: Option<u32>,
-        send_time_ms: u64,
-    ) -> Result<()> {
-        self.socket.send(data).await?;
-        // Track bytes sent for bitrate calculation
-        self.bitrate.update_on_send(data.len() as u64);
-        // Update last_sent timestamp
-        self.last_sent = Some(Instant::now());
-        if let Some(s) = seq {
-            self.register_packet(s as i32, send_time_ms);
-        }
-        Ok(())
-    }
-
     pub async fn send_keepalive(&mut self) -> Result<()> {
         // Create extended keepalive with connection info (telemetry for receiver)
         let info = ConnectionInfo {

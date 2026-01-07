@@ -299,6 +299,15 @@ pub async fn forward_via_connection(
     if *last_selected_idx != Some(sel_idx) {
         if let Some(prev_idx) = *last_selected_idx {
             if prev_idx < connections.len() {
+                // Flush the previous connection's batch before switching
+                if connections[prev_idx].has_queued_packets() {
+                    if let Err(e) = connections[prev_idx].flush_batch().await {
+                        warn!(
+                            "{}: batch flush on switch failed: {}",
+                            connections[prev_idx].label, e
+                        );
+                    }
+                }
                 debug!(
                     "Connection switch: {} → {} (seq: {:?})",
                     connections[prev_idx].label, connections[sel_idx].label, seq
@@ -313,17 +322,39 @@ pub async fn forward_via_connection(
         *last_selected_idx = Some(sel_idx);
         *last_switch_time_ms = packet_time_ms; // Track when switch occurred (use cached timestamp)
     }
-    let conn = &mut connections[sel_idx];
-    if let Err(e) = conn.send_data_with_tracking(pkt, seq, packet_time_ms).await {
-        warn!(
-            "{}: sendto() failed, marking for recovery: {}",
-            conn.label, e
-        );
-        conn.mark_for_recovery();
-    }
+
+    // Get conn_id before mutable borrow for seq_tracker
+    let conn_id = connections[sel_idx].conn_id;
+
+    // Queue the packet for batched sending
+    let needs_flush = connections[sel_idx].queue_data_packet(pkt, seq, packet_time_ms);
 
     // O(1) insert into ring buffer - no allocation
+    // Track immediately when queued (not when flushed) for accurate NAK attribution
     if let Some(s) = seq {
-        seq_tracker.insert(s, connections[sel_idx].conn_id, packet_time_ms);
+        seq_tracker.insert(s, conn_id, packet_time_ms);
+    }
+
+    // Flush if batch threshold reached
+    if needs_flush {
+        let conn = &mut connections[sel_idx];
+        if let Err(e) = conn.flush_batch().await {
+            warn!(
+                "{}: batch flush failed, marking for recovery: {}",
+                conn.label, e
+            );
+            conn.mark_for_recovery();
+        }
+    }
+}
+
+/// Flush all connection batches (called on timer or when needed)
+pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
+    for conn in connections.iter_mut() {
+        if conn.needs_batch_flush() || conn.has_queued_packets() {
+            if let Err(e) = conn.flush_batch().await {
+                warn!("{}: periodic batch flush failed: {}", conn.label, e);
+            }
+        }
     }
 }

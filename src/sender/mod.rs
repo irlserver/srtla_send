@@ -16,7 +16,9 @@ use anyhow::{Context, Result, anyhow};
 #[allow(unused_imports)]
 pub use housekeeping::GLOBAL_TIMEOUT_MS;
 use housekeeping::handle_housekeeping;
-use packet_handler::{drain_packet_queue, handle_srt_packet, handle_uplink_packet};
+use packet_handler::{
+    drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
+};
 #[allow(unused_imports)]
 pub use selection::{calculate_quality_multiplier, select_connection_idx};
 #[allow(unused_imports)]
@@ -109,6 +111,16 @@ pub async fn run_sender_with_toggles(
         Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
     );
     housekeeping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+    // Batch flush timer (15ms interval like Moblin)
+    // This ensures packets are sent even when traffic is light
+    const BATCH_FLUSH_INTERVAL_MS: u64 = 15;
+    let mut batch_flush_timer = time::interval_at(
+        Instant::now() + Duration::from_millis(BATCH_FLUSH_INTERVAL_MS),
+        Duration::from_millis(BATCH_FLUSH_INTERVAL_MS),
+    );
+    batch_flush_timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
     let mut status_elapsed_ms: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
     // Zero-allocation ring buffer for sequence tracking
@@ -277,6 +289,10 @@ pub async fn run_sender_with_toggles(
                 )
                 .await;
             }
+            _ = batch_flush_timer.tick() => {
+                // Flush any queued packets on timer (15ms interval like Moblin)
+                flush_all_batches(&mut connections).await;
+            }
         }
     }
 
@@ -390,6 +406,10 @@ pub async fn run_sender_with_toggles(
                     &toggle_snap,
                 )
                 .await;
+            }
+            _ = batch_flush_timer.tick() => {
+                // Flush any queued packets on timer (15ms interval like Moblin)
+                flush_all_batches(&mut connections).await;
             }
         }
     }
