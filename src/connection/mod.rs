@@ -89,6 +89,12 @@ pub struct SrtlaConnection {
     pub packet_log: FxHashMap<i32, u64>,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) packet_log: FxHashMap<i32, u64>,
+    /// Highest sequence number that has been cumulatively ACKed.
+    /// Used to optimize cumulative ACK processing by skipping already-ACKed sequences.
+    #[cfg(feature = "test-internals")]
+    pub highest_acked_seq: i32,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) highest_acked_seq: i32,
     #[cfg(feature = "test-internals")]
     pub last_received: Option<Instant>,
     #[cfg(not(feature = "test-internals"))]
@@ -145,6 +151,7 @@ impl SrtlaConnection {
             window: WINDOW_DEF * WINDOW_MULT,
             in_flight_packets: 0,
             packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
+            highest_acked_seq: i32::MIN,
             last_received: None,
             last_sent: None,
             last_keepalive_sent: None,
@@ -181,6 +188,7 @@ impl SrtlaConnection {
             window: WINDOW_DEF * WINDOW_MULT,
             in_flight_packets: 0,
             packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
+            highest_acked_seq: i32::MIN,
             last_received: None,
             last_sent: None,
             last_keepalive_sent: None,
@@ -458,13 +466,39 @@ impl SrtlaConnection {
     }
 
     /// Handle SRT cumulative ACK - clears all packets with seq <= ack.
-    /// This is O(n) due to cumulative ACK semantics, but uses efficient retain().
+    ///
+    /// Optimized to avoid redundant work:
+    /// - Tracks highest_acked_seq to skip already-processed ACKs
+    /// - Only removes packets in the range (highest_acked_seq, ack]
+    /// - O(k) where k is packets in range, not O(n) for entire log
     pub fn handle_srt_ack(&mut self, ack: i32) {
+        // Skip if this ACK doesn't advance our highest acked sequence
+        // This handles duplicate ACKs and out-of-order ACKs efficiently
+        if ack <= self.highest_acked_seq {
+            return;
+        }
+
         // Get send time for RTT calculation before removing
         let ack_send_time_ms = self.packet_log.get(&ack).copied();
 
-        // Remove all packets with seq <= ack (cumulative ACK)
-        self.packet_log.retain(|&seq, _| seq > ack);
+        // Remove packets in the range (highest_acked_seq, ack]
+        // This is more efficient than retain() when ACKs arrive in order
+        // because we only iterate over the newly-ACKed range
+        let old_highest = self.highest_acked_seq;
+        self.highest_acked_seq = ack;
+
+        // For small ranges, use targeted removal (O(k) where k = range size)
+        // For large gaps (e.g., after reconnect), fall back to retain (O(n))
+        let range_size = (ack as i64 - old_highest as i64).unsigned_abs();
+        if range_size <= 64 && old_highest != i32::MIN {
+            // Targeted removal for small ranges - iterate the range, not the map
+            for seq in (old_highest + 1)..=ack {
+                self.packet_log.remove(&seq);
+            }
+        } else {
+            // Fall back to retain for large gaps or initial state
+            self.packet_log.retain(|&seq, _| seq > ack);
+        }
         self.in_flight_packets = self.packet_log.len() as i32;
 
         // Update RTT estimate if we found the acked packet
@@ -618,6 +652,7 @@ impl SrtlaConnection {
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log.clear();
+        self.highest_acked_seq = i32::MIN;
         self.batch_sender.reset();
         // Set grace deadline to 0 to indicate this connection is immediately timed out
         // (matches C behavior of setting last_rcvd = 1)
@@ -691,6 +726,7 @@ impl SrtlaConnection {
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log.clear();
+        self.highest_acked_seq = i32::MIN;
 
         // Use encapsulated reset methods for submodules
         self.congestion.reset();
@@ -722,6 +758,7 @@ impl SrtlaConnection {
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log.clear();
+        self.highest_acked_seq = i32::MIN;
 
         // Use encapsulated reset methods for submodules
         self.congestion.reset();
