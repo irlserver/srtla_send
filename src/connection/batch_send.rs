@@ -94,11 +94,21 @@ impl BatchSender {
         }
 
         let packet_count = self.queue.len();
+        let mut sent_count = 0;
 
         // Send all packets
         // TODO: On Linux, could use sendmmsg for even better performance
         for packet in &self.queue {
-            socket.send(packet).await?;
+            match socket.send(packet).await {
+                Ok(_) => sent_count += 1,
+                Err(e) => {
+                    // Partial failure: remove already-sent packets to avoid duplicates
+                    self.queue.drain(..sent_count);
+                    self.sequences.drain(..sent_count);
+                    self.queue_times.drain(..sent_count);
+                    return Err(e);
+                }
+            }
         }
 
         // Collect tracking info before clearing
