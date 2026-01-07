@@ -1,3 +1,4 @@
+pub mod batch_send;
 mod bitrate;
 mod congestion;
 mod incoming;
@@ -10,6 +11,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::Result;
+pub use batch_send::BatchSender;
 pub use bitrate::BitrateTracker;
 pub use congestion::CongestionControl;
 pub use incoming::SrtlaIncoming;
@@ -115,6 +117,9 @@ pub struct SrtlaConnection {
     /// Cached quality multiplier for performance optimization.
     /// Recalculated every 50ms instead of on every packet.
     pub(crate) quality_cache: CachedQuality,
+    /// Batch sender for optimized packet transmission.
+    /// Buffers up to 16 packets before flushing, reducing syscall overhead.
+    pub(crate) batch_sender: BatchSender,
 }
 
 impl SrtlaConnection {
@@ -149,6 +154,7 @@ impl SrtlaConnection {
                 ..Default::default()
             },
             quality_cache: CachedQuality::default(),
+            batch_sender: BatchSender::new(),
         })
     }
 
@@ -164,7 +170,85 @@ impl SrtlaConnection {
         self.window / denom
     }
 
+    /// Queue a data packet for batched sending.
+    ///
+    /// Returns true if the batch queue is full and needs to be flushed.
+    /// The caller should call `flush_batch()` when this returns true or when
+    /// the flush timer fires.
     #[inline]
+    pub fn queue_data_packet(&mut self, data: &[u8], seq: Option<u32>, send_time_ms: u64) -> bool {
+        // Track bytes for bitrate calculation (tracked at queue time)
+        self.bitrate.update_on_send(data.len() as u64);
+        self.batch_sender.queue_packet(data, seq, send_time_ms)
+    }
+
+    /// Check if the batch queue needs time-based flushing (15ms interval)
+    #[inline]
+    pub fn needs_batch_flush(&self) -> bool {
+        self.batch_sender.needs_time_flush()
+    }
+
+    /// Check if there are any packets in the batch queue
+    #[inline]
+    pub fn has_queued_packets(&self) -> bool {
+        self.batch_sender.has_queued_packets()
+    }
+
+    /// Flush the batch queue, sending all queued packets.
+    ///
+    /// This registers all sent packets for in-flight tracking.
+    pub async fn flush_batch(&mut self) -> Result<()> {
+        if !self.batch_sender.has_queued_packets() {
+            return Ok(());
+        }
+
+        match self.batch_sender.flush(&self.socket).await {
+            Ok(tracking_info) => {
+                // Register all sent packets for in-flight tracking
+                for (seq, send_time_ms) in tracking_info {
+                    if let Some(s) = seq {
+                        self.register_packet(s as i32, send_time_ms);
+                    }
+                }
+                self.last_sent = Some(Instant::now());
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("batch flush failed: {}", e)),
+        }
+    }
+
+    /// Try to flush using non-blocking sends (for use when we can't await)
+    #[allow(dead_code)]
+    pub fn try_flush_batch(&mut self) -> Result<()> {
+        if !self.batch_sender.has_queued_packets() {
+            return Ok(());
+        }
+
+        match self.batch_sender.try_flush(&self.socket) {
+            Ok(tracking_info) => {
+                if !tracking_info.is_empty() {
+                    for (seq, send_time_ms) in tracking_info {
+                        if let Some(s) = seq {
+                            self.register_packet(s as i32, send_time_ms);
+                        }
+                    }
+                    self.last_sent = Some(Instant::now());
+                }
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("batch try_flush failed: {}", e)),
+        }
+    }
+
+    /// Get batch efficiency statistics
+    #[allow(dead_code)]
+    pub fn batch_efficiency(&self) -> f64 {
+        self.batch_sender.efficiency()
+    }
+
+    /// Legacy method for immediate sending (kept for control packets)
+    #[inline]
+    #[allow(dead_code)]
     pub async fn send_data_with_tracking(
         &mut self,
         data: &[u8],
@@ -545,6 +629,7 @@ impl SrtlaConnection {
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log.clear();
+        self.batch_sender.reset();
         // Set grace deadline to 0 to indicate this connection is immediately timed out
         // (matches C behavior of setting last_rcvd = 1)
         self.reconnection.startup_grace_deadline_ms = 0;
@@ -622,6 +707,7 @@ impl SrtlaConnection {
         self.congestion.reset();
         self.rtt.reset();
         self.bitrate.reset();
+        self.batch_sender.reset();
 
         // Reset reconnection tracking
         self.reconnection.last_reconnect_attempt_ms = now_ms();

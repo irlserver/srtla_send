@@ -10,7 +10,7 @@ use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
 use crate::connection::{
-    BitrateTracker, CachedQuality, CongestionControl, ReconnectionState, RttTracker,
+    BatchSender, BitrateTracker, CachedQuality, CongestionControl, ReconnectionState, RttTracker,
     SrtlaConnection,
 };
 use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
@@ -47,6 +47,7 @@ pub async fn create_test_connection() -> SrtlaConnection {
             ..Default::default()
         },
         quality_cache: CachedQuality::default(),
+        batch_sender: BatchSender::new(),
     }
 }
 
@@ -84,6 +85,7 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
                 ..Default::default()
             },
             quality_cache: CachedQuality::default(),
+            batch_sender: BatchSender::new(),
         };
         connections.push(conn);
     }
