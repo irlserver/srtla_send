@@ -60,6 +60,7 @@ pub async fn create_test_connection() -> SrtlaConnection {
 #[cfg(not(unix))]
 pub async fn create_test_connection() -> SrtlaConnection {
     use std::sync::atomic::{AtomicU64, Ordering};
+
     use socket2::{Domain, Protocol, Socket, Type};
     static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
@@ -150,6 +151,7 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
 #[cfg(not(unix))]
 pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
     use std::sync::atomic::{AtomicU64, Ordering};
+
     use socket2::{Domain, Protocol, Socket, Type};
     static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
