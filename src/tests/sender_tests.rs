@@ -404,12 +404,16 @@ mod tests {
         }
 
         // Ring buffer should have overwritten older entries
-        // The len() is approximate but should be around SEQ_TRACKING_SIZE
-        assert!(seq_tracker.len() <= SEQ_TRACKING_SIZE);
-
         // Recent entries should still be accessible
         let recent_seq = (SEQ_TRACKING_SIZE + 50) as u32;
         assert!(seq_tracker.get(recent_seq, now).is_some());
+
+        // Old entries that were overwritten should not be accessible
+        // (due to collision with newer sequence numbers)
+        let old_seq = 50u32;
+        // The old entry was overwritten when seq (SEQ_TRACKING_SIZE + 50) was inserted
+        // because they map to the same index
+        assert!(seq_tracker.get(old_seq, now).is_none());
     }
 
     #[test]

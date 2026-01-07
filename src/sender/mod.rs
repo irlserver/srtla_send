@@ -246,7 +246,7 @@ pub async fn run_sender_with_toggles(
 
                 status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
                 if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
-                    log_connection_status(&connections, &seq_tracker, last_selected_idx, &toggles);
+                    log_connection_status(&connections, last_selected_idx, &toggles);
                     status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
 
@@ -388,7 +388,7 @@ pub async fn run_sender_with_toggles(
 
                 status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
                 if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
-                    log_connection_status(&connections, &seq_tracker, last_selected_idx, &toggles);
+                    log_connection_status(&connections, last_selected_idx, &toggles);
                     status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                 }
 
@@ -510,19 +510,46 @@ pub async fn create_connections_from_ips(
 }
 
 /// Comprehensive status monitoring for connections
+///
+/// Optimized to reduce CPU overhead:
+/// - Early exit if INFO logging is disabled
+/// - Single pass over connections to collect stats
+/// - Avoided redundant iterations
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn log_connection_status(
     connections: &[SrtlaConnection],
-    seq_tracker: &SequenceTracker,
     last_selected_idx: Option<usize>,
     toggles: &DynamicToggles,
 ) {
+    // Early exit if INFO logging is not enabled - avoid all computation
+    if !tracing::enabled!(tracing::Level::INFO) {
+        return;
+    }
+
     let total_connections = connections.len();
-    let active_connections = connections.iter().filter(|c| !c.is_timed_out()).count();
+
+    // Single pass over connections to collect all stats
+    let mut active_connections = 0usize;
+    let mut total_bitrate_mbps = 0.0f64;
+    let mut total_in_flight = 0usize;
+
+    for conn in connections.iter() {
+        if !conn.is_timed_out() {
+            active_connections += 1;
+        }
+        total_bitrate_mbps += conn.current_bitrate_mbps();
+        total_in_flight += conn.in_flight_packets as usize;
+    }
+
     let timed_out_connections = total_connections - active_connections;
 
-    // Calculate total bitrate across all connections
-    let total_bitrate_mbps: f64 = connections.iter().map(|c| c.current_bitrate_mbps()).sum();
+    // Packet log utilization
+    let max_possible_entries = total_connections * PKT_LOG_SIZE;
+    let log_utilization = if max_possible_entries > 0 {
+        (total_in_flight as f64 / max_possible_entries as f64) * 100.0
+    } else {
+        0.0
+    };
 
     info!("📊 Connection Status Report:");
     info!("  Total connections: {}", total_connections);
@@ -546,26 +573,10 @@ pub(crate) fn log_connection_status(
         toggles.exploration_enabled.load(Ordering::Relaxed)
     );
 
-    info!(
-        "  Sequence tracking: ~{} entries ({:.1}% capacity)",
-        seq_tracker.len(),
-        seq_tracker.utilization_percent()
-    );
-
     // Show packet log utilization
-    let total_log_entries: usize = connections
-        .iter()
-        .map(|c| c.in_flight_packets as usize)
-        .sum();
-    let max_possible_entries = connections.len() * PKT_LOG_SIZE;
-    let log_utilization = if max_possible_entries > 0 {
-        (total_log_entries as f64 / max_possible_entries as f64) * 100.0
-    } else {
-        0.0
-    };
     info!(
         "  Packet log: {} entries used ({:.1}% of capacity)",
-        total_log_entries, log_utilization
+        total_in_flight, log_utilization
     );
 
     // Show last selected connection
@@ -587,21 +598,24 @@ pub(crate) fn log_connection_status(
             "✅ ACTIVE"
         };
         let score = conn.get_score();
-        let score_desc: String = match score {
-            -1 => "DISCONNECTED".to_string(),
-            0 => "AT_CAPACITY".to_string(),
-            _ => score.to_string(),
+
+        // Avoid String allocation for common score cases
+        let score_desc: std::borrow::Cow<'static, str> = match score {
+            -1 => "DISCONNECTED".into(),
+            0 => "AT_CAPACITY".into(),
+            s => s.to_string().into(),
         };
 
+        // Use elapsed seconds directly
         let last_recv = conn
             .last_received
             .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
-            .unwrap_or_else(|| "never".to_string());
+            .unwrap_or_else(|| "never".into());
 
         let last_send = conn
             .last_sent
             .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
-            .unwrap_or_else(|| "never".to_string());
+            .unwrap_or_else(|| "never".into());
 
         info!(
             "    [{}] {} {} - Score: {} - Last recv/send: {}/{} - Window: {} - In-flight: {} - \

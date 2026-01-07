@@ -107,12 +107,6 @@ impl SequenceTracker {
         }
     }
 
-    /// Get approximate number of entries (may be inaccurate due to overwrites).
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.count.min(SEQ_TRACKING_SIZE)
-    }
-
     /// Remove entries for a specific connection ID.
     ///
     /// This is O(n) but only called during connection removal, not in hot path.
@@ -123,12 +117,6 @@ impl SequenceTracker {
                 self.count = self.count.saturating_sub(1);
             }
         }
-    }
-
-    /// Get capacity utilization as a percentage (for logging).
-    #[inline]
-    pub fn utilization_percent(&self) -> f64 {
-        (self.len() as f64 / SEQ_TRACKING_SIZE as f64) * 100.0
     }
 }
 
