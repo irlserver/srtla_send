@@ -12,6 +12,7 @@ use crate::protocol::MTU;
 
 /// Number of packets to receive in a single `recvmmsg` call.
 /// 32 is a good balance between syscall reduction and memory usage.
+#[cfg(target_os = "linux")]
 pub const BATCH_RECV_SIZE: usize = 32;
 
 // ============================================================================
@@ -362,16 +363,19 @@ mod fallback_impl {
         }
 
         /// Try to send data without blocking.
+        #[allow(dead_code)]
         pub fn try_send(&self, buf: &[u8]) -> std::io::Result<usize> {
             self.inner.try_send(buf)
         }
 
         /// Try to receive data without blocking.
+        #[allow(dead_code)]
         pub fn try_recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.inner.try_recv(buf)
         }
 
         /// Get a reference to the underlying socket.
+        #[allow(dead_code)]
         pub fn get_ref(&self) -> &UdpSocket {
             &self.inner
         }
