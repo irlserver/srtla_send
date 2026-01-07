@@ -60,9 +60,13 @@ pub async fn create_test_connection() -> SrtlaConnection {
 #[cfg(not(unix))]
 pub async fn create_test_connection() -> SrtlaConnection {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use socket2::{Domain, Protocol, Socket, Type};
     static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+    socket
+        .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+        .unwrap();
     socket.set_nonblocking(true).unwrap();
     let batch_socket = BatchUdpSocket::new(socket).unwrap();
     let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
@@ -146,12 +150,16 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
 #[cfg(not(unix))]
 pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use socket2::{Domain, Protocol, Socket, Type};
     static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
     let mut connections = SmallVec::new();
 
     for i in 0..count {
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket
+            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+            .unwrap();
         socket.set_nonblocking(true).unwrap();
         let batch_socket = BatchUdpSocket::new(socket).unwrap();
         let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080 + i as u16);

@@ -174,9 +174,8 @@ impl SrtlaConnection {
         let remote = resolve_remote(host, port).await?;
         let sock = bind_from_ip(ip, 0)?;
         sock.connect(&remote.into())?;
-        let std_sock: std::net::UdpSocket = sock.into();
-        std_sock.set_nonblocking(true)?;
-        let socket = Arc::new(BatchUdpSocket::new(std_sock)?);
+        sock.set_nonblocking(true)?;
+        let socket = Arc::new(BatchUdpSocket::new(sock)?);
         let startup_deadline = now_ms() + STARTUP_GRACE_MS;
         Ok(Self {
             conn_id: rand::rng().next_u64(),
@@ -749,9 +748,8 @@ impl SrtlaConnection {
     pub async fn reconnect(&mut self) -> Result<()> {
         let sock = bind_from_ip(self.local_ip, 0)?;
         sock.connect(&self.remote.into())?;
-        let std_sock: std::net::UdpSocket = sock.into();
-        std_sock.set_nonblocking(true)?;
-        let socket = BatchUdpSocket::new(std_sock)?;
+        sock.set_nonblocking(true)?;
+        let socket = BatchUdpSocket::new(sock)?;
         self.socket = Arc::new(socket);
         self.connected = false;
         self.last_received = None;
