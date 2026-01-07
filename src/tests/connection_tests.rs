@@ -353,15 +353,15 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
 
-        // Should need keepalive initially
+        // Should need keepalive initially (last_keepalive_sent is None)
         assert!(conn.needs_keepalive());
 
-        // After sending, should not need immediately
-        conn.last_sent = Some(Instant::now());
+        // After sending keepalive, should not need immediately
+        conn.last_keepalive_sent = Some(Instant::now());
         assert!(!conn.needs_keepalive());
 
         // After timeout, should need again (simulate 2 seconds ago)
-        conn.last_sent = Some(Instant::now() - Duration::from_secs(IDLE_TIME + 1));
+        conn.last_keepalive_sent = Some(Instant::now() - Duration::from_secs(IDLE_TIME + 1));
         assert!(conn.needs_keepalive());
     }
 
