@@ -73,8 +73,10 @@ pub fn spawn_reader(
                     {
                         return;
                     }
-                    // Allow brief pause before retrying to avoid tight error loops
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    // Pause before retrying to avoid CPU-intensive tight error loops.
+                    // 100ms is long enough to prevent spinning but short enough to
+                    // recover quickly when the error resolves.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
