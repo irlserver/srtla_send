@@ -149,6 +149,11 @@ pub async fn handle_uplink_packet(
     }
 }
 
+/// Maximum number of packets to process per drain call.
+/// This prevents CPU spikes from processing large accumulated queues in one burst.
+/// At ~1000 packets/sec typical rate, 64 packets = ~64ms worth of traffic.
+const MAX_DRAIN_PACKETS: usize = 64;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn drain_packet_queue(
     packet_rx: &mut UnboundedReceiver<UplinkPacket>,
@@ -160,18 +165,27 @@ pub async fn drain_packet_queue(
     seq_tracker: &SequenceTracker,
     toggle_snap: &ToggleSnapshot,
 ) {
-    while let Ok(packet) = packet_rx.try_recv() {
-        handle_uplink_packet(
-            packet,
-            connections,
-            reg,
-            instant_tx,
-            last_client_addr,
-            local_listener,
-            seq_tracker,
-            toggle_snap,
-        )
-        .await;
+    // Process up to MAX_DRAIN_PACKETS to prevent CPU spikes from large queue bursts.
+    // Remaining packets will be processed on the next event loop iteration.
+    let mut processed = 0;
+    while processed < MAX_DRAIN_PACKETS {
+        match packet_rx.try_recv() {
+            Ok(packet) => {
+                handle_uplink_packet(
+                    packet,
+                    connections,
+                    reg,
+                    instant_tx,
+                    last_client_addr,
+                    local_listener,
+                    seq_tracker,
+                    toggle_snap,
+                )
+                .await;
+                processed += 1;
+            }
+            Err(_) => break, // No more packets available
+        }
     }
 }
 
@@ -349,7 +363,21 @@ pub async fn forward_via_connection(
 }
 
 /// Flush all connection batches (called on timer or when needed)
+///
+/// Optimized with early exit: first check if any connection has queued packets
+/// before iterating. This avoids work on the 15ms timer when traffic is idle.
 pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
+    // Quick scan to check if any connection has work to do
+    // This is a fast read-only check that avoids the flush logic entirely when idle
+    let has_work = connections
+        .iter()
+        .any(|c| c.has_queued_packets() || c.needs_batch_flush());
+
+    if !has_work {
+        return;
+    }
+
+    // Now do the actual flush for connections that need it
     for conn in connections.iter_mut() {
         if conn.needs_batch_flush() || conn.has_queued_packets() {
             if let Err(e) = conn.flush_batch().await {
