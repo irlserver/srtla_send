@@ -1,8 +1,8 @@
-//! Batch receive implementation using `recvmmsg` on Unix platforms.
+//! Batch receive implementation using `recvmmsg` on Linux platforms.
 //!
 //! This module provides efficient batch reception of UDP packets by using the
-//! `recvmmsg` syscall on Linux/Unix, which can receive multiple datagrams in a
-//! single kernel transition. On non-Unix platforms, it falls back to single-packet
+//! `recvmmsg` syscall on Linux, which can receive multiple datagrams in a
+//! single kernel transition. On non-Linux platforms, it falls back to single-packet
 //! receives.
 //!
 //! Based on the rustorrent implementation:
@@ -15,10 +15,10 @@ use crate::protocol::MTU;
 pub const BATCH_RECV_SIZE: usize = 32;
 
 // ============================================================================
-// Unix implementation with recvmmsg
+// Linux implementation with recvmmsg
 // ============================================================================
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod unix_impl {
     use std::io::ErrorKind;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -42,10 +42,6 @@ mod unix_impl {
     pub struct BatchUdpSocket {
         inner: AsyncFd<Socket>,
     }
-
-    // Safety: Socket is Send + Sync, and we only access it through AsyncFd
-    unsafe impl Send for BatchUdpSocket {}
-    unsafe impl Sync for BatchUdpSocket {}
 
     impl BatchUdpSocket {
         /// Create a new BatchUdpSocket from a socket2::Socket.
@@ -256,13 +252,6 @@ mod unix_impl {
         }
     }
 
-    impl Default for RecvMmsgBuffer {
-        fn default() -> Self {
-            // This creates on stack temporarily - use new() for heap allocation
-            unsafe { std::mem::zeroed() }
-        }
-    }
-
     /// Iterator over received packets in a RecvMmsgBuffer.
     pub struct RecvMmsgIter<'a> {
         buffer: &'a RecvMmsgBuffer,
@@ -320,10 +309,10 @@ mod unix_impl {
 }
 
 // ============================================================================
-// Non-Unix fallback implementation
+// Non-Linux fallback implementation
 // ============================================================================
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 mod fallback_impl {
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -454,9 +443,9 @@ mod fallback_impl {
 }
 
 // Re-export the appropriate implementation
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub use fallback_impl::{BatchUdpSocket, RecvMmsgBuffer};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub use unix_impl::{BatchUdpSocket, RecvMmsgBuffer};
 
 #[cfg(test)]
@@ -470,7 +459,7 @@ mod tests {
         assert_eq!(buffer.len(), 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_buffer_size() {
         // Verify buffer size is reasonable
