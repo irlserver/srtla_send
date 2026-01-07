@@ -315,13 +315,13 @@ mod unix_impl {
 #[cfg(not(target_os = "linux"))]
 mod fallback_impl {
     use std::net::SocketAddr;
-    use std::sync::Arc;
 
+    use socket2::Socket;
     use tokio::net::UdpSocket;
 
     use super::MTU;
 
-    /// Fallback async UDP socket for non-Unix platforms.
+    /// Fallback async UDP socket for non-Linux platforms.
     ///
     /// Uses tokio's UdpSocket directly since recvmmsg is not available.
     pub struct BatchUdpSocket {
@@ -329,12 +329,14 @@ mod fallback_impl {
     }
 
     impl BatchUdpSocket {
-        /// Create a new BatchUdpSocket from a std::net::UdpSocket.
+        /// Create a new BatchUdpSocket from a socket2::Socket.
         ///
         /// The socket must already be bound, connected, and set to non-blocking mode.
-        pub fn new(socket: std::net::UdpSocket) -> std::io::Result<Self> {
+        pub fn new(socket: Socket) -> std::io::Result<Self> {
+            // Convert socket2::Socket to std::net::UdpSocket
+            let std_socket: std::net::UdpSocket = socket.into();
             Ok(Self {
-                inner: UdpSocket::from_std(socket)?,
+                inner: UdpSocket::from_std(std_socket)?,
             })
         }
 
