@@ -1,13 +1,14 @@
+mod ack_nak;
 pub mod batch_recv;
 pub mod batch_send;
 mod bitrate;
 mod congestion;
 mod incoming;
+mod packet_io;
 mod reconnection;
 mod rtt;
 mod socket;
 
-use std::cmp::min;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -20,14 +21,10 @@ pub use incoming::SrtlaIncoming;
 pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
 pub use socket::{bind_from_ip, resolve_remote};
-use tokio::net::UdpSocket;
 use tokio::time::Instant;
-use tracing::{debug, warn};
 
 use crate::protocol::*;
-use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
 use crate::utils::now_ms;
 
 const STARTUP_GRACE_MS: u64 = 1_500;
@@ -263,273 +260,6 @@ impl SrtlaConnection {
         self.socket.send(&pkt).await?;
         self.reconnection.startup_grace_deadline_ms = sent_at + STARTUP_GRACE_MS;
         Ok(sent_at)
-    }
-
-    pub async fn drain_incoming(
-        &mut self,
-        conn_idx: usize,
-        reg: &mut SrtlaRegistrationManager,
-        local_listener: &UdpSocket,
-        instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
-        client_addr: Option<SocketAddr>,
-    ) -> Result<SrtlaIncoming> {
-        let mut buf = [0u8; MTU];
-        let mut incoming = SrtlaIncoming::default();
-        loop {
-            match self.socket.try_recv(&mut buf) {
-                Ok(n) => {
-                    if n == 0 {
-                        break;
-                    }
-                    self.process_packet_internal(
-                        conn_idx,
-                        reg,
-                        local_listener,
-                        instant_forwarder,
-                        client_addr,
-                        &buf[..n],
-                        &mut incoming,
-                    )
-                    .await?;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => {
-                    warn!("read uplink error: {}", e);
-                    break;
-                }
-            }
-        }
-        Ok(incoming)
-    }
-
-    pub async fn process_packet(
-        &mut self,
-        conn_idx: usize,
-        reg: &mut SrtlaRegistrationManager,
-        local_listener: &UdpSocket,
-        instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
-        client_addr: Option<SocketAddr>,
-        data: &[u8],
-    ) -> Result<SrtlaIncoming> {
-        let mut incoming = SrtlaIncoming::default();
-        self.process_packet_internal(
-            conn_idx,
-            reg,
-            local_listener,
-            instant_forwarder,
-            client_addr,
-            data,
-            &mut incoming,
-        )
-        .await?;
-        Ok(incoming)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn process_packet_internal(
-        &mut self,
-        conn_idx: usize,
-        reg: &mut SrtlaRegistrationManager,
-        local_listener: &UdpSocket,
-        instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
-        client_addr: Option<SocketAddr>,
-        data: &[u8],
-        incoming: &mut SrtlaIncoming,
-    ) -> Result<()> {
-        incoming.read_any = true;
-        let recv_time = Instant::now();
-        let pt = get_packet_type(data);
-        if let Some(pt) = pt {
-            if let Some(event) = reg.process_registration_packet(conn_idx, data) {
-                match event {
-                    RegistrationEvent::RegNgp => {
-                        reg.try_send_reg1_immediately(conn_idx, self).await;
-                    }
-                    RegistrationEvent::Reg3 => {
-                        self.connected = true;
-                        self.last_received = Some(recv_time);
-                        if self.reconnection.connection_established_ms == 0 {
-                            self.reconnection.connection_established_ms = crate::utils::now_ms();
-                        }
-                        self.reconnection.mark_success(&self.label);
-                    }
-                    RegistrationEvent::RegErr => {
-                        self.connected = false;
-                        self.last_received = None;
-                    }
-                    RegistrationEvent::Reg2 => {}
-                }
-                return Ok(());
-            }
-
-            self.last_received = Some(recv_time);
-
-            if pt == SRT_TYPE_ACK {
-                if let Some(ack) = parse_srt_ack(data) {
-                    incoming.ack_numbers.push(ack);
-                }
-                let ack_packet = SmallVec::from_slice_copy(data);
-                // Try synchronous send first (avoids task context switch)
-                // Only fall back to channel if socket would block
-                if let Some(addr) = client_addr {
-                    match local_listener.try_send_to(&ack_packet, addr) {
-                        Ok(_) => {} // Fast path: sent directly
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            // Slow path: socket busy, use channel
-                            let _ = instant_forwarder.send((addr, ack_packet.clone()));
-                        }
-                        Err(_) => {} // Other errors: drop silently (same as before)
-                    }
-                }
-                incoming.forward_to_client.push(ack_packet);
-            } else if pt == SRT_TYPE_NAK {
-                let nak_list = parse_srt_nak(data);
-                if !nak_list.is_empty() {
-                    debug!(
-                        "📦 NAK received from {}: {} sequences",
-                        self.label,
-                        nak_list.len()
-                    );
-                    for seq in nak_list {
-                        incoming.nak_numbers.push(seq);
-                    }
-                }
-                incoming
-                    .forward_to_client
-                    .push(SmallVec::from_slice_copy(data));
-            } else if pt == SRTLA_TYPE_ACK {
-                let ack_list = parse_srtla_ack(data);
-                if !ack_list.is_empty() {
-                    debug!(
-                        "🎯 SRTLA ACK received from {}: {} sequences",
-                        self.label,
-                        ack_list.len()
-                    );
-                    for seq in ack_list {
-                        incoming.srtla_ack_numbers.push(seq);
-                    }
-                }
-            } else if pt == SRTLA_TYPE_KEEPALIVE {
-                self.rtt.handle_keepalive_response(data, &self.label);
-            } else {
-                incoming
-                    .forward_to_client
-                    .push(SmallVec::from_slice_copy(data));
-            }
-        }
-        Ok(())
-    }
-
-    /// Register a packet as in-flight. O(1) insert.
-    #[inline]
-    pub fn register_packet(&mut self, seq: i32, send_time_ms: u64) {
-        self.packet_log.insert(seq, send_time_ms);
-        self.in_flight_packets = self.packet_log.len() as i32;
-    }
-
-    /// Handle SRT cumulative ACK - clears all packets with seq <= ack.
-    ///
-    /// Optimized to avoid redundant work:
-    /// - Tracks highest_acked_seq to skip already-processed ACKs
-    /// - Only removes packets in the range (highest_acked_seq, ack]
-    /// - O(k) where k is packets in range, not O(n) for entire log
-    pub fn handle_srt_ack(&mut self, ack: i32) {
-        // Skip if this ACK doesn't advance our highest acked sequence
-        // This handles duplicate ACKs and out-of-order ACKs efficiently
-        if ack <= self.highest_acked_seq {
-            return;
-        }
-
-        // Get send time for RTT calculation before removing
-        let ack_send_time_ms = self.packet_log.get(&ack).copied();
-
-        // Remove packets in the range (highest_acked_seq, ack]
-        // This is more efficient than retain() when ACKs arrive in order
-        // because we only iterate over the newly-ACKed range
-        let old_highest = self.highest_acked_seq;
-        self.highest_acked_seq = ack;
-
-        // For small ranges, use targeted removal (O(k) where k = range size)
-        // For large gaps (e.g., after reconnect), fall back to retain (O(n))
-        let range_size = (ack as i64 - old_highest as i64).unsigned_abs();
-        if range_size <= 64 && old_highest != i32::MIN {
-            // Targeted removal for small ranges - iterate the range, not the map
-            for seq in (old_highest + 1)..=ack {
-                self.packet_log.remove(&seq);
-            }
-        } else {
-            // Fall back to retain for large gaps or initial state
-            self.packet_log.retain(|&seq, _| seq > ack);
-        }
-        self.in_flight_packets = self.packet_log.len() as i32;
-
-        // Update RTT estimate if we found the acked packet
-        if let Some(sent_ms) = ack_send_time_ms {
-            let now = now_ms();
-            let rtt = now.saturating_sub(sent_ms);
-            if rtt > 0 && rtt <= 10_000 {
-                self.rtt.update_estimate(rtt);
-            }
-        }
-    }
-
-    /// Handle NAK for a specific sequence. O(1) remove.
-    #[inline]
-    pub fn handle_nak(&mut self, seq: i32) -> bool {
-        let found = self.packet_log.remove(&seq).is_some();
-        if found {
-            self.in_flight_packets = self.packet_log.len() as i32;
-            self.congestion
-                .handle_nak(&mut self.window, seq, &self.label);
-        }
-        found
-    }
-
-    /// Handle SRTLA ACK for a specific sequence. O(1) remove.
-    #[inline]
-    pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool) -> bool {
-        let found = self.packet_log.remove(&seq).is_some();
-        if found {
-            self.in_flight_packets = self.packet_log.len() as i32;
-
-            if classic_mode {
-                self.congestion.handle_srtla_ack_specific_classic(
-                    &mut self.window,
-                    self.in_flight_packets,
-                    seq,
-                    &self.label,
-                );
-            } else {
-                self.congestion.handle_srtla_ack_enhanced(
-                    &mut self.window,
-                    self.in_flight_packets,
-                    &self.label,
-                );
-            }
-        }
-        found
-    }
-
-    pub fn handle_srtla_ack_global(&mut self) {
-        // Global +1 window increase for connections that have received data (from
-        // original implementation)
-        // This matches C version: if (c->last_rcvd != 0)
-        // In Rust, we check if last_received is Some (i.e., has been set when data was
-        // received)
-        if self.connected && self.last_received.is_some() {
-            let old = self.window;
-            self.window = min(self.window + 1, WINDOW_MAX * WINDOW_MULT);
-
-            if old < self.window && (self.window - old) > 100 {
-                debug!(
-                    "{}: Major window recovery {} → {} (+{})",
-                    self.label,
-                    old,
-                    self.window,
-                    self.window - old
-                );
-            }
-        }
     }
 
     pub fn is_rtt_stable(&self) -> bool {
