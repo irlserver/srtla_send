@@ -8,6 +8,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::debug;
 use tracing::{info, warn};
 
+/// Snapshot of toggle states for efficient hot-path access.
+/// This avoids 3 atomic loads per packet by caching the values once per select iteration.
+#[derive(Clone, Copy, Debug)]
+pub struct ToggleSnapshot {
+    pub classic_mode: bool,
+    pub quality_scoring_enabled: bool,
+    pub exploration_enabled: bool,
+}
+
 #[derive(Clone)]
 pub struct DynamicToggles {
     pub classic_mode: Arc<AtomicBool>,
@@ -35,6 +44,18 @@ impl DynamicToggles {
             classic_mode: Arc::new(AtomicBool::new(classic)),
             quality_scoring_enabled: Arc::new(AtomicBool::new(!no_quality)),
             exploration_enabled: Arc::new(AtomicBool::new(exploration)),
+        }
+    }
+
+    /// Create a snapshot of current toggle states.
+    /// Call this once at the start of each select iteration to avoid
+    /// multiple atomic loads per packet in the hot path.
+    #[inline]
+    pub fn snapshot(&self) -> ToggleSnapshot {
+        ToggleSnapshot {
+            classic_mode: self.classic_mode.load(Ordering::Relaxed),
+            quality_scoring_enabled: self.quality_scoring_enabled.load(Ordering::Relaxed),
+            exploration_enabled: self.exploration_enabled.load(Ordering::Relaxed),
         }
     }
 }

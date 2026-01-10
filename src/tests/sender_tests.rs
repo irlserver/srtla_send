@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
 
-    use std::collections::{HashMap, VecDeque};
     use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::Ordering;
@@ -24,7 +23,7 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&connections, None, 0, 0, false, false, true);
+        let selected = select_connection_idx(&mut connections, None, 0, 0, false, false, true);
         assert_eq!(selected, Some(1));
     }
 
@@ -32,19 +31,21 @@ mod tests {
     fn test_select_connection_idx_quality_scoring() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
 
         // Connection 0: Recent NAKs - should get low score
         connections[0].congestion.nak_count = 5;
-        connections[0].congestion.last_nak_time_ms = now_ms() - 1000; // 1 second ago
+        connections[0].congestion.last_nak_time_ms = current_time - 1000; // 1 second ago
 
         // Connection 1: No NAKs - should get bonus
         connections[1].congestion.nak_count = 0;
 
         // Connection 2: Old NAKs - should get partial penalty
         connections[2].congestion.nak_count = 3;
-        connections[2].congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
+        connections[2].congestion.last_nak_time_ms = current_time - 8000; // 8 seconds ago
 
-        let selected = select_connection_idx(&connections, None, 0, 0, true, false, false);
+        let selected =
+            select_connection_idx(&mut connections, None, 0, current_time, true, false, false);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -54,18 +55,20 @@ mod tests {
     fn test_select_connection_idx_burst_nak_penalty() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
 
         // Connection 0: NAK burst
         connections[0].congestion.nak_count = 5;
         connections[0].congestion.nak_burst_count = 3;
-        connections[0].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
+        connections[0].congestion.last_nak_time_ms = current_time - 2000; // 2 seconds ago
 
         // Connection 1: Same NAK count but no burst
         connections[1].congestion.nak_count = 5;
         connections[1].congestion.nak_burst_count = 0;
-        connections[1].congestion.last_nak_time_ms = now_ms() - 2000; // 2 seconds ago
+        connections[1].congestion.last_nak_time_ms = current_time - 2000; // 2 seconds ago
 
-        let selected = select_connection_idx(&connections, None, 0, 0, true, false, false);
+        let selected =
+            select_connection_idx(&mut connections, None, 0, current_time, true, false, false);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -87,7 +90,7 @@ mod tests {
         // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
         // This prevents rapid thrashing between connections under bursty score changes
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -118,7 +121,7 @@ mod tests {
         // After cooldown: per-packet selection can now choose the better connection
         // From this point forward, all subsequent packets will route via connection 1
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -153,7 +156,7 @@ mod tests {
         // Cooldown is bypassed when current connection is invalid/timed out
         // Per-packet selection immediately switches to valid connection
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -185,7 +188,7 @@ mod tests {
         // Enable exploration, but should be blocked by cooldown
         // This prevents exploration from causing rapid per-packet routing changes
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -218,7 +221,7 @@ mod tests {
         // Classic mode: per-packet selection ALWAYS picks highest score connection
         // No dampening, no hysteresis - matches original C implementation
         let selected = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -241,9 +244,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
-        connections[0].register_packet(100);
-        connections[1].register_packet(200);
-        connections[2].register_packet(300);
+        let current_time = now_ms();
+        connections[0].register_packet(100, current_time);
+        connections[1].register_packet(200, current_time);
+        connections[2].register_packet(300, current_time);
 
         let initial_counts = [
             connections[0].congestion.nak_count,
@@ -322,25 +326,11 @@ mod tests {
         ];
 
         let mut last_selected_idx = Some(1);
-        let mut seq_to_conn = HashMap::new();
+        let mut seq_tracker = SequenceTracker::new();
         let now = now_ms();
-        seq_to_conn.insert(
-            100,
-            SequenceTrackingEntry {
-                conn_id: connections[1].conn_id,
-                timestamp_ms: now,
-            },
-        );
-        seq_to_conn.insert(
-            200,
-            SequenceTrackingEntry {
-                conn_id: connections[2].conn_id,
-                timestamp_ms: now,
-            },
-        );
-        let mut seq_order = VecDeque::new();
-        seq_order.push_back(100);
-        seq_order.push_back(200);
+        // Insert entries for connections that will be removed
+        seq_tracker.insert(100, connections[1].conn_id, now);
+        seq_tracker.insert(200, connections[2].conn_id, now);
 
         rt.block_on(apply_connection_changes(
             &mut connections,
@@ -348,8 +338,7 @@ mod tests {
             "127.0.0.1",
             8080,
             &mut last_selected_idx,
-            &mut seq_to_conn,
-            &mut seq_order,
+            &mut seq_tracker,
         ));
 
         // Should have removed some connections
@@ -358,11 +347,10 @@ mod tests {
         // Should have reset selection
         assert_eq!(last_selected_idx, None);
 
-        // Should have cleaned up sequence tracking
-        assert!(seq_to_conn.len() < 2);
-
-        // Should have cleaned up seq_order to match seq_to_conn
-        assert_eq!(seq_order.len(), seq_to_conn.len());
+        // Entries for removed connections should now return None
+        // (they were cleaned up by remove_connection)
+        assert!(seq_tracker.get(100, now).is_none());
+        assert!(seq_tracker.get(200, now).is_none());
     }
 
     #[test]
@@ -382,11 +370,11 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert!(MAX_SEQUENCE_TRACKING > 0);
+        assert!(SEQ_TRACKING_SIZE > 0);
         assert!(GLOBAL_TIMEOUT_MS > 0);
 
-        // Should handle decent throughput
-        assert!(MAX_SEQUENCE_TRACKING >= 1000);
+        // Should handle decent throughput (16384 entries)
+        assert!(SEQ_TRACKING_SIZE >= 1000);
         // Should allow time for connections
         assert!(GLOBAL_TIMEOUT_MS >= 5000);
     }
@@ -407,24 +395,25 @@ mod tests {
 
     #[test]
     fn test_sequence_tracking_limits() {
-        let mut seq_to_conn: HashMap<u32, usize> = HashMap::with_capacity(MAX_SEQUENCE_TRACKING);
-        let mut seq_order: std::collections::VecDeque<u32> =
-            std::collections::VecDeque::with_capacity(MAX_SEQUENCE_TRACKING);
+        let mut seq_tracker = SequenceTracker::new();
+        let now = now_ms();
 
-        // Fill beyond capacity
-        for i in 0..(MAX_SEQUENCE_TRACKING + 100) {
-            if seq_to_conn.len() >= MAX_SEQUENCE_TRACKING
-                && let Some(old) = seq_order.pop_front()
-            {
-                seq_to_conn.remove(&old);
-            }
-            seq_to_conn.insert(i as u32, 0);
-            seq_order.push_back(i as u32);
+        // Fill beyond capacity - ring buffer naturally handles this
+        for i in 0..(SEQ_TRACKING_SIZE + 100) {
+            seq_tracker.insert(i as u32, 1, now);
         }
 
-        // Should not exceed maximum
-        assert!(seq_to_conn.len() <= MAX_SEQUENCE_TRACKING);
-        assert!(seq_order.len() <= MAX_SEQUENCE_TRACKING + 100); // VecDeque grows but HashMap doesn't
+        // Ring buffer should have overwritten older entries
+        // Recent entries should still be accessible
+        let recent_seq = (SEQ_TRACKING_SIZE + 50) as u32;
+        assert!(seq_tracker.get(recent_seq, now).is_some());
+
+        // Old entries that were overwritten should not be accessible
+        // (due to collision with newer sequence numbers)
+        let old_seq = 50u32;
+        // The old entry was overwritten when seq (SEQ_TRACKING_SIZE + 50) was inserted
+        // because they map to the same index
+        assert!(seq_tracker.get(old_seq, now).is_none());
     }
 
     #[test]
@@ -437,7 +426,7 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&connections, None, 0, 0, false, false, false);
+        let selected = select_connection_idx(&mut connections, None, 0, 0, false, false, false);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -446,10 +435,10 @@ mod tests {
     #[test]
     fn test_exploration_mode() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let connections = rt.block_on(create_test_connections(3));
+        let mut connections = rt.block_on(create_test_connections(3));
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&connections, None, 0, 0, false, true, false);
+        let _selected = select_connection_idx(&mut connections, None, 0, 0, false, true, false);
 
         // The result depends on timing, but should not panic
     }
@@ -478,17 +467,18 @@ mod tests {
             .next()
             .unwrap();
 
-        conn.reconnection.connection_established_ms = now_ms() - 35000;
+        let current_time = now_ms();
+        conn.reconnection.connection_established_ms = current_time - 35000;
 
-        assert_eq!(calculate_quality_multiplier(&conn), 1.1);
+        assert_eq!(calculate_quality_multiplier(&conn, current_time), 1.1);
 
         // Test connection with recent NAK - exponential decay formula
         // With exponential decay: penalty = 0.5 * e^(-age_ms / 2000), multiplier = 1.0 - penalty
         conn.congestion.nak_count = 1;
 
         // 500ms ago: multiplier ≈ 0.61 (strong penalty, recent NAK)
-        conn.congestion.last_nak_time_ms = now_ms() - 500;
-        let mult_500 = calculate_quality_multiplier(&conn);
+        conn.congestion.last_nak_time_ms = current_time - 500;
+        let mult_500 = calculate_quality_multiplier(&conn, current_time);
         assert!(
             (mult_500 - 0.61).abs() < 0.02,
             "Expected ~0.61, got {}",
@@ -496,8 +486,8 @@ mod tests {
         );
 
         // 2000ms ago (half-life): multiplier ≈ 0.816 (moderate penalty)
-        conn.congestion.last_nak_time_ms = now_ms() - 2000;
-        let mult_2000 = calculate_quality_multiplier(&conn);
+        conn.congestion.last_nak_time_ms = current_time - 2000;
+        let mult_2000 = calculate_quality_multiplier(&conn, current_time);
         assert!(
             (mult_2000 - 0.816).abs() < 0.02,
             "Expected ~0.816, got {}",
@@ -505,8 +495,8 @@ mod tests {
         );
 
         // 5000ms ago: multiplier ≈ 0.96 (light penalty)
-        conn.congestion.last_nak_time_ms = now_ms() - 5000;
-        let mult_5000 = calculate_quality_multiplier(&conn);
+        conn.congestion.last_nak_time_ms = current_time - 5000;
+        let mult_5000 = calculate_quality_multiplier(&conn, current_time);
         assert!(
             (mult_5000 - 0.96).abs() < 0.02,
             "Expected ~0.96, got {}",
@@ -514,8 +504,8 @@ mod tests {
         );
 
         // 15000ms ago: multiplier ≈ 1.0 (essentially recovered)
-        conn.congestion.last_nak_time_ms = now_ms() - 15000;
-        let mult_15000 = calculate_quality_multiplier(&conn);
+        conn.congestion.last_nak_time_ms = current_time - 15000;
+        let mult_15000 = calculate_quality_multiplier(&conn, current_time);
         assert!(
             (mult_15000 - 1.0).abs() < 0.02,
             "Expected ~1.0, got {}",
@@ -526,14 +516,14 @@ mod tests {
         // Need to clear the last_nak_time_ms to simulate truly no NAKs
         conn.congestion.nak_count = 0;
         conn.congestion.last_nak_time_ms = 0; // Clear NAK history
-        assert_eq!(calculate_quality_multiplier(&conn), 1.1);
+        assert_eq!(calculate_quality_multiplier(&conn, current_time), 1.1);
 
         // Test burst NAK penalty (requires ≥5 NAKs in burst, within 3s)
         // Burst penalty is 0.7x additional multiplier
         conn.congestion.nak_count = 5;
-        conn.congestion.last_nak_time_ms = now_ms() - 2000;
+        conn.congestion.last_nak_time_ms = current_time - 2000;
         conn.congestion.nak_burst_count = 5;
-        let mult_burst = calculate_quality_multiplier(&conn);
+        let mult_burst = calculate_quality_multiplier(&conn, current_time);
         // At 2000ms: base multiplier ≈ 0.816, with burst: 0.816 * 0.7 ≈ 0.571
         assert!(
             (mult_burst - 0.571).abs() < 0.02,

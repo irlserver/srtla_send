@@ -3,6 +3,9 @@ use tracing::{debug, info};
 use crate::utils::now_ms;
 
 const STARTUP_GRACE_MS: u64 = 1_500;
+const BASE_RECONNECT_DELAY_MS: u64 = 5000;
+const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
+const MAX_BACKOFF_COUNT: u32 = 5;
 
 /// Reconnection state and backoff tracking
 #[derive(Debug, Clone, Default)]
@@ -14,11 +17,14 @@ pub struct ReconnectionState {
 }
 
 impl ReconnectionState {
-    pub fn should_attempt_reconnect(&self) -> bool {
-        const BASE_RECONNECT_DELAY_MS: u64 = 5000;
-        const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
-        const MAX_BACKOFF_COUNT: u32 = 5;
+    /// Calculate backoff delay based on failure count.
+    fn backoff_delay(&self) -> u64 {
+        let capped_failures = self.reconnect_failure_count.min(MAX_BACKOFF_COUNT);
+        let delay = BASE_RECONNECT_DELAY_MS.saturating_mul(1u64 << capped_failures);
+        delay.min(MAX_BACKOFF_DELAY_MS)
+    }
 
+    pub fn should_attempt_reconnect(&self) -> bool {
         let now = now_ms();
 
         if self.connection_established_ms == 0 {
@@ -38,11 +44,7 @@ impl ReconnectionState {
         }
 
         let time_since_last_attempt = now.saturating_sub(self.last_reconnect_attempt_ms);
-        let current_backoff = self.reconnect_failure_count.min(MAX_BACKOFF_COUNT);
-        let min_interval = BASE_RECONNECT_DELAY_MS.saturating_mul(1u64 << current_backoff);
-        let backoff_delay = min_interval.min(MAX_BACKOFF_DELAY_MS);
-
-        time_since_last_attempt >= backoff_delay
+        time_since_last_attempt >= self.backoff_delay()
     }
 
     pub fn record_attempt(&mut self, label: &str) {
@@ -59,19 +61,11 @@ impl ReconnectionState {
 
         self.reconnect_failure_count = self.reconnect_failure_count.saturating_add(1);
 
-        const BASE_RECONNECT_DELAY_MS: u64 = 5000;
-        const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
-        const MAX_BACKOFF_COUNT: u32 = 5;
-
-        let current_backoff = self.reconnect_failure_count.min(MAX_BACKOFF_COUNT);
-        let min_interval = BASE_RECONNECT_DELAY_MS.saturating_mul(1u64 << current_backoff);
-        let next_delay = min_interval.min(MAX_BACKOFF_DELAY_MS);
-
         info!(
             "{}: Reconnect attempt #{}, next attempt in {}s",
             label,
             self.reconnect_failure_count,
-            next_delay / 1000
+            self.backoff_delay() / 1000
         );
     }
 
