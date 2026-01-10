@@ -49,9 +49,11 @@ pub async fn apply_connection_changes(
     }
 
     // Add new connections
+    let mut seen = HashSet::<IpAddr>::new();
     let new_ips_needed: SmallVec<IpAddr, 4> = new_ips
         .iter()
         .copied()
+        .filter(|ip| seen.insert(*ip))
         .filter(|ip| {
             let label = format!("{}:{} via {}", receiver_host, receiver_port, ip);
             !current_labels.contains(&label)
@@ -66,6 +68,11 @@ pub async fn apply_connection_changes(
 
         if added_count > 0 {
             info!("added {} new connections", added_count);
+        } else {
+            warn!(
+                "failed to add any new connections (attempted {})",
+                new_ips_needed.len()
+            );
         }
     }
 }
