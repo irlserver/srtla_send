@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::time::Instant;
 
 use crate::connection::{
@@ -19,24 +20,31 @@ use crate::utils::now_ms;
 /// Shared test connection ID counter for all helper functions
 static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
-#[cfg(unix)]
-pub async fn create_test_connection() -> SrtlaConnection {
-    use socket2::{Domain, Protocol, Socket, Type};
-
+/// Create a test UDP socket bound to localhost.
+fn create_test_socket() -> Socket {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-    socket.set_nonblocking(true).unwrap();
     socket
         .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
         .unwrap();
+    socket.set_nonblocking(true).unwrap();
+    socket
+}
+
+/// Create a SrtlaConnection from a socket and connection parameters.
+fn create_connection_from_socket(
+    socket: Socket,
+    remote: SocketAddr,
+    local_ip: IpAddr,
+    label: String,
+) -> SrtlaConnection {
     let batch_socket = BatchUdpSocket::new(socket).unwrap();
-    let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
     SrtlaConnection {
         conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
         socket: Arc::new(batch_socket),
         remote,
-        local_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        label: "test-connection".to_string(),
+        local_ip,
+        label,
         connected: true,
         window: WINDOW_DEF * WINDOW_MULT,
         in_flight_packets: 0,
@@ -58,132 +66,26 @@ pub async fn create_test_connection() -> SrtlaConnection {
     }
 }
 
-#[cfg(not(unix))]
 pub async fn create_test_connection() -> SrtlaConnection {
-    use socket2::{Domain, Protocol, Socket, Type};
-
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-    socket
-        .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
-        .unwrap();
-    socket.set_nonblocking(true).unwrap();
-    let batch_socket = BatchUdpSocket::new(socket).unwrap();
+    let socket = create_test_socket();
     let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+    let local_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
-    SrtlaConnection {
-        conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
-        socket: Arc::new(batch_socket),
-        remote,
-        local_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        label: "test-connection".to_string(),
-        connected: true,
-        window: WINDOW_DEF * WINDOW_MULT,
-        in_flight_packets: 0,
-        packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
-        highest_acked_seq: i32::MIN,
-        last_received: Some(Instant::now()),
-        last_sent: None,
-        last_keepalive_sent: None,
-        rtt: RttTracker::default(),
-        congestion: CongestionControl::default(),
-        bitrate: BitrateTracker::default(),
-        reconnection: ReconnectionState {
-            connection_established_ms: now_ms(),
-            startup_grace_deadline_ms: now_ms(),
-            ..Default::default()
-        },
-        quality_cache: CachedQuality::default(),
-        batch_sender: BatchSender::new(),
-    }
+    create_connection_from_socket(socket, remote, local_ip, "test-connection".to_string())
 }
 
-#[cfg(unix)]
 pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
-    use socket2::{Domain, Protocol, Socket, Type};
-
     let mut connections = SmallVec::new();
 
     for i in 0..count {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        socket.set_nonblocking(true).unwrap();
-        socket
-            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
-            .unwrap();
-        let batch_socket = BatchUdpSocket::new(socket).unwrap();
+        let socket = create_test_socket();
         let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080 + i as u16);
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10 + i as u8));
+        let label = format!("test-connection-{}", i);
 
-        let conn = SrtlaConnection {
-            conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
-            socket: Arc::new(batch_socket),
-            remote,
-            local_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10 + i as u8)),
-            label: format!("test-connection-{}", i),
-            connected: true,
-            window: WINDOW_DEF * WINDOW_MULT,
-            in_flight_packets: 0,
-            packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
-            highest_acked_seq: i32::MIN,
-            last_received: Some(Instant::now()),
-            last_sent: None,
-            last_keepalive_sent: None,
-            rtt: RttTracker::default(),
-            congestion: CongestionControl::default(),
-            bitrate: BitrateTracker::default(),
-            reconnection: ReconnectionState {
-                connection_established_ms: now_ms(),
-                startup_grace_deadline_ms: now_ms(),
-                ..Default::default()
-            },
-            quality_cache: CachedQuality::default(),
-            batch_sender: BatchSender::new(),
-        };
-        connections.push(conn);
-    }
-
-    connections
-}
-
-#[cfg(not(unix))]
-pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
-    use socket2::{Domain, Protocol, Socket, Type};
-
-    let mut connections = SmallVec::new();
-
-    for i in 0..count {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        socket
-            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
-            .unwrap();
-        socket.set_nonblocking(true).unwrap();
-        let batch_socket = BatchUdpSocket::new(socket).unwrap();
-        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080 + i as u16);
-
-        let conn = SrtlaConnection {
-            conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
-            socket: Arc::new(batch_socket),
-            remote,
-            local_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10 + i as u8)),
-            label: format!("test-connection-{}", i),
-            connected: true,
-            window: WINDOW_DEF * WINDOW_MULT,
-            in_flight_packets: 0,
-            packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
-            highest_acked_seq: i32::MIN,
-            last_received: Some(Instant::now()),
-            last_sent: None,
-            last_keepalive_sent: None,
-            rtt: RttTracker::default(),
-            congestion: CongestionControl::default(),
-            bitrate: BitrateTracker::default(),
-            reconnection: ReconnectionState {
-                connection_established_ms: now_ms(),
-                startup_grace_deadline_ms: now_ms(),
-                ..Default::default()
-            },
-            quality_cache: CachedQuality::default(),
-            batch_sender: BatchSender::new(),
-        };
-        connections.push(conn);
+        connections.push(create_connection_from_socket(
+            socket, remote, local_ip, label,
+        ));
     }
 
     connections
