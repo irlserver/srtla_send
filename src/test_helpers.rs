@@ -3,6 +3,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -15,11 +16,11 @@ use crate::connection::{
 use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
 use crate::utils::now_ms;
 
+/// Shared test connection ID counter for all helper functions
+static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
+
 #[cfg(unix)]
 pub async fn create_test_connection() -> SrtlaConnection {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
-
     use socket2::{Domain, Protocol, Socket, Type};
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
@@ -59,10 +60,7 @@ pub async fn create_test_connection() -> SrtlaConnection {
 
 #[cfg(not(unix))]
 pub async fn create_test_connection() -> SrtlaConnection {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use socket2::{Domain, Protocol, Socket, Type};
-    static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
     socket
@@ -101,9 +99,6 @@ pub async fn create_test_connection() -> SrtlaConnection {
 
 #[cfg(unix)]
 pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
-
     use socket2::{Domain, Protocol, Socket, Type};
 
     let mut connections = SmallVec::new();
@@ -150,10 +145,7 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
 
 #[cfg(not(unix))]
 pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use socket2::{Domain, Protocol, Socket, Type};
-    static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
 
     let mut connections = SmallVec::new();
 
