@@ -36,6 +36,8 @@ impl SrtlaConnection {
 
         // For small ranges, use targeted removal (O(k) where k = range size)
         // For large gaps (e.g., after reconnect), fall back to retain (O(n))
+        // Note: Wraparound is handled by falling back to retain() for large ranges.
+        // With typical RTTs and packet rates, wraparound within 64 packets is extremely unlikely.
         let range_size = (ack as i64 - old_highest as i64).unsigned_abs();
         if range_size <= 64 && old_highest != i32::MIN {
             // Targeted removal for small ranges - iterate the range, not the map
