@@ -128,9 +128,8 @@ pub async fn run_sender_with_toggles(
     let mut all_failed_at: Option<Instant> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
 
-    // Prepare SIGHUP stream (Unix only)
+    // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
-    #[allow(unused_variables)]
     let mut sighup = signal(SignalKind::hangup())?;
 
     // Main loop - run housekeeping frequently like C version
@@ -153,264 +152,154 @@ pub async fn run_sender_with_toggles(
         }
     }
 
+    // Use a macro to avoid duplicating the event loop for Unix/non-Unix
+    // The only difference is SIGHUP handling on Unix
+    macro_rules! event_loop {
+        ($($sighup_branch:tt)*) => {
+            loop {
+                tokio::select! {
+                    res = local_listener.recv_from(&mut recv_buf) => {
+                        let toggle_snap = toggles.snapshot();
+                        handle_srt_packet(
+                            res,
+                            &mut recv_buf,
+                            &mut connections,
+                            &mut last_selected_idx,
+                            &mut last_switch_time_ms,
+                            &mut seq_tracker,
+                            &mut last_client_addr,
+                            reg.has_connected,
+                            &toggle_snap,
+                        )
+                        .await;
+                        drain_packet_queue(
+                            &mut packet_rx,
+                            &mut connections,
+                            &mut reg,
+                            &instant_tx,
+                            last_client_addr,
+                            &local_listener,
+                            &seq_tracker,
+                            &toggle_snap,
+                        )
+                        .await;
+                    }
+                    packet = packet_rx.recv() => {
+                        let toggle_snap = toggles.snapshot();
+                        if let Some(packet) = packet {
+                            handle_uplink_packet(
+                                packet,
+                                &mut connections,
+                                &mut reg,
+                                &instant_tx,
+                                last_client_addr,
+                                &local_listener,
+                                &seq_tracker,
+                                &toggle_snap,
+                            ).await;
+                            drain_packet_queue(
+                                &mut packet_rx,
+                                &mut connections,
+                                &mut reg,
+                                &instant_tx,
+                                last_client_addr,
+                                &local_listener,
+                                &seq_tracker,
+                                &toggle_snap,
+                            ).await;
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    _ = housekeeping_timer.tick() => {
+                        let classic = toggles
+                            .classic_mode
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        if let Err(err) = handle_housekeeping(
+                            &mut connections,
+                            &mut reg,
+                            classic,
+                            &mut all_failed_at,
+                            &mut reader_handles,
+                            &packet_tx,
+                        ).await {
+                            warn!("housekeeping failed: {err}");
+                        }
+
+                        if let Some(changes) = pending_changes.take()
+                            && let Some(new_ips) = changes.new_ips
+                        {
+                            info!("applying queued connection changes: {} IPs", new_ips.len());
+                            apply_connection_changes(
+                                &mut connections,
+                                &new_ips,
+                                &changes.receiver_host,
+                                changes.receiver_port,
+                                &mut last_selected_idx,
+                                &mut seq_tracker,
+                            ).await;
+                            info!("connection changes applied successfully");
+                            sync_readers(&connections, &mut reader_handles, &packet_tx);
+                        }
+
+                        status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
+                        if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
+                            log_connection_status(&connections, last_selected_idx, &toggles);
+                            status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
+                        }
+
+                        sync_readers(&connections, &mut reader_handles, &packet_tx);
+                        let toggle_snap = toggles.snapshot();
+                        drain_packet_queue(
+                            &mut packet_rx,
+                            &mut connections,
+                            &mut reg,
+                            &instant_tx,
+                            last_client_addr,
+                            &local_listener,
+                            &seq_tracker,
+                            &toggle_snap,
+                        )
+                        .await;
+                    }
+                    $($sighup_branch)*
+                    _ = batch_flush_timer.tick() => {
+                        flush_all_batches(&mut connections).await;
+                    }
+                }
+            }
+        };
+    }
+
     #[cfg(unix)]
-    loop {
-        tokio::select! {
-            res = local_listener.recv_from(&mut recv_buf) => {
-                // Cache toggle state once per select iteration to avoid atomic loads per packet
-                let toggle_snap = toggles.snapshot();
-                handle_srt_packet(
-                    res,
-                    &mut recv_buf,
-                    &mut connections,
-                    &mut last_selected_idx,
-                    &mut last_switch_time_ms,
-                    &mut seq_tracker,
-                    &mut last_client_addr,
-                    reg.has_connected,
-                    &toggle_snap,
-                )
-                .await;
-                drain_packet_queue(
-                    &mut packet_rx,
-                    &mut connections,
-                    &mut reg,
-                    &instant_tx,
-                    last_client_addr,
-                    &local_listener,
-                    &seq_tracker,
-                    &toggle_snap,
-                )
-                .await;
+    event_loop! {
+        _ = sighup.recv() => {
+            info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
+            if let Ok(new_ips) = read_ip_list(ips_file).await {
+                pending_changes = Some(PendingConnectionChanges {
+                    new_ips: Some(new_ips),
+                    receiver_host: receiver_host.to_string(),
+                    receiver_port,
+                });
+                info!("uplink IP changes queued for next processing cycle");
             }
-            packet = packet_rx.recv() => {
-                // Cache toggle state once per select iteration
-                let toggle_snap = toggles.snapshot();
-                if let Some(packet) = packet {
-                    handle_uplink_packet(
-                        packet,
-                        &mut connections,
-                        &mut reg,
-                        &instant_tx,
-                        last_client_addr,
-                        &local_listener,
-                        &seq_tracker,
-                        &toggle_snap,
-                    ).await;
-                    drain_packet_queue(
-                        &mut packet_rx,
-                        &mut connections,
-                        &mut reg,
-                        &instant_tx,
-                        last_client_addr,
-                        &local_listener,
-                        &seq_tracker,
-                        &toggle_snap,
-                    ).await;
-                } else {
-                    return Ok(());
-                }
-            }
-            _ = housekeeping_timer.tick() => {
-                let classic = toggles
-                    .classic_mode
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if let Err(err) = handle_housekeeping(
-                    &mut connections,
-                    &mut reg,
-                    classic,
-                    &mut all_failed_at,
-                    &mut reader_handles,
-                    &packet_tx,
-                ).await {
-                    warn!("housekeeping failed: {err}");
-                }
-
-                if let Some(changes) = pending_changes.take()
-                    && let Some(new_ips) = changes.new_ips
-                {
-                    info!("applying queued connection changes: {} IPs", new_ips.len());
-                    apply_connection_changes(
-                        &mut connections,
-                        &new_ips,
-                        &changes.receiver_host,
-                        changes.receiver_port,
-                        &mut last_selected_idx,
-                        &mut seq_tracker,
-                    ).await;
-                    info!("connection changes applied successfully");
-                    sync_readers(&connections, &mut reader_handles, &packet_tx);
-                }
-
-                status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
-                if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
-                    log_connection_status(&connections, last_selected_idx, &toggles);
-                    status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
-                }
-
-                sync_readers(&connections, &mut reader_handles, &packet_tx);
-                // Cache toggle state for drain
-                let toggle_snap = toggles.snapshot();
-                drain_packet_queue(
-                    &mut packet_rx,
-                    &mut connections,
-                    &mut reg,
-                    &instant_tx,
-                    last_client_addr,
-                    &local_listener,
-                    &seq_tracker,
-                    &toggle_snap,
-                )
-                .await;
-            }
-            _ = sighup.recv() => {
-                info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
-                if let Ok(new_ips) = read_ip_list(ips_file).await {
-                    pending_changes = Some(PendingConnectionChanges {
-                        new_ips: Some(new_ips),
-                        receiver_host: receiver_host.to_string(),
-                        receiver_port,
-                    });
-                    info!("uplink IP changes queued for next processing cycle");
-                }
-                // Cache toggle state for drain
-                let toggle_snap = toggles.snapshot();
-                drain_packet_queue(
-                    &mut packet_rx,
-                    &mut connections,
-                    &mut reg,
-                    &instant_tx,
-                    last_client_addr,
-                    &local_listener,
-                    &seq_tracker,
-                    &toggle_snap,
-                )
-                .await;
-            }
-            _ = batch_flush_timer.tick() => {
-                // Flush any queued packets on timer (15ms interval like Moblin)
-                flush_all_batches(&mut connections).await;
-            }
+            let toggle_snap = toggles.snapshot();
+            drain_packet_queue(
+                &mut packet_rx,
+                &mut connections,
+                &mut reg,
+                &instant_tx,
+                last_client_addr,
+                &local_listener,
+                &seq_tracker,
+                &toggle_snap,
+            )
+            .await;
         }
     }
 
     #[cfg(not(unix))]
-    loop {
-        tokio::select! {
-            res = local_listener.recv_from(&mut recv_buf) => {
-                // Cache toggle state once per select iteration to avoid atomic loads per packet
-                let toggle_snap = toggles.snapshot();
-                handle_srt_packet(
-                    res,
-                    &mut recv_buf,
-                    &mut connections,
-                    &mut last_selected_idx,
-                    &mut last_switch_time_ms,
-                    &mut seq_tracker,
-                    &mut last_client_addr,
-                    reg.has_connected,
-                    &toggle_snap,
-                )
-                .await;
-                drain_packet_queue(
-                    &mut packet_rx,
-                    &mut connections,
-                    &mut reg,
-                    &instant_tx,
-                    last_client_addr,
-                    &local_listener,
-                    &seq_tracker,
-                    &toggle_snap,
-                )
-                .await;
-            }
-            packet = packet_rx.recv() => {
-                // Cache toggle state once per select iteration
-                let toggle_snap = toggles.snapshot();
-                if let Some(packet) = packet {
-                    handle_uplink_packet(
-                        packet,
-                        &mut connections,
-                        &mut reg,
-                        &instant_tx,
-                        last_client_addr,
-                        &local_listener,
-                        &seq_tracker,
-                        &toggle_snap,
-                    ).await;
-                    drain_packet_queue(
-                        &mut packet_rx,
-                        &mut connections,
-                        &mut reg,
-                        &instant_tx,
-                        last_client_addr,
-                        &local_listener,
-                        &seq_tracker,
-                        &toggle_snap,
-                    ).await;
-                } else {
-                    return Ok(());
-                }
-            }
-            _ = housekeeping_timer.tick() => {
-                let classic = toggles
-                    .classic_mode
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if let Err(err) = handle_housekeeping(
-                    &mut connections,
-                    &mut reg,
-                    classic,
-                    &mut all_failed_at,
-                    &mut reader_handles,
-                    &packet_tx,
-                ).await {
-                   warn!("housekeeping failed: {err}");
-               }
-
-               if let Some(changes) = pending_changes.take()
-                   && let Some(new_ips) = changes.new_ips
-               {
-                   info!("applying queued connection changes: {} IPs", new_ips.len());
-                   apply_connection_changes(
-                       &mut connections,
-                       &new_ips,
-                       &changes.receiver_host,
-                       changes.receiver_port,
-                       &mut last_selected_idx,
-                       &mut seq_tracker,
-                   )
-                   .await;
-                   info!("connection changes applied successfully");
-                    sync_readers(&connections, &mut reader_handles, &packet_tx);
-                }
-
-                status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
-                if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
-                    log_connection_status(&connections, last_selected_idx, &toggles);
-                    status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
-                }
-
-                sync_readers(&connections, &mut reader_handles, &packet_tx);
-                // Cache toggle state for drain
-                let toggle_snap = toggles.snapshot();
-                drain_packet_queue(
-                    &mut packet_rx,
-                    &mut connections,
-                    &mut reg,
-                    &instant_tx,
-                    last_client_addr,
-                    &local_listener,
-                    &seq_tracker,
-                    &toggle_snap,
-                )
-                .await;
-            }
-            _ = batch_flush_timer.tick() => {
-                // Flush any queued packets on timer (15ms interval like Moblin)
-                flush_all_batches(&mut connections).await;
-            }
-        }
-    }
+    event_loop! {}
 }
 
 pub async fn read_ip_list(path: &str) -> Result<SmallVec<IpAddr, 4>> {
