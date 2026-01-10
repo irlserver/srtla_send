@@ -331,21 +331,25 @@ impl SrtlaConnection {
         }
     }
 
-    /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1
-    pub fn mark_for_recovery(&mut self) {
-        self.last_received = None;
-        self.last_keepalive_sent = None;
-        self.rtt.last_keepalive_sent_ms = 0;
-        self.rtt.waiting_for_keepalive_response = false;
+    /// Reset core connection state (window, packet tracking, batch queue).
+    /// Used by both mark_for_recovery and reset_state.
+    fn reset_core_state(&mut self) {
         self.connected = false;
-        // Reset connection state like C version does
-        // Reset to default window like classic implementation so reconnecting
-        // links can ramp quickly once registration completes.
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log.clear();
         self.highest_acked_seq = i32::MIN;
         self.batch_sender.reset();
+    }
+
+    /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1.
+    /// Soft reset: clears packet state but preserves congestion/bitrate stats.
+    pub fn mark_for_recovery(&mut self) {
+        self.last_received = None;
+        self.last_keepalive_sent = None;
+        self.rtt.last_keepalive_sent_ms = 0;
+        self.rtt.waiting_for_keepalive_response = false;
+        self.reset_core_state();
         // Set grace deadline to 0 to indicate this connection is immediately timed out
         // (matches C behavior of setting last_rcvd = 1)
         self.reconnection.startup_grace_deadline_ms = 0;
@@ -407,20 +411,15 @@ impl SrtlaConnection {
     }
 
     /// Reset connection state after socket replacement.
-    /// Called during reconnection to clear all stateful tracking.
+    /// Full reset: clears all state including congestion/bitrate stats.
     fn reset_state(&mut self) {
-        self.connected = false;
         self.last_received = None;
-        self.window = WINDOW_DEF * WINDOW_MULT;
-        self.in_flight_packets = 0;
-        self.packet_log.clear();
-        self.highest_acked_seq = i32::MIN;
+        self.reset_core_state();
 
         // Reset submodule state
         self.congestion.reset();
         self.rtt.reset();
         self.bitrate.reset();
-        self.batch_sender.reset();
 
         // Reset reconnection tracking
         self.reconnection.last_reconnect_attempt_ms = now_ms();
