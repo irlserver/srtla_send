@@ -102,18 +102,7 @@ impl SrtlaConnection {
         // In Rust, we check if last_received is Some (i.e., has been set when data was
         // received)
         if self.connected && self.last_received.is_some() {
-            let old = self.window;
             self.window = min(self.window + 1, WINDOW_MAX * WINDOW_MULT);
-
-            if old < self.window && (self.window - old) > 100 {
-                tracing::debug!(
-                    "{}: Major window recovery {} → {} (+{})",
-                    self.label,
-                    old,
-                    self.window,
-                    self.window - old
-                );
-            }
         }
     }
 }
