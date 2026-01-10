@@ -131,43 +131,6 @@ pub struct SrtlaConnection {
 }
 
 impl SrtlaConnection {
-    #[cfg(unix)]
-    pub async fn connect_from_ip(ip: IpAddr, host: &str, port: u16) -> Result<Self> {
-        use rand::RngCore;
-
-        let remote = resolve_remote(host, port).await?;
-        let sock = bind_from_ip(ip, 0)?;
-        sock.connect(&remote.into())?;
-        sock.set_nonblocking(true)?;
-        let socket = Arc::new(BatchUdpSocket::new(sock)?);
-        let startup_deadline = now_ms() + STARTUP_GRACE_MS;
-        Ok(Self {
-            conn_id: rand::rng().next_u64(),
-            socket,
-            remote,
-            local_ip: ip,
-            label: format!("{}:{} via {}", host, port, ip),
-            connected: false,
-            window: WINDOW_DEF * WINDOW_MULT,
-            in_flight_packets: 0,
-            packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
-            highest_acked_seq: i32::MIN,
-            last_received: None,
-            last_sent: None,
-            last_keepalive_sent: None,
-            rtt: RttTracker::default(),
-            congestion: CongestionControl::default(),
-            bitrate: BitrateTracker::default(),
-            reconnection: ReconnectionState {
-                startup_grace_deadline_ms: startup_deadline,
-                ..Default::default()
-            },
-            quality_cache: CachedQuality::default(),
-            batch_sender: BatchSender::new(),
-        })
-    }
-
-    #[cfg(not(unix))]
     pub async fn connect_from_ip(ip: IpAddr, host: &str, port: u16) -> Result<Self> {
         use rand::RngCore;
 
@@ -713,13 +676,9 @@ impl SrtlaConnection {
         self.bitrate.mbps()
     }
 
-    #[cfg(unix)]
-    pub async fn reconnect(&mut self) -> Result<()> {
-        let sock = bind_from_ip(self.local_ip, 0)?;
-        sock.connect(&self.remote.into())?;
-        sock.set_nonblocking(true)?;
-        let socket = BatchUdpSocket::new(sock)?;
-        self.socket = Arc::new(socket);
+    /// Reset connection state after socket replacement.
+    /// Called during reconnection to clear all stateful tracking.
+    fn reset_state(&mut self) {
         self.connected = false;
         self.last_received = None;
         self.window = WINDOW_DEF * WINDOW_MULT;
@@ -727,7 +686,7 @@ impl SrtlaConnection {
         self.packet_log.clear();
         self.highest_acked_seq = i32::MIN;
 
-        // Use encapsulated reset methods for submodules
+        // Reset submodule state
         self.congestion.reset();
         self.rtt.reset();
         self.bitrate.reset();
@@ -736,37 +695,16 @@ impl SrtlaConnection {
         // Reset reconnection tracking
         self.reconnection.last_reconnect_attempt_ms = now_ms();
         self.reconnection.reconnect_failure_count = 0;
-
-        // Don't reset connection_established_ms for reconnections - only set when REG3
-        // is received
-        self.mark_reconnect_success();
-        self.reconnection.reset_startup_grace();
-        Ok(())
     }
 
-    #[cfg(not(unix))]
     pub async fn reconnect(&mut self) -> Result<()> {
         let sock = bind_from_ip(self.local_ip, 0)?;
         sock.connect(&self.remote.into())?;
         sock.set_nonblocking(true)?;
         let socket = BatchUdpSocket::new(sock)?;
         self.socket = Arc::new(socket);
-        self.connected = false;
-        self.last_received = None;
-        self.window = WINDOW_DEF * WINDOW_MULT;
-        self.in_flight_packets = 0;
-        self.packet_log.clear();
-        self.highest_acked_seq = i32::MIN;
 
-        // Use encapsulated reset methods for submodules
-        self.congestion.reset();
-        self.rtt.reset();
-        self.bitrate.reset();
-        self.batch_sender.reset();
-
-        // Reset reconnection tracking
-        self.reconnection.last_reconnect_attempt_ms = now_ms();
-        self.reconnection.reconnect_failure_count = 0;
+        self.reset_state();
 
         // Don't reset connection_established_ms for reconnections - only set when REG3
         // is received
