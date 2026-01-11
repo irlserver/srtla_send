@@ -13,7 +13,6 @@ use tracing::debug;
 
 use super::MIN_SWITCH_INTERVAL_MS;
 use super::exploration::should_explore_now;
-use super::quality::calculate_quality_multiplier;
 use crate::connection::SrtlaConnection;
 
 /// Switching hysteresis: require new connection to be significantly better
@@ -34,14 +33,15 @@ const SWITCH_THRESHOLD: f64 = 1.02; // New connection must be 2% better
 /// with dampening to prevent rapid switching under bursty network conditions.
 ///
 /// # Arguments
-/// * `conns` - Slice of available connections
+/// * `conns` - Mutable slice of available connections (for quality cache updates)
 /// * `last_idx` - Previously selected connection index (for hysteresis)
 /// * `last_switch_time_ms` - Timestamp of last connection switch
 /// * `current_time_ms` - Current timestamp in milliseconds
 /// * `enable_quality` - Whether to apply quality scoring
 /// * `enable_explore` - Whether to enable smart exploration
+#[inline(always)]
 pub fn select_connection(
-    conns: &[SrtlaConnection],
+    conns: &mut [SrtlaConnection],
     last_idx: Option<usize>,
     last_switch_time_ms: u64,
     current_time_ms: u64,
@@ -55,7 +55,7 @@ pub fn select_connection(
     let mut second_score: f64 = -1.0;
     let mut current_score: Option<f64> = None;
 
-    for (i, c) in conns.iter().enumerate() {
+    for (i, c) in conns.iter_mut().enumerate() {
         if c.is_timed_out() {
             continue;
         }
@@ -63,30 +63,12 @@ pub fn select_connection(
         let score = if !enable_quality {
             base
         } else {
-            let quality_mult = calculate_quality_multiplier(c);
+            // Use cached quality multiplier (recalculates every 50ms)
+            let quality_mult = c.get_cached_quality_multiplier(current_time_ms);
             let final_score = base * quality_mult;
 
-            // Log quality issues and recoveries for debugging
-            if quality_mult < 0.8 {
-                debug!(
-                    "{} quality degraded: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → \
-                     final: {}",
-                    c.label,
-                    quality_mult,
-                    c.total_nak_count(),
-                    c.time_since_last_nak_ms().unwrap_or(0),
-                    c.nak_burst_count(),
-                    base as i32,
-                    final_score as i32
-                );
-            } else if quality_mult < 1.0 && c.nak_burst_count() > 0 {
-                debug!(
-                    "{} quality recovering: {:.2} (burst: {})",
-                    c.label,
-                    quality_mult,
-                    c.nak_burst_count()
-                );
-            }
+            // Log quality issues and recoveries for debugging (cold path)
+            log_quality_state(c, quality_mult, base, final_score);
 
             final_score
         };
@@ -167,6 +149,31 @@ pub fn select_connection(
         best_idx
     } else {
         best_idx
+    }
+}
+
+/// Log quality state for debugging (cold path, marked for optimizer hints)
+#[cold]
+#[inline(never)]
+fn log_quality_state(c: &SrtlaConnection, quality_mult: f64, base: f64, final_score: f64) {
+    if quality_mult < 0.8 {
+        debug!(
+            "{} quality degraded: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → final: {}",
+            c.label,
+            quality_mult,
+            c.total_nak_count(),
+            c.time_since_last_nak_ms().unwrap_or(0),
+            c.nak_burst_count(),
+            base as i32,
+            final_score as i32
+        );
+    } else if quality_mult < 1.0 && c.nak_burst_count() > 0 {
+        debug!(
+            "{} quality recovering: {:.2} (burst: {})",
+            c.label,
+            quality_mult,
+            c.nak_burst_count()
+        );
     }
 }
 

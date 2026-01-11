@@ -35,7 +35,7 @@ pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 /// Select the best connection index based on mode and configuration
 ///
 /// # Arguments
-/// * `conns` - Slice of available connections
+/// * `conns` - Mutable slice of connections (for quality cache updates in enhanced mode)
 /// * `last_idx` - Previously selected connection (for hysteresis)
 /// * `last_switch_time_ms` - Time of last switch (for time-based dampening)
 /// * `current_time_ms` - Current timestamp in milliseconds
@@ -45,8 +45,9 @@ pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 ///
 /// # Returns
 /// The index of the selected connection, or None if no valid connections
+#[inline(always)]
 pub fn select_connection_idx(
-    conns: &[SrtlaConnection],
+    conns: &mut [SrtlaConnection],
     last_idx: Option<usize>,
     last_switch_time_ms: u64,
     current_time_ms: u64,
@@ -91,7 +92,7 @@ mod tests {
 
         // Classic mode should pick connection 1 (highest score) even during cooldown
         let result = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -121,7 +122,7 @@ mod tests {
 
         // Enhanced mode should stay with connection 0 due to cooldown
         let result = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
@@ -138,7 +139,7 @@ mod tests {
         // After cooldown expires, should allow switching
         let current_time_after_cooldown = last_switch_time_ms + 600; // Past cooldown
         let result_after = select_connection_idx(
-            &connections,
+            &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_after_cooldown,
@@ -155,8 +156,8 @@ mod tests {
 
     #[test]
     fn test_select_connection_idx_empty() {
-        let conns: Vec<SrtlaConnection> = vec![];
-        let result = select_connection_idx(&conns, None, 0, 0, false, false, false);
+        let mut conns: Vec<SrtlaConnection> = vec![];
+        let result = select_connection_idx(&mut conns, None, 0, 0, false, false, false);
         assert_eq!(result, None);
     }
 }

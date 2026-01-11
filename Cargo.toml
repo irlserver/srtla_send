@@ -1,7 +1,7 @@
 [package]
 resolver = "3"
 name = "srtla_send"
-version = "2.8.0"
+version = "3.0.0"
 edition = "2024"
 description = "SRT transport proxy with link aggregation for connection bonding (sender-side)"
 license = "MIT"
@@ -17,6 +17,7 @@ rust-version = "1.87"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 rand = "0.9"
+rustc-hash = "2.1"
 tokio = { version = "1.48.0", features = [
 	"rt-multi-thread",
 	"macros",
@@ -35,6 +36,9 @@ smallvec = "=2.0.0-alpha.12"
 mimalloc = { version = "0.1.43", default-features = false, features = [
 	"secure",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 test-internals = []

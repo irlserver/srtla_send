@@ -82,72 +82,82 @@ pub fn perform_window_recovery(
     }
 
     let now = now_ms();
+
+    // Treat connections that never had NAKs as perfect connections.
+    // Previously, last_nak_time_ms == 0 would skip recovery entirely, causing
+    // connections to get stuck at low windows after reconnection if they
+    // don't receive enough traffic for ACK-based growth.
+    // Now we treat "never had NAK" as equivalent to "very long since NAK"
+    // which enables aggressive recovery for these healthy connections.
     let time_since_last_nak = if last_nak_time_ms > 0 {
-        Some(now.saturating_sub(last_nak_time_ms))
+        now.saturating_sub(last_nak_time_ms)
     } else {
-        None
+        // Never had a NAK - treat as perfect connection (very long time since NAK)
+        // Use a large value that triggers aggressive recovery (>10s threshold)
+        u64::MAX
     };
 
-    if let Some(tsn) = time_since_last_nak {
-        // Clear NAK burst tracking if enough time has passed
-        const NAK_BURST_WINDOW_MS: u64 = 1000;
-        if tsn >= NAK_BURST_WINDOW_MS && *nak_burst_count > 0 {
-            *nak_burst_count = 0;
-            *nak_burst_start_time_ms = 0;
+    // Clear NAK burst tracking if enough time has passed
+    const NAK_BURST_WINDOW_MS: u64 = 1000;
+    if time_since_last_nak >= NAK_BURST_WINDOW_MS && *nak_burst_count > 0 {
+        *nak_burst_count = 0;
+        *nak_burst_start_time_ms = 0;
+    }
+
+    let min_wait_time = if *fast_recovery_mode {
+        FAST_MIN_WAIT_MS
+    } else {
+        NORMAL_MIN_WAIT_MS
+    };
+    let increment_wait = if *fast_recovery_mode {
+        FAST_INCREMENT_WAIT_MS
+    } else {
+        NORMAL_INCREMENT_WAIT_MS
+    };
+
+    if time_since_last_nak > min_wait_time
+        && now.saturating_sub(*last_window_increase_ms) > increment_wait
+    {
+        let old_window = *window;
+        // Conservative recovery multipliers (using cached values)
+        let fast_mode_bonus = if *fast_recovery_mode { 2 } else { 1 };
+
+        // Progressive recovery based on how long since last NAK
+        if time_since_last_nak > 10_000 {
+            // No NAKs for 10+ seconds (or never): aggressive recovery (200% rate)
+            *window += WINDOW_INCR * 2 * fast_mode_bonus;
+        } else if time_since_last_nak > 7_000 {
+            // No NAKs for 7+ seconds: moderate recovery (100% rate)
+            *window += WINDOW_INCR * fast_mode_bonus;
+        } else if time_since_last_nak > 5_000 {
+            // No NAKs for 5+ seconds: slow recovery (50% rate)
+            *window += WINDOW_INCR * fast_mode_bonus / 2;
+        } else {
+            // Recent NAKs: minimal recovery (25% rate)
+            *window += WINDOW_INCR * fast_mode_bonus / 4;
         }
 
-        let min_wait_time = if *fast_recovery_mode {
-            FAST_MIN_WAIT_MS
-        } else {
-            NORMAL_MIN_WAIT_MS
-        };
-        let increment_wait = if *fast_recovery_mode {
-            FAST_INCREMENT_WAIT_MS
-        } else {
-            NORMAL_INCREMENT_WAIT_MS
-        };
+        *window = min(*window, WINDOW_MAX * WINDOW_MULT);
+        *last_window_increase_ms = now;
 
-        if tsn > min_wait_time && now.saturating_sub(*last_window_increase_ms) > increment_wait {
-            let old_window = *window;
-            // Conservative recovery multipliers (using cached values)
-            let fast_mode_bonus = if *fast_recovery_mode { 2 } else { 1 };
-
-            // Progressive recovery based on how long since last NAK
-            if tsn > 10_000 {
-                // No NAKs for 10+ seconds: aggressive recovery (200% rate)
-                *window += WINDOW_INCR * 2 * fast_mode_bonus;
-            } else if tsn > 7_000 {
-                // No NAKs for 7+ seconds: moderate recovery (100% rate)
-                *window += WINDOW_INCR * fast_mode_bonus;
-            } else if tsn > 5_000 {
-                // No NAKs for 5+ seconds: slow recovery (50% rate)
-                *window += WINDOW_INCR * fast_mode_bonus / 2;
+        if *window > old_window {
+            let time_str = if last_nak_time_ms == 0 {
+                "never".to_string()
             } else {
-                // Recent NAKs: minimal recovery (25% rate)
-                *window += WINDOW_INCR * fast_mode_bonus / 4;
-            }
+                format!("{:.1}s", (time_since_last_nak as f64) / 1000.0)
+            };
+            debug!(
+                "{}: Time-based window recovery {} → {} (last NAK: {}, fast_mode={})",
+                label, old_window, *window, time_str, *fast_recovery_mode
+            );
+        }
 
-            *window = min(*window, WINDOW_MAX * WINDOW_MULT);
-            *last_window_increase_ms = now;
-
-            if *window > old_window {
-                debug!(
-                    "{}: Time-based window recovery {} → {} (no NAKs for {:.1}s, fast_mode={})",
-                    label,
-                    old_window,
-                    *window,
-                    (tsn as f64) / 1000.0,
-                    *fast_recovery_mode
-                );
-            }
-
-            if *fast_recovery_mode && *window >= FAST_RECOVERY_DISABLE_WINDOW {
-                *fast_recovery_mode = false;
-                debug!(
-                    "{}: Disabling FAST RECOVERY MODE after time-based recovery (window={})",
-                    label, *window
-                );
-            }
+        if *fast_recovery_mode && *window >= FAST_RECOVERY_DISABLE_WINDOW {
+            *fast_recovery_mode = false;
+            debug!(
+                "{}: Disabling FAST RECOVERY MODE after time-based recovery (window={})",
+                label, *window
+            );
         }
     }
 }
@@ -214,5 +224,70 @@ mod tests {
 
         // Should have increased (aggressive recovery for 10s+)
         assert!(window > 5000);
+    }
+
+    #[test]
+    fn test_window_recovery_with_no_nak_history() {
+        // Test that connections that never had NAKs still get window recovery.
+        // This prevents connections from getting stuck at low windows after
+        // reconnection when they don't receive enough traffic for ACK-based growth.
+        let mut window = 5000;
+        let last_nak = 0; // Never had a NAK
+        let mut nak_burst_count = 0;
+        let mut nak_burst_start = 0;
+        let mut last_increase = 0;
+        let mut fast_recovery = false;
+
+        perform_window_recovery(
+            &mut window,
+            true,
+            last_nak,
+            &mut nak_burst_count,
+            &mut nak_burst_start,
+            &mut last_increase,
+            &mut fast_recovery,
+            "test",
+        );
+
+        // Should have increased with aggressive recovery (treated as perfect connection)
+        assert!(
+            window > 5000,
+            "Window should grow for connections with no NAK history, got {}",
+            window
+        );
+        // Should get aggressive recovery rate (WINDOW_INCR * 2 = 60)
+        assert_eq!(
+            window,
+            5000 + WINDOW_INCR * 2,
+            "Should use aggressive recovery for no-NAK connections"
+        );
+    }
+
+    #[test]
+    fn test_window_recovery_no_nak_respects_increment_wait() {
+        // Test that even no-NAK connections respect the increment wait time
+        let mut window = 5000;
+        let last_nak = 0; // Never had a NAK
+        let mut nak_burst_count = 0;
+        let mut nak_burst_start = 0;
+        let mut last_increase = now_ms(); // Just increased
+        let mut fast_recovery = false;
+
+        perform_window_recovery(
+            &mut window,
+            true,
+            last_nak,
+            &mut nak_burst_count,
+            &mut nak_burst_start,
+            &mut last_increase,
+            &mut fast_recovery,
+            "test",
+        );
+
+        // Should NOT have increased (increment wait not elapsed)
+        assert_eq!(
+            window, 5000,
+            "Window should not grow if increment wait hasn't elapsed"
+        );
     }
 }
