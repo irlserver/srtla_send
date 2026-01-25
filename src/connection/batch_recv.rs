@@ -410,10 +410,12 @@ mod fallback_impl {
             }
         }
 
+        #[allow(dead_code)]
         pub fn len(&self) -> usize {
             if self.has_packet { 1 } else { 0 }
         }
 
+        #[allow(dead_code)]
         pub fn is_empty(&self) -> bool {
             !self.has_packet
         }
