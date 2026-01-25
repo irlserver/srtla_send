@@ -6,11 +6,8 @@ This document provides context for AI coding assistants working on the SRTLA Sen
 
 This Rust implementation builds upon several open source projects and ideas:
 
-- **[Moblin](https://github.com/eerimoq/moblin)** and **[Moblink](https://github.com/eerimoq/moblink)** - Inspired by ideas and algorithms
-- **[Bond Bunny](https://github.com/dimadesu/bond-bunny)** - Android SRTLA bonding app that inspired many of the enhanced connection selection algorithms
+- **[Moblin](https://github.com/eerimoq/moblin)**  - Inspired by ideas and algorithms
 - **[Original SRTLA](https://github.com/BELABOX/srtla)** - The foundational SRTLA protocol and reference implementation by Belabox
-
-The burst NAK penalty logic, quality scoring, and connection exploration features were directly inspired by the Moblin and Bond Bunny implementations.
 
 ## Project Overview
 

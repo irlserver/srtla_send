@@ -11,15 +11,13 @@ This application is experimental. Be prepared to troubleshoot it and experiment 
 
 This Rust implementation builds upon several open source projects and ideas:
 
-- **[Bond Bunny](https://github.com/dimadesu/bond-bunny)** - Android SRTLA bonding app that inspired many of the enhanced connection selection algorithms
-- **[Moblin](https://github.com/eerimoq/moblin)** and **[Moblink](https://github.com/eerimoq/moblink)** - Inspired by ideas and algorithms
+- **[Moblin](https://github.com/eerimoq/moblin)** - Inspired by ideas and algorithms
 - **[Original SRTLA](https://github.com/BELABOX/srtla)** - The foundational SRTLA protocol and reference implementation by Belabox
-
-The burst NAK penalty logic, quality scoring, and connection exploration features were directly inspired by the Bond Bunny Android implementation.
 
 ## Features
 
 ### Core SRTLA Functionality
+
 - Multi-uplink bonding using a list of local source IPs
 - Registration flow (REG1/REG2/REG3) with ID propagation
 - SRT ACK and NAK handling (with correct NAK attribution to sending uplink)
@@ -33,6 +31,7 @@ The burst NAK penalty logic, quality scoring, and connection exploration feature
 The sender supports three mutually exclusive scheduling modes:
 
 #### Enhanced Mode (Default)
+
 - **Exponential NAK Decay**: Smooth recovery from packet loss over ~8 seconds
 - **NAK Burst Detection**: Extra penalties for connections experiencing severe packet loss (≥5 NAKs)
 - **RTT-Aware Selection**: Small bonus (3% max) for lower-latency connections
@@ -40,11 +39,13 @@ The sender supports three mutually exclusive scheduling modes:
 - **Minimal Hysteresis**: 2% threshold prevents flip-flopping while maintaining natural load distribution
 
 #### Classic Mode
+
 - Exact match to original `srtla_send.c` implementation
 - Pure capacity-based selection without quality awareness
 - Enable via `--mode classic`
 
 #### RTT-Threshold Mode
+
 - **Reduces Packet Reordering**: Groups links by RTT and strongly prefers low-RTT ("fast") links
 - **Threshold-Based Selection**: Links within `min_rtt + delta` are considered "fast"
 - **Quality-Aware Within Fast Links**: Applies NAK penalties when choosing among fast links
@@ -54,6 +55,7 @@ The sender supports three mutually exclusive scheduling modes:
 - **Use Case**: Heterogeneous networks where some links have significantly higher latency (e.g., satellite + cellular)
 
 ### Optional Smart Exploration (Enhanced Mode Only)
+
 - **Context-Aware Discovery**: Tests alternative connections when current best is degrading and alternatives have recovered
 - **Periodic Fallback**: Every 30 seconds for 300ms as a safety net
 - **Smart Switching**: Tries second-best connections instead of always sticking to current best
@@ -83,6 +85,7 @@ cargo build --release
 ```
 
 Alternatively, you can use nightly for individual commands:
+
 ```bash
 cargo +nightly build --release
 cargo +nightly fmt
@@ -294,11 +297,13 @@ With properly configured connections, you should observe:
 **All connections active**: Traffic should appear on all uplinks (e.g., if you have 4 uplinks, all 4 should show active bitrate)
 
 **Proportional distribution**:
+
 - With equal connections: roughly equal traffic distribution (e.g., 25% each with 4 uplinks)
 - With varying quality (enhanced mode): better connections get more traffic, degraded connections get less
 - With varying capacity: connections with larger windows get proportionally more traffic
 
 **Dynamic adaptation (enhanced mode)**:
+
 - Connections experiencing NAKs automatically receive less traffic
 - Connections recover to full capacity within ~8 seconds after issues resolve
 - System continuously rebalances based on current conditions
@@ -306,6 +311,7 @@ With properly configured connections, you should observe:
 ### Monitoring
 
 **Status logs** (every 30 seconds) show:
+
 - Total bitrate across all connections
 - Individual connection status (active/timed out)
 - Window sizes and in-flight packet counts
@@ -313,6 +319,7 @@ With properly configured connections, you should observe:
 - Current mode and configuration
 
 **Debug logs** (when `RUST_LOG=debug`) show:
+
 - Per-packet connection selection decisions
 - Quality multiplier calculations
 - NAK burst detections and recovery
@@ -322,6 +329,7 @@ With properly configured connections, you should observe:
 ### Troubleshooting
 
 **If only some connections are used**:
+
 1. Check for NAKs in logs - degraded connections naturally get less traffic in enhanced mode
 2. Try classic mode: `mode classic` - disables quality awareness for pure capacity-based distribution
 3. Temporarily disable quality scoring: `quality off`
@@ -329,6 +337,7 @@ With properly configured connections, you should observe:
 5. Check RTT differences - high-RTT connections get slightly less traffic in enhanced mode (3% max difference)
 
 **If throughput is lower than expected**:
+
 1. Verify SRT is not limiting the bitrate (check encoder settings)
 2. Check for high packet loss (NAKs) on connections - indicates network issues
 3. Ensure sender has sufficient CPU and network capacity
@@ -336,6 +345,7 @@ With properly configured connections, you should observe:
 5. Check connection windows in status logs - low windows indicate capacity limits
 
 **If connections are flip-flopping**:
+
 1. This should be minimal with 2% hysteresis in enhanced mode
 2. Check if scores are truly identical (look for hysteresis messages in debug logs)
 3. Verify connections have stable quality (no intermittent NAKs)
@@ -348,9 +358,11 @@ With properly configured connections, you should observe:
 If needed, these can be adjusted in `src/sender/selection/`:
 
 **Enhanced Mode (`enhanced.rs`):**
+
 - `SWITCH_THRESHOLD`: 1.02 (2% hysteresis) - increase for more stability, decrease for faster response
 
 **Quality Scoring (`quality.rs`):**
+
 - `STARTUP_GRACE_PERIOD_MS`: 30000ms (30 seconds) - grace period before quality penalties apply
 - `PERFECT_CONNECTION_BONUS`: 1.1 (10% bonus) - bonus for connections with no NAKs
 - `STARTUP_NAK_PENALTY`: 0.98 (2% penalty) - light penalty during grace period
@@ -364,17 +376,20 @@ If needed, these can be adjusted in `src/sender/selection/`:
 - `MAX_RTT_BONUS`: 1.03 (3% max bonus) - maximum RTT bonus multiplier
 
 **Exploration (`enhanced.rs`):**
+
 - Exploration period: `should_explore_now()` function, currently 30s - adjust exploration interval
 
 ### Runtime Optimization
 
 For maximum throughput:
+
 - Use enhanced mode (default) to automatically avoid degraded connections
 - Ensure adequate SRT buffer size (`SRTO_SNDDATA`)
 - Monitor for connection timeouts - these interrupt traffic flow
 - Use `RUST_LOG=info` for minimal logging overhead (avoid debug in production)
 
 For maximum stability:
+
 - Use classic mode (`--mode classic`) for predictable, simple behavior
 - Disable exploration (`explore off`) if not needed
 - Increase hysteresis threshold if experiencing unnecessary switching
