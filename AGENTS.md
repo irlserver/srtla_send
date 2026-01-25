@@ -283,6 +283,12 @@ cargo test --lib --verbose
 cargo build --release
 ```
 
+## Style Guide
+
+- Write commit messages using [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+- Never bump the internal package version in `Cargo.toml`. This is handled automatically by the release process.
+- Rust files use LF line endings.
+
 ### Important Notes
 
 - **NEVER commit changes unless explicitly asked by the user**
