@@ -33,23 +33,23 @@ RTT-threshold scheduling:
 
 ```bash
 # Enable RTT-threshold mode with default delta (30ms)
-srtla_send --rtt-threshold 6000 host 5000 ./ips.txt
+srtla_send --mode rtt-threshold 6000 host 5000 ./ips.txt
 
 # Enable with custom delta (50ms)
-srtla_send --rtt-threshold --rtt-delta-ms 50 6000 host 5000 ./ips.txt
+srtla_send --mode rtt-threshold --rtt-delta-ms 50 6000 host 5000 ./ips.txt
 ```
 
-### Runtime Toggles
+### Runtime Commands
 
 ```bash
-# Enable RTT-threshold mode
-echo "rtt on" | socat - UNIX-CONNECT:/tmp/srtla.sock
+# Switch to RTT-threshold mode
+echo "mode rtt-threshold" | socat - UNIX-CONNECT:/tmp/srtla.sock
 
-# Disable RTT-threshold mode
-echo "rtt off" | socat - UNIX-CONNECT:/tmp/srtla.sock
+# Switch back to enhanced mode
+echo "mode enhanced" | socat - UNIX-CONNECT:/tmp/srtla.sock
 
 # Change RTT delta threshold
-echo "rtt_delta=50" | socat - UNIX-CONNECT:/tmp/srtla.sock
+echo "rtt-delta 50" | socat - UNIX-CONNECT:/tmp/srtla.sock
 
 # Check current status
 echo "status" | socat - UNIX-CONNECT:/tmp/srtla.sock
@@ -69,30 +69,31 @@ echo "status" | socat - UNIX-CONNECT:/tmp/srtla.sock
 
 ## Interaction with Other Modes
 
-| Mode Combination | Behavior |
-|------------------|----------|
-| `--rtt-threshold` only | RTT grouping with quality scoring |
-| `--rtt-threshold --no-quality` | RTT grouping, pure capacity within fast links |
-| `--classic` | RTT-threshold disabled, classic mode takes priority |
+| Mode | Behavior |
+|------|----------|
+| `--mode rtt-threshold` | RTT grouping with quality scoring |
+| `--mode rtt-threshold --no-quality` | RTT grouping, pure capacity within fast links |
+| `--mode classic` | Classic mode, no RTT grouping |
+| `--mode enhanced` | Enhanced mode (default), no RTT grouping |
 
 ## Use Cases
 
 ### Heterogeneous Networks
 When combining links with very different latencies (cellular + satellite, WiFi + cellular):
 ```bash
-srtla_send --rtt-threshold --rtt-delta-ms 30 6000 host 5000 ./ips.txt
+srtla_send --mode rtt-threshold --rtt-delta-ms 30 6000 host 5000 ./ips.txt
 ```
 
 ### Reducing Reordering for Sensitive Applications
 For applications that don't handle reordering well:
 ```bash
-srtla_send --rtt-threshold --rtt-delta-ms 20 6000 host 5000 ./ips.txt
+srtla_send --mode rtt-threshold --rtt-delta-ms 20 6000 host 5000 ./ips.txt
 ```
 
 ### Mixed Quality Links
 When fast links may have quality issues, keep quality scoring enabled (default):
 ```bash
-srtla_send --rtt-threshold 6000 host 5000 ./ips.txt
+srtla_send --mode rtt-threshold 6000 host 5000 ./ips.txt
 ```
 
 ## Tradeoffs

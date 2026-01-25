@@ -5,7 +5,7 @@ pub mod connection_tests;
 pub mod registration_tests;
 
 #[cfg(test)]
-pub mod toggles_tests;
+pub mod config_tests;
 
 #[cfg(test)]
 pub mod sender_tests;

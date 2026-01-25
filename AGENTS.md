@@ -27,7 +27,7 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 - Keepalives with RTT measurement and time-based window recovery
 - Dynamic path selection: score = window / (in_flight + 1)
 - Live IP list reload via SIGHUP (Unix)
-- Runtime toggles via stdin (no restart required)
+- Runtime configuration via stdin (no restart required)
 
 ### Tech Stack
 
@@ -47,7 +47,7 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 
 ### Version
 
-Current version: 2.3.0
+Current version: 3.0.0
 
 ## Codebase Structure
 
@@ -56,22 +56,24 @@ Current version: 2.3.0
 ```
 src/
   tests/
+    config_tests.rs
     connection_tests.rs
     end_to_end_tests.rs
     integration_tests.rs
     mod.rs
     protocol_tests.rs
     registration_tests.rs
+    rtt_threshold_tests.rs
     sender_tests.rs
-    toggles_tests.rs
-  connection.rs       - Connection management and quality scoring
+  config.rs          - Runtime configuration (DynamicConfig, ConfigSnapshot)
+  connection.rs      - Connection management and quality scoring
   lib.rs             - Library exports
   main.rs            - CLI entry point
+  mode.rs            - Scheduling mode enum (Classic, Enhanced, RttThreshold)
   protocol.rs        - SRTLA protocol definitions
   registration.rs    - Registration flow (REG1/REG2/REG3)
   sender.rs          - Main sender logic and packet forwarding
   test_helpers.rs    - Test utilities
-  toggles.rs         - Runtime toggle system
   utils.rs           - Utility functions
 .cargo/
   config.toml
@@ -86,11 +88,12 @@ rustfmt.toml        - Formatting configuration
 
 ### Module Organization
 
+- `config`: Runtime configuration with atomic settings (DynamicConfig, ConfigSnapshot)
+- `mode`: SchedulingMode enum (Classic, Enhanced, RttThreshold)
 - `connection`: SrtlaConnection struct, bind/resolve utilities, incoming packet handling
 - `protocol`: SRTLA protocol constants and structures
 - `registration`: Registration manager for SRTLA connection setup
 - `sender`: Main packet forwarding logic, connection selection algorithm
-- `toggles`: Runtime toggle system for classic mode, quality, exploration, RTT-threshold
 - `utils`: Common utilities (now_ms, etc.)
 
 ### Test Organization

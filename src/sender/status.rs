@@ -1,10 +1,8 @@
-use std::sync::atomic::Ordering;
-
 use tracing::{info, warn};
 
+use crate::config::DynamicConfig;
 use crate::connection::SrtlaConnection;
 use crate::protocol::PKT_LOG_SIZE;
-use crate::toggles::DynamicToggles;
 use crate::utils::now_ms;
 
 /// Comprehensive status monitoring for connections
@@ -17,7 +15,7 @@ use crate::utils::now_ms;
 pub(crate) fn log_connection_status(
     connections: &[SrtlaConnection],
     last_selected_idx: Option<usize>,
-    toggles: &DynamicToggles,
+    config: &DynamicConfig,
 ) {
     // Early exit if INFO logging is not enabled - avoid all computation
     if !tracing::enabled!(tracing::Level::INFO) {
@@ -49,7 +47,10 @@ pub(crate) fn log_connection_status(
         0.0
     };
 
-    info!("📊 Connection Status Report:");
+    // Get current config snapshot
+    let snap = config.snapshot();
+
+    info!("Connection Status Report:");
     info!("  Total connections: {}", total_connections);
     info!("  Total bitrate: {:.2} Mbps", total_bitrate_mbps);
     info!(
@@ -63,13 +64,31 @@ pub(crate) fn log_connection_status(
     );
     info!("  Timed out connections: {}", timed_out_connections);
 
-    // Show toggle states
-    info!(
-        "  Toggles: classic={}, quality={}, exploration={}",
-        toggles.classic_mode.load(Ordering::Relaxed),
-        toggles.quality_scoring_enabled.load(Ordering::Relaxed),
-        toggles.exploration_enabled.load(Ordering::Relaxed)
-    );
+    // Show mode and relevant settings
+    info!("  Mode: {}", snap.mode);
+    match snap.mode {
+        crate::mode::SchedulingMode::Classic => {
+            info!("    (quality/exploration/rtt-delta not applicable)");
+        }
+        crate::mode::SchedulingMode::Enhanced => {
+            info!(
+                "    Quality: {}, Exploration: {}",
+                if snap.quality_enabled { "ON" } else { "OFF" },
+                if snap.exploration_enabled {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            );
+        }
+        crate::mode::SchedulingMode::RttThreshold => {
+            info!(
+                "    Quality: {}, RTT delta: {}ms",
+                if snap.quality_enabled { "ON" } else { "OFF" },
+                snap.rtt_delta_ms
+            );
+        }
+    }
 
     // Show packet log utilization
     info!(
@@ -91,9 +110,9 @@ pub(crate) fn log_connection_status(
     // Show individual connection details
     for (i, conn) in connections.iter().enumerate() {
         let status = if conn.is_timed_out() {
-            "⏰ TIMED_OUT"
+            "TIMED_OUT"
         } else {
-            "✅ ACTIVE"
+            "ACTIVE"
         };
         let score = conn.get_score();
 
@@ -144,8 +163,8 @@ pub(crate) fn log_connection_status(
 
     // Show any warnings
     if active_connections == 0 {
-        warn!("⚠️  No active connections available!");
+        warn!("No active connections available!");
     } else if active_connections < total_connections / 2 {
-        warn!("⚠️  Less than half of connections are active");
+        warn!("Less than half of connections are active");
     }
 }

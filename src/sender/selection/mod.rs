@@ -33,7 +33,9 @@ pub mod rtt_threshold;
 // Re-export for backward compatibility
 pub use quality::calculate_quality_multiplier;
 
+use crate::config::ConfigSnapshot;
 use crate::connection::SrtlaConnection;
+use crate::mode::SchedulingMode;
 
 /// Minimum time in milliseconds between connection switches
 /// Prevents rapid thrashing when scores fluctuate due to bursty ACK/NAK patterns
@@ -47,50 +49,45 @@ pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 /// * `last_idx` - Previously selected connection (for hysteresis)
 /// * `last_switch_time_ms` - Time of last switch (for time-based dampening)
 /// * `current_time_ms` - Current timestamp in milliseconds
-/// * `enable_quality` - Enable quality scoring (enhanced mode only)
-/// * `enable_explore` - Enable exploration (enhanced mode only)
-/// * `classic` - Use classic mode algorithm
-/// * `rtt_threshold` - Use RTT-threshold mode (overrides classic/enhanced)
-/// * `rtt_delta_ms` - RTT delta threshold in milliseconds
+/// * `config` - Configuration snapshot with mode and settings
 ///
 /// # Returns
 /// The index of the selected connection, or None if no valid connections
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 pub fn select_connection_idx(
     conns: &mut [SrtlaConnection],
     last_idx: Option<usize>,
     last_switch_time_ms: u64,
     current_time_ms: u64,
-    enable_quality: bool,
-    enable_explore: bool,
-    classic: bool,
-    rtt_threshold_enabled: bool,
-    rtt_delta_ms: u32,
+    config: &ConfigSnapshot,
 ) -> Option<usize> {
-    if rtt_threshold_enabled {
-        // RTT-threshold mode: prefer low-RTT links to reduce reordering
-        rtt_threshold::select_connection(
-            conns,
-            last_idx,
-            last_switch_time_ms,
-            current_time_ms,
-            rtt_delta_ms,
-            enable_quality,
-        )
-    } else if classic {
-        // Classic mode: simple capacity-based selection (no dampening, matches original C)
-        classic::select_connection(conns)
-    } else {
-        // Enhanced mode: quality-aware selection with optional exploration and time-based dampening
-        enhanced::select_connection(
-            conns,
-            last_idx,
-            last_switch_time_ms,
-            current_time_ms,
-            enable_quality,
-            enable_explore,
-        )
+    match config.mode {
+        SchedulingMode::Classic => {
+            // Classic mode: simple capacity-based selection (no dampening, matches original C)
+            classic::select_connection(conns)
+        }
+        SchedulingMode::Enhanced => {
+            // Enhanced mode: quality-aware selection with optional exploration and time-based dampening
+            enhanced::select_connection(
+                conns,
+                last_idx,
+                last_switch_time_ms,
+                current_time_ms,
+                config.effective_quality_enabled(),
+                config.effective_exploration_enabled(),
+            )
+        }
+        SchedulingMode::RttThreshold => {
+            // RTT-threshold mode: prefer low-RTT links to reduce reordering
+            rtt_threshold::select_connection(
+                conns,
+                last_idx,
+                last_switch_time_ms,
+                current_time_ms,
+                config.rtt_delta_ms,
+                config.effective_quality_enabled(),
+            )
+        }
     }
 }
 
@@ -113,17 +110,20 @@ mod tests {
         let last_switch_time_ms = now_ms();
         let current_time_ms = last_switch_time_ms + 100; // Within cooldown
 
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Classic,
+            quality_enabled: false,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
         // Classic mode should pick connection 1 (highest score) even during cooldown
         let result = select_connection_idx(
             &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
-            false,
-            false,
-            true,  // classic mode
-            false, // rtt_threshold
-            30,
+            &config,
         );
         assert_eq!(
             result,
@@ -145,17 +145,20 @@ mod tests {
         let last_switch_time_ms = now_ms();
         let current_time_ms = last_switch_time_ms + 100; // Within cooldown
 
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
         // Enhanced mode should stay with connection 0 due to cooldown
         let result = select_connection_idx(
             &mut connections,
             Some(0),
             last_switch_time_ms,
             current_time_ms,
-            true,
-            false,
-            false, // enhanced mode
-            false, // rtt_threshold
-            30,
+            &config,
         );
         assert_eq!(
             result,
@@ -170,11 +173,7 @@ mod tests {
             Some(0),
             last_switch_time_ms,
             current_time_after_cooldown,
-            true,
-            false,
-            false, // enhanced mode
-            false, // rtt_threshold
-            30,
+            &config,
         );
         assert_eq!(
             result_after,
@@ -186,7 +185,13 @@ mod tests {
     #[test]
     fn test_select_connection_idx_empty() {
         let mut conns: Vec<SrtlaConnection> = vec![];
-        let result = select_connection_idx(&mut conns, None, 0, 0, false, false, false, false, 30);
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+        let result = select_connection_idx(&mut conns, None, 0, 0, &config);
         assert_eq!(result, None);
     }
 }
