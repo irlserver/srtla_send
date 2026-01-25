@@ -24,11 +24,15 @@
 //! - Quality scoring applied within fast link group
 //! - Falls back to slow links only when fast links saturated
 
-pub mod classic;
-pub mod enhanced;
-pub mod exploration;
-pub mod quality;
+mod classic;
+mod enhanced;
+mod exploration;
+mod quality;
+
+#[cfg(feature = "test-internals")]
 pub mod rtt_threshold;
+#[cfg(not(feature = "test-internals"))]
+mod rtt_threshold;
 
 // Re-export for backward compatibility
 pub use quality::calculate_quality_multiplier;
