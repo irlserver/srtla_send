@@ -1,6 +1,9 @@
 mod connections;
 mod housekeeping;
 mod packet_handler;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod selection;
+#[cfg(not(any(test, feature = "test-internals")))]
 mod selection;
 mod sequence;
 mod status;

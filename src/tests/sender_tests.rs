@@ -23,7 +23,8 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&mut connections, None, 0, 0, false, false, true);
+        let selected =
+            select_connection_idx(&mut connections, None, 0, 0, false, false, true, false, 30);
         assert_eq!(selected, Some(1));
     }
 
@@ -44,8 +45,17 @@ mod tests {
         connections[2].congestion.nak_count = 3;
         connections[2].congestion.last_nak_time_ms = current_time - 8000; // 8 seconds ago
 
-        let selected =
-            select_connection_idx(&mut connections, None, 0, current_time, true, false, false);
+        let selected = select_connection_idx(
+            &mut connections,
+            None,
+            0,
+            current_time,
+            true,
+            false,
+            false,
+            false,
+            30,
+        );
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -67,8 +77,17 @@ mod tests {
         connections[1].congestion.nak_burst_count = 0;
         connections[1].congestion.last_nak_time_ms = current_time - 2000; // 2 seconds ago
 
-        let selected =
-            select_connection_idx(&mut connections, None, 0, current_time, true, false, false);
+        let selected = select_connection_idx(
+            &mut connections,
+            None,
+            0,
+            current_time,
+            true,
+            false,
+            false,
+            false,
+            30,
+        );
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -97,6 +116,8 @@ mod tests {
             true,
             false,
             false,
+            false,
+            30,
         );
         assert_eq!(
             selected,
@@ -128,6 +149,8 @@ mod tests {
             true,
             false,
             false,
+            false,
+            30,
         );
         assert_eq!(
             selected,
@@ -163,6 +186,8 @@ mod tests {
             true,
             false,
             false,
+            false,
+            30,
         );
         assert_eq!(
             selected,
@@ -195,6 +220,8 @@ mod tests {
             true,
             true, // exploration enabled
             false,
+            false,
+            30,
         );
 
         // Should continue routing packets via connection 0, not explore during cooldown
@@ -228,6 +255,8 @@ mod tests {
             false,
             false,
             true, // classic mode
+            false,
+            30,
         );
 
         // Per-packet routing immediately uses connection 1 (best score)
@@ -426,7 +455,8 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&mut connections, None, 0, 0, false, false, false);
+        let selected =
+            select_connection_idx(&mut connections, None, 0, 0, false, false, false, false, 30);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -438,7 +468,8 @@ mod tests {
         let mut connections = rt.block_on(create_test_connections(3));
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&mut connections, None, 0, 0, false, true, false);
+        let _selected =
+            select_connection_idx(&mut connections, None, 0, 0, false, true, false, false, 30);
 
         // The result depends on timing, but should not panic
     }
@@ -451,11 +482,15 @@ mod tests {
         let classic = toggles.classic_mode.load(Ordering::Relaxed);
         let quality = toggles.quality_scoring_enabled.load(Ordering::Relaxed);
         let explore = toggles.exploration_enabled.load(Ordering::Relaxed);
+        let rtt_threshold = toggles.rtt_threshold_enabled.load(Ordering::Relaxed);
+        let rtt_delta = toggles.rtt_delta_ms.load(Ordering::Relaxed);
 
         // Default values from DynamicToggles::new()
         assert!(!classic);
         assert!(quality);
         assert!(!explore);
+        assert!(!rtt_threshold);
+        assert_eq!(rtt_delta, 30);
     }
 
     #[test]

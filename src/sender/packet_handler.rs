@@ -261,19 +261,29 @@ pub async fn handle_srt_packet(
                 return;
             }
 
-            let effective_enable_quality =
-                toggle_snap.quality_scoring_enabled && !toggle_snap.classic_mode;
-            let effective_enable_explore =
-                toggle_snap.exploration_enabled && !toggle_snap.classic_mode;
+            let effective_enable_quality = toggle_snap.quality_scoring_enabled
+                && !toggle_snap.classic_mode
+                && !toggle_snap.rtt_threshold_enabled;
+            let effective_enable_explore = toggle_snap.exploration_enabled
+                && !toggle_snap.classic_mode
+                && !toggle_snap.rtt_threshold_enabled;
+            // For RTT-threshold mode, quality is controlled separately
+            let rtt_quality = toggle_snap.quality_scoring_enabled;
 
             let sel_idx = select_connection_idx(
                 connections,
                 *last_selected_idx,
                 *last_switch_time_ms,
                 packet_time_ms,
-                effective_enable_quality,
+                if toggle_snap.rtt_threshold_enabled {
+                    rtt_quality
+                } else {
+                    effective_enable_quality
+                },
                 effective_enable_explore,
                 toggle_snap.classic_mode,
+                toggle_snap.rtt_threshold_enabled,
+                toggle_snap.rtt_delta_ms,
             );
             if let Some(sel_idx) = sel_idx {
                 forward_via_connection(

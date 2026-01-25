@@ -12,19 +12,24 @@ mod tests {
         assert!(!toggles.classic_mode.load(Ordering::Relaxed));
         assert!(toggles.quality_scoring_enabled.load(Ordering::Relaxed));
         assert!(!toggles.exploration_enabled.load(Ordering::Relaxed));
+        assert!(!toggles.rtt_threshold_enabled.load(Ordering::Relaxed));
+        assert_eq!(toggles.rtt_delta_ms.load(Ordering::Relaxed), 30);
     }
 
     #[test]
     fn test_dynamic_toggles_from_cli() {
-        let toggles = DynamicToggles::from_cli(false, false, false);
+        let toggles = DynamicToggles::from_cli(false, false, false, false, 30);
         assert!(!toggles.classic_mode.load(Ordering::Relaxed));
         assert!(toggles.quality_scoring_enabled.load(Ordering::Relaxed));
         assert!(!toggles.exploration_enabled.load(Ordering::Relaxed));
+        assert!(!toggles.rtt_threshold_enabled.load(Ordering::Relaxed));
 
-        let toggles = DynamicToggles::from_cli(true, true, true);
+        let toggles = DynamicToggles::from_cli(true, true, true, true, 50);
         assert!(toggles.classic_mode.load(Ordering::Relaxed));
         assert!(!toggles.quality_scoring_enabled.load(Ordering::Relaxed));
         assert!(toggles.exploration_enabled.load(Ordering::Relaxed));
+        assert!(toggles.rtt_threshold_enabled.load(Ordering::Relaxed));
+        assert_eq!(toggles.rtt_delta_ms.load(Ordering::Relaxed), 50);
     }
 
     #[test]
@@ -102,6 +107,39 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_cmd_rtt_threshold() {
+        let toggles = DynamicToggles::new();
+
+        crate::toggles::apply_cmd(&toggles, "rtt on");
+        assert!(toggles.rtt_threshold_enabled.load(Ordering::Relaxed));
+
+        crate::toggles::apply_cmd(&toggles, "rtt off");
+        assert!(!toggles.rtt_threshold_enabled.load(Ordering::Relaxed));
+
+        crate::toggles::apply_cmd(&toggles, "rtt_threshold=true");
+        assert!(toggles.rtt_threshold_enabled.load(Ordering::Relaxed));
+
+        crate::toggles::apply_cmd(&toggles, "rtt_threshold=false");
+        assert!(!toggles.rtt_threshold_enabled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_apply_cmd_rtt_delta() {
+        let toggles = DynamicToggles::new();
+        assert_eq!(toggles.rtt_delta_ms.load(Ordering::Relaxed), 30);
+
+        crate::toggles::apply_cmd(&toggles, "rtt_delta=50");
+        assert_eq!(toggles.rtt_delta_ms.load(Ordering::Relaxed), 50);
+
+        crate::toggles::apply_cmd(&toggles, "rtt_delta=100");
+        assert_eq!(toggles.rtt_delta_ms.load(Ordering::Relaxed), 100);
+
+        // Invalid value should not change
+        crate::toggles::apply_cmd(&toggles, "rtt_delta=invalid");
+        assert_eq!(toggles.rtt_delta_ms.load(Ordering::Relaxed), 100);
+    }
+
+    #[test]
     fn test_apply_cmd_empty_and_unknown() {
         let toggles = DynamicToggles::new();
 
@@ -114,6 +152,7 @@ mod tests {
         assert!(!toggles.classic_mode.load(Ordering::Relaxed));
         assert!(toggles.quality_scoring_enabled.load(Ordering::Relaxed));
         assert!(!toggles.exploration_enabled.load(Ordering::Relaxed));
+        assert!(!toggles.rtt_threshold_enabled.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -191,16 +230,20 @@ mod tests {
             ("quality=true", "quality=false"),
             ("explore on", "explore off"),
             ("exploration=true", "exploration=false"),
+            ("rtt on", "rtt off"),
+            ("rtt_threshold=true", "rtt_threshold=false"),
         ];
 
         for (on_cmd, off_cmd) in test_commands {
             crate::toggles::apply_cmd(&toggles, "classic=false");
             crate::toggles::apply_cmd(&toggles, "quality=false");
             crate::toggles::apply_cmd(&toggles, "exploration=false");
+            crate::toggles::apply_cmd(&toggles, "rtt=false");
 
             let initial_classic = toggles.classic_mode.load(Ordering::Relaxed);
             let initial_quality = toggles.quality_scoring_enabled.load(Ordering::Relaxed);
             let initial_explore = toggles.exploration_enabled.load(Ordering::Relaxed);
+            let initial_rtt = toggles.rtt_threshold_enabled.load(Ordering::Relaxed);
 
             crate::toggles::apply_cmd(&toggles, on_cmd);
 
@@ -208,9 +251,15 @@ mod tests {
                 toggles.classic_mode.load(Ordering::Relaxed),
                 toggles.quality_scoring_enabled.load(Ordering::Relaxed),
                 toggles.exploration_enabled.load(Ordering::Relaxed),
+                toggles.rtt_threshold_enabled.load(Ordering::Relaxed),
             );
 
-            let initial = (initial_classic, initial_quality, initial_explore);
+            let initial = (
+                initial_classic,
+                initial_quality,
+                initial_explore,
+                initial_rtt,
+            );
             assert_ne!(
                 after_on, initial,
                 "Command '{}' should change state",
@@ -223,6 +272,7 @@ mod tests {
                 toggles.classic_mode.load(Ordering::Relaxed),
                 toggles.quality_scoring_enabled.load(Ordering::Relaxed),
                 toggles.exploration_enabled.load(Ordering::Relaxed),
+                toggles.rtt_threshold_enabled.load(Ordering::Relaxed),
             );
 
             assert_ne!(

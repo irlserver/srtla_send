@@ -61,6 +61,12 @@ struct Cli {
     /// Enable connection exploration
     #[arg(long = "exploration")]
     exploration: bool,
+    /// Enable RTT-threshold scheduling (prefer low-RTT links to reduce reordering)
+    #[arg(long = "rtt-threshold")]
+    rtt_threshold: bool,
+    /// RTT delta threshold in ms (links within min_rtt + delta are "fast")
+    #[arg(long = "rtt-delta-ms", default_value = "30")]
+    rtt_delta_ms: u32,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -93,8 +99,13 @@ async fn main() -> Result<()> {
     let receiver_port = args.receiver_port.expect("required");
     let ips_file = args.ips_file.as_deref().expect("required");
 
-    let toggles =
-        toggles::DynamicToggles::from_cli(args.classic, args.no_quality, args.exploration);
+    let toggles = toggles::DynamicToggles::from_cli(
+        args.classic,
+        args.no_quality,
+        args.exploration,
+        args.rtt_threshold,
+        args.rtt_delta_ms,
+    );
 
     // Start toggle listener (stdin or Unix socket)
     toggles::spawn_toggle_listener(toggles.clone(), args.control_socket);

@@ -1,6 +1,6 @@
 //! Connection selection strategies for SRTLA bonding
 //!
-//! This module provides two connection selection strategies:
+//! This module provides three connection selection strategies:
 //!
 //! ## Classic Mode
 //! Matches the original C implementation exactly:
@@ -8,7 +8,7 @@
 //! - No quality awareness
 //! - Pure "pick highest window/(in_flight+1)" algorithm
 //!
-//! ## Enhanced Mode  
+//! ## Enhanced Mode
 //! Improved selection with quality awareness:
 //! - Exponential NAK decay (smooth ~8s recovery)
 //! - NAK burst detection and penalties
@@ -16,11 +16,19 @@
 //! - Minimal hysteresis (2%) to prevent flip-flopping
 //! - Optional smart exploration
 //! - Time-based switch dampening to prevent rapid thrashing
+//!
+//! ## RTT-Threshold Mode
+//! Groups links by RTT to reduce packet reordering:
+//! - Links within min_rtt + delta are "fast"
+//! - Strongly prefers fast links over slow ones
+//! - Quality scoring applied within fast link group
+//! - Falls back to slow links only when fast links saturated
 
 pub mod classic;
 pub mod enhanced;
 pub mod exploration;
 pub mod quality;
+pub mod rtt_threshold;
 
 // Re-export for backward compatibility
 pub use quality::calculate_quality_multiplier;
@@ -42,10 +50,13 @@ pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
 /// * `enable_quality` - Enable quality scoring (enhanced mode only)
 /// * `enable_explore` - Enable exploration (enhanced mode only)
 /// * `classic` - Use classic mode algorithm
+/// * `rtt_threshold` - Use RTT-threshold mode (overrides classic/enhanced)
+/// * `rtt_delta_ms` - RTT delta threshold in milliseconds
 ///
 /// # Returns
 /// The index of the selected connection, or None if no valid connections
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 pub fn select_connection_idx(
     conns: &mut [SrtlaConnection],
     last_idx: Option<usize>,
@@ -54,8 +65,20 @@ pub fn select_connection_idx(
     enable_quality: bool,
     enable_explore: bool,
     classic: bool,
+    rtt_threshold_enabled: bool,
+    rtt_delta_ms: u32,
 ) -> Option<usize> {
-    if classic {
+    if rtt_threshold_enabled {
+        // RTT-threshold mode: prefer low-RTT links to reduce reordering
+        rtt_threshold::select_connection(
+            conns,
+            last_idx,
+            last_switch_time_ms,
+            current_time_ms,
+            rtt_delta_ms,
+            enable_quality,
+        )
+    } else if classic {
         // Classic mode: simple capacity-based selection (no dampening, matches original C)
         classic::select_connection(conns)
     } else {
@@ -98,7 +121,9 @@ mod tests {
             current_time_ms,
             false,
             false,
-            true, // classic mode
+            true,  // classic mode
+            false, // rtt_threshold
+            30,
         );
         assert_eq!(
             result,
@@ -129,6 +154,8 @@ mod tests {
             true,
             false,
             false, // enhanced mode
+            false, // rtt_threshold
+            30,
         );
         assert_eq!(
             result,
@@ -145,7 +172,9 @@ mod tests {
             current_time_after_cooldown,
             true,
             false,
-            false,
+            false, // enhanced mode
+            false, // rtt_threshold
+            30,
         );
         assert_eq!(
             result_after,
@@ -157,7 +186,7 @@ mod tests {
     #[test]
     fn test_select_connection_idx_empty() {
         let mut conns: Vec<SrtlaConnection> = vec![];
-        let result = select_connection_idx(&mut conns, None, 0, 0, false, false, false);
+        let result = select_connection_idx(&mut conns, None, 0, 0, false, false, false, false, 30);
         assert_eq!(result, None);
     }
 }

@@ -42,6 +42,15 @@ The burst NAK penalty logic, quality scoring, and connection exploration feature
 - **Enable via**: `--exploration` flag or runtime toggle (`explore on`)
 - **Use Case**: More aggressive connection testing in unstable network conditions
 
+### RTT-Threshold Mode
+- **Reduces Packet Reordering**: Groups links by RTT and strongly prefers low-RTT ("fast") links
+- **Threshold-Based Selection**: Links within `min_rtt + delta` are considered "fast"
+- **Quality-Aware Within Fast Links**: Applies NAK penalties when choosing among fast links
+- **Automatic Fallback**: Uses slow links only when fast links are saturated
+- **Enable via**: `--rtt-threshold` flag or runtime toggle (`rtt on`)
+- **Configure delta**: `--rtt-delta-ms N` (default 30ms) or runtime `rtt_delta=N`
+- **Use Case**: Heterogeneous networks where some links have significantly higher latency (e.g., satellite + cellular)
+
 ### Classic Mode
 - Exact match to original `srtla_send.c` implementation
 - Pure capacity-based selection without quality awareness
@@ -124,6 +133,8 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 - `--classic`: Enable classic mode (disables all enhancements)
 - `--no-quality`: Disable quality scoring
 - `--exploration`: Enable connection exploration
+- `--rtt-threshold`: Enable RTT-threshold scheduling (prefer low-RTT links)
+- `--rtt-delta-ms <N>`: RTT delta threshold in ms (default: 30). Links within `min_rtt + delta` are "fast"
 - `-v, --version`: Print version and exit
 
 ## Example Usage
@@ -212,16 +223,22 @@ Both methods support the same commands in two formats:
 - `classic on|off` - Enable/disable classic mode (disables all enhancements)
 - `quality on|off` - Enable/disable quality scoring
 - `explore on|off` - Enable/disable connection exploration
+- `rtt on|off` - Enable/disable RTT-threshold scheduling
 
 **Alternative format:**
 
 - `classic=true|false`
 - `quality=true|false`
 - `exploration=true|false`
+- `rtt_threshold=true|false`
+
+**RTT delta configuration:**
+
+- `rtt_delta=N` - Set RTT delta threshold in milliseconds (e.g., `rtt_delta=50`)
 
 **Status command:**
 
-- `status` - Display current state of all toggles
+- `status` - Display current state of all toggles (including RTT settings)
 
 ### Connection Selection Algorithm Details
 
@@ -232,6 +249,8 @@ These toggles affect how the system selects the best connection for sending data
 **Quality-Based Scoring** (`quality`): Punishes connections with recent NAKs. More recent NAKs = more punishment. **Additional 30% penalty (0.7x multiplier) for NAK bursts** (≥5 NAKs in short time).
 
 **Connection Exploration** (`explore`): Optional smart context-aware exploration that tests alternative connections when the current best is degrading and alternatives have recovered. Periodic fallback exploration every 30 seconds. **Disabled by default** and **completely disabled in classic mode** - enable with `--exploration` flag or runtime toggle.
+
+**RTT-Threshold Scheduling** (`rtt`): Groups links into "fast" and "slow" based on RTT measurements. Links within `min_rtt + delta` (default 30ms) are "fast" and strongly preferred. When quality scoring is also enabled, NAK penalties are applied within the fast link group. Falls back to slow links only when all fast links are saturated. **Useful for reducing packet reordering** in networks with heterogeneous latencies. Enable with `--rtt-threshold` flag or runtime toggle (`rtt on`).
 
 These affect selection behavior in real time. By default, enhanced mode with quality-based scoring is enabled.
 
