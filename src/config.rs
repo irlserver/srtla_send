@@ -127,8 +127,30 @@ impl DynamicConfig {
 }
 
 pub fn spawn_config_listener(config: DynamicConfig, socket_path: Option<String>) {
-    // Spawn stdin listener (backward compatibility)
-    if socket_path.is_none() {
+    if let Some(sock_path) = socket_path {
+        // Socket path specified: use Unix socket on Unix, fallback to stdin on other platforms
+        #[cfg(unix)]
+        {
+            let config_clone = config.clone();
+            std::thread::spawn(move || {
+                unix_socket_loop(&config_clone, &sock_path);
+            });
+        }
+        #[cfg(not(unix))]
+        {
+            // Unix sockets not available; fall back to stdin listener
+            let _ = sock_path; // suppress unused warning
+            let config_clone = config.clone();
+            std::thread::spawn(move || {
+                let stdin = std::io::stdin();
+                let reader = BufReader::new(stdin);
+                for cmd in reader.lines().map_while(Result::ok) {
+                    apply_cmd(&config_clone, cmd.trim());
+                }
+            });
+        }
+    } else {
+        // No socket path: use stdin listener (backward compatibility)
         let config_clone = config.clone();
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
@@ -136,15 +158,6 @@ pub fn spawn_config_listener(config: DynamicConfig, socket_path: Option<String>)
             for cmd in reader.lines().map_while(Result::ok) {
                 apply_cmd(&config_clone, cmd.trim());
             }
-        });
-    }
-
-    // Spawn Unix domain socket listener if socket path specified
-    #[cfg(unix)]
-    if let Some(sock_path) = socket_path {
-        let config_clone = config.clone();
-        std::thread::spawn(move || {
-            unix_socket_loop(&config_clone, &sock_path);
         });
     }
 }
