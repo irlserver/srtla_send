@@ -53,6 +53,12 @@ impl SchedulingMode {
     pub const fn is_enhanced(self) -> bool {
         matches!(self, SchedulingMode::Enhanced)
     }
+
+    /// Check if this mode is RTT-threshold.
+    #[allow(dead_code)]
+    pub const fn is_rtt_threshold(self) -> bool {
+        matches!(self, SchedulingMode::RttThreshold)
+    }
 }
 
 impl fmt::Display for SchedulingMode {
@@ -149,11 +155,14 @@ mod tests {
     fn test_mode_checks() {
         assert!(SchedulingMode::Classic.is_classic());
         assert!(!SchedulingMode::Classic.is_enhanced());
+        assert!(!SchedulingMode::Classic.is_rtt_threshold());
 
         assert!(!SchedulingMode::Enhanced.is_classic());
         assert!(SchedulingMode::Enhanced.is_enhanced());
+        assert!(!SchedulingMode::Enhanced.is_rtt_threshold());
 
         assert!(!SchedulingMode::RttThreshold.is_classic());
         assert!(!SchedulingMode::RttThreshold.is_enhanced());
+        assert!(SchedulingMode::RttThreshold.is_rtt_threshold());
     }
 }
