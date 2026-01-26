@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "test-internals"))]
 mod tests {
     use crate::sender::selection::rtt_threshold::select_connection;
     use crate::test_helpers::create_test_connections;
