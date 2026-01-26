@@ -15,8 +15,8 @@
 //! - Time-based progressive window recovery
 //! - NAK burst tracking
 
-pub mod classic;
-pub mod enhanced;
+mod classic;
+mod enhanced;
 
 use tracing::warn;
 

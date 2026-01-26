@@ -224,8 +224,7 @@ impl SrtlaRegistrationManager {
     }
 
     pub fn update_active_connections(&mut self, connections: &[SrtlaConnection]) {
-        // Match C/Bond Bunny implementation: recalculate from scratch each housekeeping cycle
-        // Bond Bunny (line 235): activeConnections = 0; then counts CONNECTED state connections
+        // Match C implementation: recalculate from scratch each housekeeping cycle
         // We count connections that are actually connected (received REG3), not just within grace period
         let new_count = connections.iter().filter(|c| c.connected).count();
 

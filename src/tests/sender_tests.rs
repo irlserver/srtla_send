@@ -3,14 +3,14 @@ mod tests {
 
     use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::Ordering;
 
     use smallvec::SmallVec;
     use tempfile::NamedTempFile;
 
+    use crate::config::{ConfigSnapshot, DynamicConfig};
+    use crate::mode::SchedulingMode;
     use crate::sender::*;
     use crate::test_helpers::create_test_connections;
-    use crate::toggles::DynamicToggles;
     use crate::utils::now_ms;
 
     #[test]
@@ -23,7 +23,14 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[2].in_flight_packets = 10; // Lowest score
 
-        let selected = select_connection_idx(&mut connections, None, 0, 0, false, false, true);
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Classic,
+            quality_enabled: false,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
+        let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
         assert_eq!(selected, Some(1));
     }
 
@@ -44,8 +51,14 @@ mod tests {
         connections[2].congestion.nak_count = 3;
         connections[2].congestion.last_nak_time_ms = current_time - 8000; // 8 seconds ago
 
-        let selected =
-            select_connection_idx(&mut connections, None, 0, current_time, true, false, false);
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
+        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -67,8 +80,14 @@ mod tests {
         connections[1].congestion.nak_burst_count = 0;
         connections[1].congestion.last_nak_time_ms = current_time - 2000; // 2 seconds ago
 
-        let selected =
-            select_connection_idx(&mut connections, None, 0, current_time, true, false, false);
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
+        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -87,6 +106,13 @@ mod tests {
         let last_switch_time_ms = now_ms();
         let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within 500ms cooldown)
 
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
         // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
         // This prevents rapid thrashing between connections under bursty score changes
         let selected = select_connection_idx(
@@ -94,9 +120,7 @@ mod tests {
             Some(0),
             last_switch_time_ms,
             current_time_ms,
-            true,
-            false,
-            false,
+            &config,
         );
         assert_eq!(
             selected,
@@ -118,6 +142,13 @@ mod tests {
         let last_switch_time_ms = now_ms();
         let current_time_ms = last_switch_time_ms + 600; // 600ms after last switch (past 500ms cooldown)
 
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
         // After cooldown: per-packet selection can now choose the better connection
         // From this point forward, all subsequent packets will route via connection 1
         let selected = select_connection_idx(
@@ -125,9 +156,7 @@ mod tests {
             Some(0),
             last_switch_time_ms,
             current_time_ms,
-            true,
-            false,
-            false,
+            &config,
         );
         assert_eq!(
             selected,
@@ -153,6 +182,13 @@ mod tests {
         let last_switch_time_ms = now_ms();
         let current_time_ms = last_switch_time_ms + 200; // Within cooldown period
 
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
         // Cooldown is bypassed when current connection is invalid/timed out
         // Per-packet selection immediately switches to valid connection
         let selected = select_connection_idx(
@@ -160,9 +196,7 @@ mod tests {
             Some(0),
             last_switch_time_ms,
             current_time_ms,
-            true,
-            false,
-            false,
+            &config,
         );
         assert_eq!(
             selected,
@@ -185,6 +219,13 @@ mod tests {
         let last_switch_time_ms = now_ms();
         let current_time_ms = last_switch_time_ms + 200; // Within cooldown
 
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: true, // exploration enabled
+            rtt_delta_ms: 30,
+        };
+
         // Enable exploration, but should be blocked by cooldown
         // This prevents exploration from causing rapid per-packet routing changes
         let selected = select_connection_idx(
@@ -192,9 +233,7 @@ mod tests {
             Some(0),
             last_switch_time_ms,
             current_time_ms,
-            true,
-            true, // exploration enabled
-            false,
+            &config,
         );
 
         // Should continue routing packets via connection 0, not explore during cooldown
@@ -218,6 +257,13 @@ mod tests {
         let last_switch_time_ms = now_ms();
         let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within cooldown)
 
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Classic,
+            quality_enabled: false,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
         // Classic mode: per-packet selection ALWAYS picks highest score connection
         // No dampening, no hysteresis - matches original C implementation
         let selected = select_connection_idx(
@@ -225,9 +271,7 @@ mod tests {
             Some(0),
             last_switch_time_ms,
             current_time_ms,
-            false,
-            false,
-            true, // classic mode
+            &config,
         );
 
         // Per-packet routing immediately uses connection 1 (best score)
@@ -426,7 +470,14 @@ mod tests {
             conn.connected = false;
         }
 
-        let selected = select_connection_idx(&mut connections, None, 0, 0, false, false, false);
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+            rtt_delta_ms: 30,
+        };
+
+        let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -437,25 +488,29 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: true,
+            rtt_delta_ms: 30,
+        };
+
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&mut connections, None, 0, 0, false, true, false);
+        let _selected = select_connection_idx(&mut connections, None, 0, 0, &config);
 
         // The result depends on timing, but should not panic
     }
 
     #[test]
-    fn test_dynamic_toggles_integration() {
-        let toggles = DynamicToggles::new();
+    fn test_config_integration() {
+        let config = DynamicConfig::new();
+        let snap = config.snapshot();
 
-        // Test that toggles can be read atomically
-        let classic = toggles.classic_mode.load(Ordering::Relaxed);
-        let quality = toggles.quality_scoring_enabled.load(Ordering::Relaxed);
-        let explore = toggles.exploration_enabled.load(Ordering::Relaxed);
-
-        // Default values from DynamicToggles::new()
-        assert!(!classic);
-        assert!(quality);
-        assert!(!explore);
+        // Default values from DynamicConfig::new()
+        assert_eq!(snap.mode, SchedulingMode::Enhanced);
+        assert!(snap.quality_enabled);
+        assert!(!snap.exploration_enabled);
+        assert_eq!(snap.rtt_delta_ms, 30);
     }
 
     #[test]

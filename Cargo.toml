@@ -18,7 +18,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 rand = "0.9"
 rustc-hash = "2.1"
-tokio = { version = "1.48.0", features = [
+tokio = { version = "1.49", features = [
 	"rt-multi-thread",
 	"macros",
 	"net",
@@ -28,13 +28,14 @@ tokio = { version = "1.48.0", features = [
 	"sync",
 ] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 socket2 = { version = "0.6", features = ["all"] }
-bytes = "1.10.1"
-chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
+bytes = "1.11.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 smallvec = "=2.0.0-alpha.12"
-mimalloc = { version = "0.1.43", default-features = false, features = [
+mimalloc = { version = "0.1", default-features = false, features = [
 	"secure",
+	"v3",
 ] }
 
 [target.'cfg(unix)'.dependencies]
@@ -53,8 +54,8 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3.0"
-assert_matches = "1.5"
+tempfile = "3"
+assert_matches = "1"
 
 [profile.dev]
 opt-level = 1

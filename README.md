@@ -11,41 +11,56 @@ This application is experimental. Be prepared to troubleshoot it and experiment 
 
 This Rust implementation builds upon several open source projects and ideas:
 
-- **[Bond Bunny](https://github.com/dimadesu/bond-bunny)** - Android SRTLA bonding app that inspired many of the enhanced connection selection algorithms
-- **[Moblin](https://github.com/eerimoq/moblin)** and **[Moblink](https://github.com/eerimoq/moblink)** - Inspired by ideas and algorithms
+- **[Moblin](https://github.com/eerimoq/moblin)** - Inspired by ideas and algorithms
 - **[Original SRTLA](https://github.com/BELABOX/srtla)** - The foundational SRTLA protocol and reference implementation by Belabox
-
-The burst NAK penalty logic, quality scoring, and connection exploration features were directly inspired by the Bond Bunny Android implementation.
 
 ## Features
 
 ### Core SRTLA Functionality
+
 - Multi-uplink bonding using a list of local source IPs
 - Registration flow (REG1/REG2/REG3) with ID propagation
 - SRT ACK and NAK handling (with correct NAK attribution to sending uplink)
 - Dynamic path selection with automatic load distribution across all connections
 - Keepalives with RTT measurement and time-based window recovery
 - Live IP list reload on Unix via SIGHUP
-- Runtime toggles via stdin or Unix socket (no restart required)
+- Runtime configuration via stdin or Unix socket (no restart required)
 
-### Enhanced Mode (Default)
+### Scheduling Modes
+
+The sender supports three mutually exclusive scheduling modes:
+
+#### Enhanced Mode (Default)
+
 - **Exponential NAK Decay**: Smooth recovery from packet loss over ~8 seconds
 - **NAK Burst Detection**: Extra penalties for connections experiencing severe packet loss (≥5 NAKs)
 - **RTT-Aware Selection**: Small bonus (3% max) for lower-latency connections
 - **Quality Scoring**: Automatic preference for higher-quality connections
 - **Minimal Hysteresis**: 2% threshold prevents flip-flopping while maintaining natural load distribution
 
-### Optional Smart Exploration
+#### Classic Mode
+
+- Exact match to original `srtla_send.c` implementation
+- Pure capacity-based selection without quality awareness
+- Enable via `--mode classic`
+
+#### RTT-Threshold Mode
+
+- **Reduces Packet Reordering**: Groups links by RTT and strongly prefers low-RTT ("fast") links
+- **Threshold-Based Selection**: Links within `min_rtt + delta` are considered "fast"
+- **Quality-Aware Within Fast Links**: Applies NAK penalties when choosing among fast links
+- **Automatic Fallback**: Uses slow links only when fast links are saturated
+- **Enable via**: `--mode rtt-threshold`
+- **Configure delta**: `--rtt-delta-ms N` (default 30ms) or runtime `rtt-delta N`
+- **Use Case**: Heterogeneous networks where some links have significantly higher latency (e.g., satellite + cellular)
+
+### Optional Smart Exploration (Enhanced Mode Only)
+
 - **Context-Aware Discovery**: Tests alternative connections when current best is degrading and alternatives have recovered
 - **Periodic Fallback**: Every 30 seconds for 300ms as a safety net
 - **Smart Switching**: Tries second-best connections instead of always sticking to current best
-- **Enable via**: `--exploration` flag or runtime toggle (`explore on`)
+- **Enable via**: `--exploration` flag or runtime command `explore on`
 - **Use Case**: More aggressive connection testing in unstable network conditions
-
-### Classic Mode
-- Exact match to original `srtla_send.c` implementation
-- Pure capacity-based selection without quality awareness
-- Can be enabled via `--classic` flag or runtime toggle
 
 ## Assumptions and Prerequisites
 
@@ -70,6 +85,7 @@ cargo build --release
 ```
 
 Alternatively, you can use nightly for individual commands:
+
 ```bash
 cargo +nightly build --release
 cargo +nightly fmt
@@ -120,10 +136,11 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 
 ### Options
 
-- `--control-socket <PATH>`: Unix domain socket path for remote toggle control (e.g., `/tmp/srtla.sock`)
-- `--classic`: Enable classic mode (disables all enhancements)
-- `--no-quality`: Disable quality scoring
-- `--exploration`: Enable connection exploration
+- `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default), `rtt-threshold`
+- `--no-quality`: Disable quality scoring (enhanced/rtt-threshold only)
+- `--exploration`: Enable connection exploration (enhanced only)
+- `--rtt-delta-ms <N>`: RTT delta threshold in ms (default: 30, rtt-threshold only)
+- `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `/tmp/srtla.sock`)
 - `-v, --version`: Print version and exit
 
 ## Example Usage
@@ -145,22 +162,25 @@ With `srtla_send` running on the sender, SRT-enabled applications should stream 
 **With logging and Unix socket control:**
 
 ```bash
-# Enable info logs and Unix socket control
 RUST_LOG=info ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 rec.example.com 5000 ./uplinks.txt
 ```
 
-**With initial toggle states:**
+**With classic mode:**
 
 ```bash
-# Start with quality scoring disabled
-./target/release/srtla_send --no-quality 6000 rec.example.com 5000 ./uplinks.txt
+./target/release/srtla_send --mode classic 6000 rec.example.com 5000 ./uplinks.txt
 ```
 
-**Basic example with logging:**
+**With RTT-threshold mode:**
 
 ```bash
-# Show info logs
-RUST_LOG=info ./target/release/srtla_send 6000 rec.example.com 5000 ./uplinks.txt
+./target/release/srtla_send --mode rtt-threshold --rtt-delta-ms 50 6000 rec.example.com 5000 ./uplinks.txt
+```
+
+**With quality scoring disabled:**
+
+```bash
+./target/release/srtla_send --no-quality 6000 rec.example.com 5000 ./uplinks.txt
 ```
 
 Sample `uplinks.txt`:
@@ -182,13 +202,13 @@ This tool uses `tracing` with `EnvFilter`.
 RUST_LOG=info,hyper=off ./target/release/srtla_send 6000 host 5000 ./uplinks.txt
 ```
 
-## Runtime Toggles
+## Runtime Configuration
 
 The sender supports dynamic runtime configuration changes through two methods:
 
 ### Method 1: Standard Input (stdin)
 
-Type commands directly into the running process and press Enter:
+Type commands directly into the running process and press Enter.
 
 ### Method 2: Unix Domain Socket (Unix only)
 
@@ -199,41 +219,27 @@ Use the `--control-socket` option to enable remote control via Unix socket:
 ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 10.0.0.1 5000 /tmp/srtla_ips
 
 # Send commands remotely
-echo 'classic on' | socat - UNIX-CONNECT:/tmp/srtla.sock
+echo 'mode classic' | socat - UNIX-CONNECT:/tmp/srtla.sock
 echo 'status' | socat - UNIX-CONNECT:/tmp/srtla.sock
 ```
 
 ### Available Commands
 
-Both methods support the same commands in two formats:
-
-**Traditional format:**
-
-- `classic on|off` - Enable/disable classic mode (disables all enhancements)
+- `mode classic` - Switch to classic mode
+- `mode enhanced` - Switch to enhanced mode (default)
+- `mode rtt-threshold` - Switch to RTT-threshold mode
 - `quality on|off` - Enable/disable quality scoring
 - `explore on|off` - Enable/disable connection exploration
-
-**Alternative format:**
-
-- `classic=true|false`
-- `quality=true|false`
-- `exploration=true|false`
-
-**Status command:**
-
-- `status` - Display current state of all toggles
+- `rtt-delta <ms>` - Set RTT delta threshold in milliseconds
+- `status` - Display current configuration
 
 ### Connection Selection Algorithm Details
 
-These toggles affect how the system selects the best connection for sending data:
+**Classic Mode**: Matches the original srtla_send logic without any enhancements.
 
-**Classic SRTLA Algorithm** (`classic`): Matches the original srtla_send logic without any enhancements.
+**Enhanced Mode** (default): Quality-based scoring that punishes connections with recent NAKs. More recent NAKs = more punishment. Additional 30% penalty (0.7x multiplier) for NAK bursts (≥5 NAKs in short time). Optional connection exploration for testing alternative connections.
 
-**Quality-Based Scoring** (`quality`): Punishes connections with recent NAKs. More recent NAKs = more punishment. **Additional 30% penalty (0.7x multiplier) for NAK bursts** (≥5 NAKs in short time).
-
-**Connection Exploration** (`explore`): Optional smart context-aware exploration that tests alternative connections when the current best is degrading and alternatives have recovered. Periodic fallback exploration every 30 seconds. **Disabled by default** and **completely disabled in classic mode** - enable with `--exploration` flag or runtime toggle.
-
-These affect selection behavior in real time. By default, enhanced mode with quality-based scoring is enabled.
+**RTT-Threshold Mode**: Groups links into "fast" and "slow" based on RTT measurements. Links within `min_rtt + delta` (default 30ms) are "fast" and strongly preferred. When quality scoring is also enabled, NAK penalties are applied within the fast link group. Falls back to slow links only when all fast links are saturated. Useful for reducing packet reordering in networks with heterogeneous latencies.
 
 ## IP List Reload (Unix only)
 
@@ -290,12 +296,14 @@ With properly configured connections, you should observe:
 
 **All connections active**: Traffic should appear on all uplinks (e.g., if you have 4 uplinks, all 4 should show active bitrate)
 
-**Proportional distribution**: 
+**Proportional distribution**:
+
 - With equal connections: roughly equal traffic distribution (e.g., 25% each with 4 uplinks)
 - With varying quality (enhanced mode): better connections get more traffic, degraded connections get less
 - With varying capacity: connections with larger windows get proportionally more traffic
 
-**Dynamic adaptation (enhanced mode)**: 
+**Dynamic adaptation (enhanced mode)**:
+
 - Connections experiencing NAKs automatically receive less traffic
 - Connections recover to full capacity within ~8 seconds after issues resolve
 - System continuously rebalances based on current conditions
@@ -303,13 +311,15 @@ With properly configured connections, you should observe:
 ### Monitoring
 
 **Status logs** (every 30 seconds) show:
+
 - Total bitrate across all connections
 - Individual connection status (active/timed out)
 - Window sizes and in-flight packet counts
 - RTT measurements and connection quality metrics
-- Current toggle states (classic/enhanced mode)
+- Current mode and configuration
 
 **Debug logs** (when `RUST_LOG=debug`) show:
+
 - Per-packet connection selection decisions
 - Quality multiplier calculations
 - NAK burst detections and recovery
@@ -319,13 +329,15 @@ With properly configured connections, you should observe:
 ### Troubleshooting
 
 **If only some connections are used**:
+
 1. Check for NAKs in logs - degraded connections naturally get less traffic in enhanced mode
-2. Try classic mode: `echo "classic on"` - disables quality awareness for pure capacity-based distribution
-3. Temporarily disable quality scoring: `echo "quality off"`
+2. Try classic mode: `mode classic` - disables quality awareness for pure capacity-based distribution
+3. Temporarily disable quality scoring: `quality off`
 4. Verify all uplinks can reach the receiver (check for timeout messages)
 5. Check RTT differences - high-RTT connections get slightly less traffic in enhanced mode (3% max difference)
 
 **If throughput is lower than expected**:
+
 1. Verify SRT is not limiting the bitrate (check encoder settings)
 2. Check for high packet loss (NAKs) on connections - indicates network issues
 3. Ensure sender has sufficient CPU and network capacity
@@ -333,6 +345,7 @@ With properly configured connections, you should observe:
 5. Check connection windows in status logs - low windows indicate capacity limits
 
 **If connections are flip-flopping**:
+
 1. This should be minimal with 2% hysteresis in enhanced mode
 2. Check if scores are truly identical (look for hysteresis messages in debug logs)
 3. Verify connections have stable quality (no intermittent NAKs)
@@ -345,9 +358,11 @@ With properly configured connections, you should observe:
 If needed, these can be adjusted in `src/sender/selection/`:
 
 **Enhanced Mode (`enhanced.rs`):**
+
 - `SWITCH_THRESHOLD`: 1.02 (2% hysteresis) - increase for more stability, decrease for faster response
 
 **Quality Scoring (`quality.rs`):**
+
 - `STARTUP_GRACE_PERIOD_MS`: 30000ms (30 seconds) - grace period before quality penalties apply
 - `PERFECT_CONNECTION_BONUS`: 1.1 (10% bonus) - bonus for connections with no NAKs
 - `STARTUP_NAK_PENALTY`: 0.98 (2% penalty) - light penalty during grace period
@@ -361,18 +376,20 @@ If needed, these can be adjusted in `src/sender/selection/`:
 - `MAX_RTT_BONUS`: 1.03 (3% max bonus) - maximum RTT bonus multiplier
 
 **Exploration (`enhanced.rs`):**
+
 - Exploration period: `should_explore_now()` function, currently 30s - adjust exploration interval
 
 ### Runtime Optimization
 
 For maximum throughput:
+
 - Use enhanced mode (default) to automatically avoid degraded connections
 - Ensure adequate SRT buffer size (`SRTO_SNDDATA`)
 - Monitor for connection timeouts - these interrupt traffic flow
 - Use `RUST_LOG=info` for minimal logging overhead (avoid debug in production)
 
 For maximum stability:
-- Use classic mode (`--classic`) for predictable, simple behavior
-- Disable exploration (`exploration off`) if not needed
-- Increase hysteresis threshold if experiencing unnecessary switching
 
+- Use classic mode (`--mode classic`) for predictable, simple behavior
+- Disable exploration (`explore off`) if not needed
+- Increase hysteresis threshold if experiencing unnecessary switching

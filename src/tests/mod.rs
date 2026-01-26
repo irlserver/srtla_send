@@ -5,7 +5,7 @@ pub mod connection_tests;
 pub mod registration_tests;
 
 #[cfg(test)]
-pub mod toggles_tests;
+pub mod config_tests;
 
 #[cfg(test)]
 pub mod sender_tests;
@@ -18,3 +18,6 @@ pub mod integration_tests;
 
 #[cfg(test)]
 pub mod end_to_end_tests;
+
+#[cfg(test)]
+pub mod rtt_threshold_tests;

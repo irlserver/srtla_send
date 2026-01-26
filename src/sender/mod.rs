@@ -1,6 +1,9 @@
 mod connections;
 mod housekeeping;
 mod packet_handler;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod selection;
+#[cfg(not(any(test, feature = "test-internals")))]
 mod selection;
 mod sequence;
 mod status;
@@ -38,19 +41,18 @@ use tokio::time::{self, Duration, Instant};
 use tracing::{debug, info, warn};
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 
+use crate::config::DynamicConfig;
 use crate::registration::SrtlaRegistrationManager;
-#[allow(unused_imports)]
-use crate::toggles::{DynamicToggles, ToggleSnapshot};
 
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
 const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
 
-pub async fn run_sender_with_toggles(
+pub async fn run_sender_with_config(
     local_srt_port: u16,
     receiver_host: &str,
     receiver_port: u16,
     ips_file: &str,
-    toggles: DynamicToggles,
+    config: DynamicConfig,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}",
@@ -135,9 +137,7 @@ pub async fn run_sender_with_toggles(
     // Main loop - run housekeeping frequently like C version
     // Run housekeeping once before entering the main event loop so we start in a clean state.
     {
-        let classic = toggles
-            .classic_mode
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let classic = config.mode().is_classic();
         if let Err(err) = handle_housekeeping(
             &mut connections,
             &mut reg,
@@ -159,7 +159,7 @@ pub async fn run_sender_with_toggles(
             loop {
                 tokio::select! {
                     res = local_listener.recv_from(&mut recv_buf) => {
-                        let toggle_snap = toggles.snapshot();
+                        let config_snap = config.snapshot();
                         handle_srt_packet(
                             res,
                             &mut recv_buf,
@@ -169,7 +169,7 @@ pub async fn run_sender_with_toggles(
                             &mut seq_tracker,
                             &mut last_client_addr,
                             reg.has_connected,
-                            &toggle_snap,
+                            &config_snap,
                         )
                         .await;
                         drain_packet_queue(
@@ -180,12 +180,12 @@ pub async fn run_sender_with_toggles(
                             last_client_addr,
                             &local_listener,
                             &seq_tracker,
-                            &toggle_snap,
+                            &config_snap,
                         )
                         .await;
                     }
                     packet = packet_rx.recv() => {
-                        let toggle_snap = toggles.snapshot();
+                        let config_snap = config.snapshot();
                         if let Some(packet) = packet {
                             handle_uplink_packet(
                                 packet,
@@ -195,7 +195,7 @@ pub async fn run_sender_with_toggles(
                                 last_client_addr,
                                 &local_listener,
                                 &seq_tracker,
-                                &toggle_snap,
+                                &config_snap,
                             ).await;
                             drain_packet_queue(
                                 &mut packet_rx,
@@ -205,16 +205,14 @@ pub async fn run_sender_with_toggles(
                                 last_client_addr,
                                 &local_listener,
                                 &seq_tracker,
-                                &toggle_snap,
+                                &config_snap,
                             ).await;
                         } else {
                             return Ok(());
                         }
                     }
                     _ = housekeeping_timer.tick() => {
-                        let classic = toggles
-                            .classic_mode
-                            .load(std::sync::atomic::Ordering::Relaxed);
+                        let classic = config.mode().is_classic();
                         if let Err(err) = handle_housekeeping(
                             &mut connections,
                             &mut reg,
@@ -244,12 +242,12 @@ pub async fn run_sender_with_toggles(
 
                         status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
                         if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
-                            log_connection_status(&connections, last_selected_idx, &toggles);
+                            log_connection_status(&connections, last_selected_idx, &config);
                             status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                         }
 
                         sync_readers(&connections, &mut reader_handles, &packet_tx);
-                        let toggle_snap = toggles.snapshot();
+                        let config_snap = config.snapshot();
                         drain_packet_queue(
                             &mut packet_rx,
                             &mut connections,
@@ -258,7 +256,7 @@ pub async fn run_sender_with_toggles(
                             last_client_addr,
                             &local_listener,
                             &seq_tracker,
-                            &toggle_snap,
+                            &config_snap,
                         )
                         .await;
                     }
@@ -283,7 +281,7 @@ pub async fn run_sender_with_toggles(
                 });
                 info!("uplink IP changes queued for next processing cycle");
             }
-            let toggle_snap = toggles.snapshot();
+            let config_snap = config.snapshot();
             drain_packet_queue(
                 &mut packet_rx,
                 &mut connections,
@@ -292,7 +290,7 @@ pub async fn run_sender_with_toggles(
                 last_client_addr,
                 &local_listener,
                 &seq_tracker,
-                &toggle_snap,
+                &config_snap,
             )
             .await;
         }

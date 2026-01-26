@@ -9,10 +9,10 @@ use tracing::{debug, warn};
 use super::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
 use super::uplink::UplinkPacket;
+use crate::config::ConfigSnapshot;
 use crate::connection::{SrtlaConnection, SrtlaIncoming};
 use crate::protocol;
 use crate::registration::SrtlaRegistrationManager;
-use crate::toggles::ToggleSnapshot;
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -107,7 +107,7 @@ pub async fn handle_uplink_packet(
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
-    toggle_snap: &ToggleSnapshot,
+    config_snap: &ConfigSnapshot,
 ) {
     if packet.bytes.is_empty() {
         return;
@@ -133,7 +133,7 @@ pub async fn handle_uplink_packet(
                     last_client_addr,
                     local_listener,
                     seq_tracker,
-                    toggle_snap.classic_mode,
+                    config_snap.mode.is_classic(),
                     Some(incoming),
                 )
                 .await
@@ -163,7 +163,7 @@ pub async fn drain_packet_queue(
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
-    toggle_snap: &ToggleSnapshot,
+    config_snap: &ConfigSnapshot,
 ) {
     // Process up to MAX_DRAIN_PACKETS to prevent CPU spikes from large queue bursts.
     // Remaining packets will be processed on the next event loop iteration.
@@ -179,7 +179,7 @@ pub async fn drain_packet_queue(
                     last_client_addr,
                     local_listener,
                     seq_tracker,
-                    toggle_snap,
+                    config_snap,
                 )
                 .await;
                 processed += 1;
@@ -218,7 +218,7 @@ fn select_pre_registration_connection(
 
 /// Handle incoming SRT packet
 ///
-/// Uses a pre-cached `ToggleSnapshot` to avoid atomic loads per packet.
+/// Uses a pre-cached `ConfigSnapshot` to avoid atomic loads per packet.
 /// The caller should create a snapshot once per select iteration for optimal performance.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_srt_packet(
@@ -230,7 +230,7 @@ pub async fn handle_srt_packet(
     seq_tracker: &mut SequenceTracker,
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
-    toggle_snap: &ToggleSnapshot,
+    config_snap: &ConfigSnapshot,
 ) {
     match res {
         Ok((n, src)) => {
@@ -261,19 +261,12 @@ pub async fn handle_srt_packet(
                 return;
             }
 
-            let effective_enable_quality =
-                toggle_snap.quality_scoring_enabled && !toggle_snap.classic_mode;
-            let effective_enable_explore =
-                toggle_snap.exploration_enabled && !toggle_snap.classic_mode;
-
             let sel_idx = select_connection_idx(
                 connections,
                 *last_selected_idx,
                 *last_switch_time_ms,
                 packet_time_ms,
-                effective_enable_quality,
-                effective_enable_explore,
-                toggle_snap.classic_mode,
+                config_snap,
             );
             if let Some(sel_idx) = sel_idx {
                 forward_via_connection(

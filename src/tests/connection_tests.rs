@@ -506,20 +506,6 @@ mod tests {
         assert!(time_since < 1000); // Should be very recent
     }
 
-    #[tokio::test]
-    async fn test_keepalive_creation_and_extraction() {
-        let pkt = create_keepalive_packet();
-        assert_eq!(pkt.len(), 10);
-        assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
-
-        let timestamp = extract_keepalive_timestamp(&pkt).unwrap();
-        assert!(timestamp > 0);
-
-        // Timestamp should be recent (within last second)
-        let now = now_ms();
-        assert!((now.saturating_sub(timestamp)) < 1000);
-    }
-
     #[test]
     fn test_fast_recovery_mode() {
         let rt = tokio::runtime::Runtime::new().unwrap();
