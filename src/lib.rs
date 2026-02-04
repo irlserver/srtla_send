@@ -16,6 +16,7 @@ pub mod mode;
 pub mod protocol;
 pub mod registration;
 pub mod sender;
+pub mod stats;
 pub mod utils;
 
 // Test helpers module - available when test-internals feature is enabled

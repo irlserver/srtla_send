@@ -13,6 +13,7 @@ mod mode;
 mod protocol;
 mod registration;
 mod sender;
+mod stats;
 mod utils;
 
 // Test helpers for binary tests
@@ -106,8 +107,11 @@ async fn main() -> Result<()> {
         args.rtt_delta_ms,
     );
 
+    // Create shared stats for telemetry export
+    let shared_stats = stats::SharedStats::new();
+
     // Start config listener (stdin or Unix socket)
-    config::spawn_config_listener(config.clone(), args.control_socket);
+    config::spawn_config_listener(config.clone(), args.control_socket, shared_stats.clone());
 
     sender::run_sender_with_config(
         local_srt_port,
@@ -115,6 +119,7 @@ async fn main() -> Result<()> {
         receiver_port,
         ips_file,
         config,
+        shared_stats,
     )
     .await
     .context("srtla_send failed")

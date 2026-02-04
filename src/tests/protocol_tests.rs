@@ -212,7 +212,7 @@ mod tests {
         // Test empty ACK packet (4-byte header, no sequences)
         let empty_pkt = vec![0x91, 0x00, 0x00, 0x00];
         let parsed_empty = parse_srtla_ack(&empty_pkt);
-        assert_eq!(parsed_empty.as_slice(), &[]);
+        assert_eq!(parsed_empty.as_slice(), &[] as &[u32]);
 
         // Test invalid packet type
         let mut invalid = pkt.clone();

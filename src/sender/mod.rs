@@ -43,6 +43,7 @@ use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 
 use crate::config::DynamicConfig;
 use crate::registration::SrtlaRegistrationManager;
+use crate::stats::SharedStats;
 
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
 const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
@@ -53,6 +54,7 @@ pub async fn run_sender_with_config(
     receiver_port: u16,
     ips_file: &str,
     config: DynamicConfig,
+    shared_stats: SharedStats,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}",
@@ -223,6 +225,9 @@ pub async fn run_sender_with_config(
                         ).await {
                             warn!("housekeeping failed: {err}");
                         }
+
+                        // Update shared stats for telemetry export
+                        shared_stats.update(&connections, &config.snapshot());
 
                         if let Some(changes) = pending_changes.take()
                             && let Some(new_ips) = changes.new_ips

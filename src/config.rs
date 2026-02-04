@@ -2,7 +2,7 @@
 //!
 //! Manages dynamic settings that can be changed at runtime via stdin or Unix socket.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use tracing::debug;
 use tracing::{info, warn};
 
 use crate::mode::SchedulingMode;
+use crate::stats::SharedStats;
 
 /// Default RTT delta threshold in milliseconds.
 /// Links within min_rtt + delta are considered "fast" and preferred.
@@ -126,26 +127,32 @@ impl DynamicConfig {
     }
 }
 
-pub fn spawn_config_listener(config: DynamicConfig, socket_path: Option<String>) {
+pub fn spawn_config_listener(
+    config: DynamicConfig,
+    socket_path: Option<String>,
+    stats: SharedStats,
+) {
     if let Some(sock_path) = socket_path {
         // Socket path specified: use Unix socket on Unix, fallback to stdin on other platforms
         #[cfg(unix)]
         {
             let config_clone = config.clone();
+            let stats_clone = stats.clone();
             std::thread::spawn(move || {
-                unix_socket_loop(&config_clone, &sock_path);
+                unix_socket_loop(&config_clone, &sock_path, &stats_clone);
             });
         }
         #[cfg(not(unix))]
         {
             // Unix sockets not available; fall back to stdin listener
             let _ = sock_path; // suppress unused warning
+            let _ = stats; // suppress unused warning
             let config_clone = config.clone();
             std::thread::spawn(move || {
                 let stdin = std::io::stdin();
                 let reader = BufReader::new(stdin);
                 for cmd in reader.lines().map_while(Result::ok) {
-                    apply_cmd(&config_clone, cmd.trim());
+                    apply_cmd(&config_clone, cmd.trim(), None);
                 }
             });
         }
@@ -156,10 +163,18 @@ pub fn spawn_config_listener(config: DynamicConfig, socket_path: Option<String>)
             let stdin = std::io::stdin();
             let reader = BufReader::new(stdin);
             for cmd in reader.lines().map_while(Result::ok) {
-                apply_cmd(&config_clone, cmd.trim());
+                apply_cmd(&config_clone, cmd.trim(), None);
             }
         });
     }
+}
+
+/// Response from apply_cmd that can be sent back to the client.
+pub enum CmdResponse {
+    /// No response needed (command logged via tracing)
+    None,
+    /// JSON response to send back
+    Json(String),
 }
 
 /// Apply a runtime command to the configuration.
@@ -170,22 +185,23 @@ pub fn spawn_config_listener(config: DynamicConfig, socket_path: Option<String>)
 /// - `explore on|off` - toggle exploration
 /// - `rtt-delta <ms>` - set RTT delta threshold
 /// - `status` - show current configuration
-pub fn apply_cmd(config: &DynamicConfig, cmd: &str) {
+/// - `stats` - get per-link telemetry as JSON
+pub fn apply_cmd(config: &DynamicConfig, cmd: &str, stats: Option<&SharedStats>) -> CmdResponse {
     let cmd = cmd.trim();
     if cmd.is_empty() {
-        return;
+        return CmdResponse::None;
     }
 
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
-        return;
+        return CmdResponse::None;
     }
 
     match parts[0] {
         "mode" => {
             if parts.len() != 2 {
                 warn!("usage: mode classic|enhanced|rtt-threshold");
-                return;
+                return CmdResponse::None;
             }
             match parts[1] {
                 "classic" => {
@@ -212,7 +228,7 @@ pub fn apply_cmd(config: &DynamicConfig, cmd: &str) {
         "quality" => {
             if parts.len() != 2 {
                 warn!("usage: quality on|off");
-                return;
+                return CmdResponse::None;
             }
             match parts[1] {
                 "on" => {
@@ -232,7 +248,7 @@ pub fn apply_cmd(config: &DynamicConfig, cmd: &str) {
         "explore" => {
             if parts.len() != 2 {
                 warn!("usage: explore on|off");
-                return;
+                return CmdResponse::None;
             }
             match parts[1] {
                 "on" => {
@@ -252,7 +268,7 @@ pub fn apply_cmd(config: &DynamicConfig, cmd: &str) {
         "rtt-delta" => {
             if parts.len() != 2 {
                 warn!("usage: rtt-delta <ms>");
-                return;
+                return CmdResponse::None;
             }
             match parts[1].parse::<u32>() {
                 Ok(delta) => {
@@ -283,14 +299,26 @@ pub fn apply_cmd(config: &DynamicConfig, cmd: &str) {
             info!("  rtt-delta: {}ms", snap.rtt_delta_ms);
         }
 
+        "stats" => {
+            if let Some(stats) = stats {
+                let json = stats.to_json();
+                info!("stats requested, returning {} bytes", json.len());
+                return CmdResponse::Json(json);
+            } else {
+                warn!("stats not available (no stats provider)");
+            }
+        }
+
         other => {
             warn!("unknown command: {}", other);
         }
     }
+
+    CmdResponse::None
 }
 
 #[cfg(unix)]
-fn unix_socket_loop(config: &DynamicConfig, socket_path: &str) {
+fn unix_socket_loop(config: &DynamicConfig, socket_path: &str, stats: &SharedStats) {
     // Remove existing socket file if it exists
     let _ = std::fs::remove_file(socket_path);
 
@@ -308,8 +336,9 @@ fn unix_socket_loop(config: &DynamicConfig, socket_path: &str) {
         match stream {
             Ok(stream) => {
                 let config_clone = config.clone();
+                let stats_clone = stats.clone();
                 std::thread::spawn(move || {
-                    handle_unix_client(config_clone, stream);
+                    handle_unix_client(config_clone, stream, stats_clone);
                 });
             }
             Err(e) => {
@@ -320,12 +349,29 @@ fn unix_socket_loop(config: &DynamicConfig, socket_path: &str) {
 }
 
 #[cfg(unix)]
-fn handle_unix_client(config: DynamicConfig, stream: UnixStream) {
-    let reader = BufReader::new(&stream);
+fn handle_unix_client(config: DynamicConfig, mut stream: UnixStream, stats: SharedStats) {
+    // Clone stream for reading (we need separate read/write handles)
+    let read_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let reader = BufReader::new(read_stream);
+
     for line in reader.lines() {
         match line {
             Ok(cmd) => {
-                apply_cmd(&config, cmd.trim());
+                let response = apply_cmd(&config, cmd.trim(), Some(&stats));
+                if let CmdResponse::Json(json) = response {
+                    // Write JSON response followed by newline
+                    if let Err(e) = writeln!(stream, "{}", json) {
+                        debug!("failed to write response: {}", e);
+                        break;
+                    }
+                    if let Err(e) = stream.flush() {
+                        debug!("failed to flush response: {}", e);
+                        break;
+                    }
+                }
             }
             Err(_) => break,
         }
@@ -360,13 +406,13 @@ mod tests {
     fn test_mode_commands() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "mode classic");
+        apply_cmd(&config, "mode classic", None);
         assert_eq!(config.mode(), SchedulingMode::Classic);
 
-        apply_cmd(&config, "mode enhanced");
+        apply_cmd(&config, "mode enhanced", None);
         assert_eq!(config.mode(), SchedulingMode::Enhanced);
 
-        apply_cmd(&config, "mode rtt-threshold");
+        apply_cmd(&config, "mode rtt-threshold", None);
         assert_eq!(config.mode(), SchedulingMode::RttThreshold);
     }
 
@@ -374,10 +420,10 @@ mod tests {
     fn test_quality_commands() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "quality off");
+        apply_cmd(&config, "quality off", None);
         assert!(!config.snapshot().quality_enabled);
 
-        apply_cmd(&config, "quality on");
+        apply_cmd(&config, "quality on", None);
         assert!(config.snapshot().quality_enabled);
     }
 
@@ -385,10 +431,10 @@ mod tests {
     fn test_exploration_commands() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "explore on");
+        apply_cmd(&config, "explore on", None);
         assert!(config.snapshot().exploration_enabled);
 
-        apply_cmd(&config, "explore off");
+        apply_cmd(&config, "explore off", None);
         assert!(!config.snapshot().exploration_enabled);
     }
 
@@ -396,10 +442,10 @@ mod tests {
     fn test_rtt_delta_commands() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "rtt-delta 50");
+        apply_cmd(&config, "rtt-delta 50", None);
         assert_eq!(config.snapshot().rtt_delta_ms, 50);
 
-        apply_cmd(&config, "rtt-delta 100");
+        apply_cmd(&config, "rtt-delta 100", None);
         assert_eq!(config.snapshot().rtt_delta_ms, 100);
     }
 

@@ -34,13 +34,13 @@ mod tests {
     fn test_apply_cmd_mode() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "mode classic");
+        apply_cmd(&config, "mode classic", None);
         assert_eq!(config.mode(), SchedulingMode::Classic);
 
-        apply_cmd(&config, "mode enhanced");
+        apply_cmd(&config, "mode enhanced", None);
         assert_eq!(config.mode(), SchedulingMode::Enhanced);
 
-        apply_cmd(&config, "mode rtt-threshold");
+        apply_cmd(&config, "mode rtt-threshold", None);
         assert_eq!(config.mode(), SchedulingMode::RttThreshold);
     }
 
@@ -48,10 +48,10 @@ mod tests {
     fn test_apply_cmd_quality() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "quality off");
+        apply_cmd(&config, "quality off", None);
         assert!(!config.snapshot().quality_enabled);
 
-        apply_cmd(&config, "quality on");
+        apply_cmd(&config, "quality on", None);
         assert!(config.snapshot().quality_enabled);
     }
 
@@ -59,10 +59,10 @@ mod tests {
     fn test_apply_cmd_explore() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "explore on");
+        apply_cmd(&config, "explore on", None);
         assert!(config.snapshot().exploration_enabled);
 
-        apply_cmd(&config, "explore off");
+        apply_cmd(&config, "explore off", None);
         assert!(!config.snapshot().exploration_enabled);
     }
 
@@ -71,14 +71,14 @@ mod tests {
         let config = DynamicConfig::new();
         assert_eq!(config.snapshot().rtt_delta_ms, 30);
 
-        apply_cmd(&config, "rtt-delta 50");
+        apply_cmd(&config, "rtt-delta 50", None);
         assert_eq!(config.snapshot().rtt_delta_ms, 50);
 
-        apply_cmd(&config, "rtt-delta 100");
+        apply_cmd(&config, "rtt-delta 100", None);
         assert_eq!(config.snapshot().rtt_delta_ms, 100);
 
         // invalid value should not change
-        apply_cmd(&config, "rtt-delta invalid");
+        apply_cmd(&config, "rtt-delta invalid", None);
         assert_eq!(config.snapshot().rtt_delta_ms, 100);
     }
 
@@ -88,7 +88,7 @@ mod tests {
 
         let snap_before = config.snapshot();
 
-        apply_cmd(&config, "status");
+        apply_cmd(&config, "status", None);
 
         let snap_after = config.snapshot();
         assert_eq!(snap_after.mode, snap_before.mode);
@@ -103,9 +103,9 @@ mod tests {
     fn test_apply_cmd_empty_and_unknown() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "");
-        apply_cmd(&config, "   ");
-        apply_cmd(&config, "unknown command");
+        apply_cmd(&config, "", None);
+        apply_cmd(&config, "   ", None);
+        apply_cmd(&config, "unknown command", None);
 
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
@@ -117,7 +117,7 @@ mod tests {
     fn test_apply_cmd_whitespace_handling() {
         let config = DynamicConfig::new();
 
-        apply_cmd(&config, "  mode classic  ");
+        apply_cmd(&config, "  mode classic  ", None);
         assert_eq!(config.mode(), SchedulingMode::Classic);
     }
 
@@ -131,8 +131,8 @@ mod tests {
 
         let handle = thread::spawn(move || {
             for _ in 0..100 {
-                apply_cmd(&config_clone, "mode classic");
-                apply_cmd(&config_clone, "mode enhanced");
+                apply_cmd(&config_clone, "mode classic", None);
+                apply_cmd(&config_clone, "mode enhanced", None);
             }
         });
 
