@@ -64,6 +64,7 @@ pub struct LinkStats {
     /// - 1.0 = normal
     /// - <1.0 = degraded due to recent NAKs
     /// - ~0.35 = heavily penalized (NAK burst)
+    ///
     /// This is the EXACT multiplier used in `select_connection_idx()`.
     /// In classic mode, this is always 1.0 (quality scoring disabled).
     pub quality_multiplier: f64,
