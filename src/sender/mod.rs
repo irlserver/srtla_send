@@ -57,8 +57,16 @@ pub async fn run_sender_with_config(
     shared_stats: SharedStats,
 ) -> Result<()> {
     info!(
-        "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}",
-        local_srt_port, receiver_host, receiver_port, ips_file
+        "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}, mode={}",
+        local_srt_port,
+        receiver_host,
+        receiver_port,
+        ips_file,
+        match config.mode() {
+            crate::mode::SchedulingMode::Classic => "classic",
+            crate::mode::SchedulingMode::Enhanced => "enhanced",
+            crate::mode::SchedulingMode::RttThreshold => "rtt-threshold",
+        }
     );
     let ips = read_ip_list(ips_file).await?;
     debug!(
