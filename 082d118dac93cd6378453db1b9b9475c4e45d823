@@ -1,0 +1,25 @@
+src/sender/selection/enhanced.rs
+  59f554f4c46b3ccd 6,18-22
+README.md
+  59f554f4c46b3ccd 39,349,362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.1",
+  "base_commit_sha": "082d118dac93cd6378453db1b9b9475c4e45d823",
+  "prompts": {
+    "59f554f4c46b3ccd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f1f36575-9495-4e00-8e88-eabca2c0012a",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 582,
+      "total_deletions": 581,
+      "accepted_lines": 255,
+      "overriden_lines": 0
+    }
+  }
+}
