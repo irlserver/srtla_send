@@ -3,7 +3,7 @@
 //! This module implements the enhanced SRTLA connection selection with:
 //! - Quality-aware scoring based on NAK history
 //! - RTT-aware bonuses for low-latency connections
-//! - Minimal hysteresis to prevent flip-flopping (2%)
+//! - Score hysteresis to prevent flip-flopping (10%)
 //! - Optional smart exploration of alternative connections
 //!
 //! The enhanced mode provides better connection quality awareness while
@@ -15,10 +15,11 @@ use super::MIN_SWITCH_INTERVAL_MS;
 use super::exploration::should_explore_now;
 use crate::connection::SrtlaConnection;
 
-/// Switching hysteresis: require new connection to be significantly better
-/// REDUCED to 2% to allow better load distribution across multiple connections
-/// Original 15% was preventing traffic from spreading across all uplinks
-const SWITCH_THRESHOLD: f64 = 1.02; // New connection must be 2% better
+/// Switching hysteresis: require new connection to be meaningfully better.
+/// At 10%, this prevents noise-driven flip-flopping between connections with
+/// similar scores while still allowing switches when one connection genuinely
+/// degrades (e.g., higher in_flight due to congestion or packet loss).
+const SWITCH_THRESHOLD: f64 = 1.10; // New connection must be 10% better
 
 /// Select best connection using enhanced algorithm with quality awareness
 ///
