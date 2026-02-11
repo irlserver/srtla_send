@@ -2,9 +2,9 @@
 //!
 //! Manages dynamic settings that can be changed at runtime via stdin or Unix socket.
 
-use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::io::Write;
+use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;

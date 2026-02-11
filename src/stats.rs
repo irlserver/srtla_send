@@ -55,6 +55,12 @@ pub struct LinkStats {
     /// Current send bitrate in bytes/sec (measured, not estimated).
     pub bitrate_bps: u32,
 
+    // --- RTT baseline tracking ---
+    /// Dual-window minimum RTT baseline in milliseconds.
+    pub rtt_min_ms: f64,
+    /// Fast RTT tracker in milliseconds (quicker response to spikes).
+    pub fast_rtt_ms: f64,
+
     // --- Selection algorithm context ---
     /// Base score: window / (in_flight + 1). Used by classic mode.
     /// Higher score = more available capacity on this link.
@@ -160,6 +166,8 @@ impl SharedStats {
                 rtt_ms: conn.get_smooth_rtt_ms() as u32,
                 nak_count: conn.total_nak_count(),
                 bitrate_bps: (conn.current_bitrate_mbps() * 1_000_000.0 / 8.0) as u32,
+                rtt_min_ms: conn.get_rtt_min_ms(),
+                fast_rtt_ms: conn.get_fast_rtt_ms(),
                 base_score: conn.get_score(),
                 quality_multiplier,
             };

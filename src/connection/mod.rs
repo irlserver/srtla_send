@@ -274,6 +274,10 @@ impl SrtlaConnection {
         self.rtt.fast_rtt_ms
     }
 
+    pub fn get_rtt_min_ms(&self) -> f64 {
+        self.rtt.rtt_min_ms
+    }
+
     pub fn get_rtt_jitter_ms(&self) -> f64 {
         self.rtt.rtt_jitter_ms
     }
