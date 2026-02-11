@@ -24,6 +24,8 @@ use rustc_hash::FxHashMap;
 pub use socket::{bind_from_ip, resolve_remote};
 use tokio::time::Instant;
 
+use tracing::debug;
+
 use crate::protocol::*;
 use crate::utils::now_ms;
 
@@ -337,6 +339,30 @@ impl SrtlaConnection {
         } else {
             false
         }
+    }
+
+    /// Clear state accumulated during pre-registration phase.
+    ///
+    /// Called when REG3 is received to prevent phantom in-flight counts
+    /// and early NAK penalties from persisting into the connected state.
+    /// Before REG3, `forward_via_connection()` may have queued and sent
+    /// data packets, creating `packet_log` entries that will never be
+    /// properly ACKed. Early NAKs from these packets would also penalize
+    /// the connection's quality score during startup.
+    pub(crate) fn clear_pre_registration_state(&mut self) {
+        if !self.packet_log.is_empty() || self.congestion.nak_count > 0 {
+            debug!(
+                "{}: clearing pre-registration state ({} in-flight, {} NAKs)",
+                self.label,
+                self.packet_log.len(),
+                self.congestion.nak_count
+            );
+        }
+        self.packet_log.clear();
+        self.in_flight_packets = 0;
+        self.highest_acked_seq = i32::MIN;
+        self.congestion.reset();
+        self.quality_cache = CachedQuality::default();
     }
 
     /// Reset core connection state (window, packet tracking, batch queue).
