@@ -21,10 +21,8 @@ pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG2_LEN] 
 pub fn create_keepalive_packet() -> [u8; 10] {
     let mut pkt = [0u8; 10];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
-    let ts = chrono::Utc::now().timestamp_millis() as u64;
-    for i in 0..8 {
-        pkt[2 + i] = ((ts >> (56 - i * 8)) & 0xff) as u8;
-    }
+    let ts = crate::utils::now_ms();
+    pkt[2..10].copy_from_slice(&ts.to_be_bytes());
     pkt
 }
 
@@ -50,7 +48,7 @@ pub fn create_keepalive_packet_ext(info: ConnectionInfo) -> [u8; SRTLA_KEEPALIVE
 
     // Standard keepalive header (bytes 0-9)
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
-    let ts = chrono::Utc::now().timestamp_millis() as u64;
+    let ts = crate::utils::now_ms();
     pkt[2..10].copy_from_slice(&ts.to_be_bytes());
 
     // Extended data (bytes 10-37)
