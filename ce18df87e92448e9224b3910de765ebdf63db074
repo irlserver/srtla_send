@@ -1,0 +1,25 @@
+src/connection/packet_io.rs
+  59f554f4c46b3ccd 96-98
+src/connection/mod.rs
+  59f554f4c46b3ccd 27-28,344-367
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.1",
+  "base_commit_sha": "ce18df87e92448e9224b3910de765ebdf63db074",
+  "prompts": {
+    "59f554f4c46b3ccd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f1f36575-9495-4e00-8e88-eabca2c0012a",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 650,
+      "total_deletions": 621,
+      "accepted_lines": 88,
+      "overriden_lines": 0
+    }
+  }
+}
