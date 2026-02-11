@@ -1,0 +1,11 @@
+[package]
+name = "network-sim"
+version = "0.1.0"
+edition = "2024"
+description = "Network simulation toolkit for integration testing with Linux network namespaces and tc netem"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+tracing = "0.1"
+rand = "0.10"
