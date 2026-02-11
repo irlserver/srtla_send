@@ -104,7 +104,7 @@ mod tests {
         connections[2].in_flight_packets = 10; // Worst score
 
         let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within 500ms cooldown)
+        let current_time_ms = last_switch_time_ms + 5; // 5ms after last switch (within 15ms cooldown)
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
@@ -140,7 +140,7 @@ mod tests {
         connections[2].in_flight_packets = 10; // Worst score
 
         let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 600; // 600ms after last switch (past 500ms cooldown)
+        let current_time_ms = last_switch_time_ms + 20; // 20ms after last switch (past 15ms cooldown)
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
@@ -180,7 +180,7 @@ mod tests {
         connections[2].in_flight_packets = 10;
 
         let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 200; // Within cooldown period
+        let current_time_ms = last_switch_time_ms + 5; // Within 15ms cooldown
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
@@ -217,7 +217,7 @@ mod tests {
         connections[2].in_flight_packets = 1; // Second-best
 
         let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 200; // Within cooldown
+        let current_time_ms = last_switch_time_ms + 5; // Within 15ms cooldown
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
