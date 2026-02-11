@@ -175,7 +175,7 @@ mod tests {
         let mut connections = rt.block_on(create_test_connections(2));
 
         let current_time = now_ms();
-        let last_switch_time = current_time - 200; // 200ms ago (within 500ms cooldown)
+        let last_switch_time = current_time - 5; // 5ms ago (within 15ms cooldown)
 
         // Connection 0: Currently selected, lower capacity
         connections[0].rtt.smooth_rtt_ms = 50.0;
@@ -201,7 +201,7 @@ mod tests {
         );
 
         // After cooldown, should switch
-        let after_cooldown = current_time - 600; // 600ms ago (past cooldown)
+        let after_cooldown = current_time - 20; // 20ms ago (past 15ms cooldown)
         let selected_after = select_connection(
             &mut connections,
             Some(0),
