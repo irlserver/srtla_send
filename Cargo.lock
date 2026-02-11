@@ -365,6 +365,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rand 0.10.0",
+ "tempfile",
  "tracing",
 ]
 

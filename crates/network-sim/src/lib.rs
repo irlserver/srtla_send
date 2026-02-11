@@ -10,11 +10,17 @@
 //! - [`scenario`]: Deterministic random-walk impairment generator
 //! - [`test_util`]: Privilege checks and unique name generation for tests
 
+pub mod harness;
 pub mod impairment;
 pub mod scenario;
 pub mod test_util;
 pub mod topology;
 
+pub use harness::{
+    SrtlaTestStack, SrtlaTestTopology, StackOutput, check_binary, check_impairment_deps,
+    check_integration_deps, inject_udp_packets, inject_udp_stream, wait_for_udp_listener,
+    NamespaceProcess, SkipReason,
+};
 pub use impairment::{GemodelConfig, ImpairmentConfig, apply_impairment};
 pub use scenario::{LinkScenarioConfig, Scenario, ScenarioConfig, ScenarioFrame};
 pub use test_util::{check_privileges, unique_ns_name};
