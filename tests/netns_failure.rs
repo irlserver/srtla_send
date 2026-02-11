@@ -17,8 +17,7 @@ fn test_link_failure_failover() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("fail", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("fail", 2, &[]).expect("start stack");
 
     // Let both links register
     thread::sleep(Duration::from_secs(5));
@@ -59,8 +58,7 @@ fn test_link_recovery() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("recv", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("recv", 2, &[]).expect("start stack");
 
     // Let both links register
     thread::sleep(Duration::from_secs(5));

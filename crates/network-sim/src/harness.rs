@@ -45,7 +45,10 @@ impl std::fmt::Display for SkipReason {
             SkipReason::NotRoot => write!(f, "requires root / passwordless sudo"),
             SkipReason::MissingBinary(b) => write!(f, "{b} not found in PATH"),
             SkipReason::MissingTool(t) => write!(f, "system tool '{t}' not found"),
-            SkipReason::NoNetem => write!(f, "sch_netem kernel module not available (try: sudo modprobe sch_netem)"),
+            SkipReason::NoNetem => write!(
+                f,
+                "sch_netem kernel module not available (try: sudo modprobe sch_netem)"
+            ),
         }
     }
 }
@@ -135,9 +138,7 @@ impl NamespaceProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("spawn {label}"))?;
+        let child = cmd.spawn().with_context(|| format!("spawn {label}"))?;
 
         tracing::debug!(%label, pid = child.id(), "spawned namespace process");
         Ok(Self { child, label })
@@ -175,12 +176,7 @@ impl NamespaceProcess {
                 .output();
         }
 
-        match self
-            .child
-            .try_wait()
-            .ok()
-            .flatten()
-        {
+        match self.child.try_wait().ok().flatten() {
             Some(_) => return,
             None => {
                 // Wait up to 2s for graceful exit
@@ -319,8 +315,7 @@ impl SrtlaTestTopology {
     pub fn write_ip_list(&self) -> Result<PathBuf> {
         let dir = tempfile::tempdir().context("create temp dir for IP list")?;
         let path = dir.keep().join("srtla_ips.txt");
-        std::fs::write(&path, self.sender_ips.join("\n") + "\n")
-            .context("write IP list")?;
+        std::fs::write(&path, self.sender_ips.join("\n") + "\n").context("write IP list")?;
         Ok(path)
     }
 }
@@ -345,8 +340,8 @@ pub fn wait_for_udp_listener(ns: &Namespace, port: u16, timeout: Duration) -> Re
 
         if start.elapsed() > timeout {
             bail!(
-                "timeout waiting for UDP listener on port {port} in ns {}\n\
-                 last ss -uln output:\n{last_ss_output}",
+                "timeout waiting for UDP listener on port {port} in ns {}\nlast ss -uln \
+                 output:\n{last_ss_output}",
                 ns.name
             );
         }
@@ -386,11 +381,7 @@ impl SrtlaTestStack {
     /// Start the full stack: srt-live-transmit → srtla_rec → srtla_send.
     ///
     /// `sender_extra_args` are appended to the srtla_send command line.
-    pub fn start(
-        test_name: &str,
-        num_links: usize,
-        sender_extra_args: &[&str],
-    ) -> Result<Self> {
+    pub fn start(test_name: &str, num_links: usize, sender_extra_args: &[&str]) -> Result<Self> {
         let topo = SrtlaTestTopology::new(test_name, num_links)?;
         let ip_list_path = topo.write_ip_list()?;
 
@@ -409,9 +400,7 @@ impl SrtlaTestStack {
         // Brief pause for listener setup, then check it's alive
         std::thread::sleep(Duration::from_millis(500));
         if let Some((code, stderr)) = srt_server.check_exit() {
-            bail!(
-                "srt-live-transmit exited immediately (code: {code:?})\nstderr:\n{stderr}"
-            );
+            bail!("srt-live-transmit exited immediately (code: {code:?})\nstderr:\n{stderr}");
         }
         wait_for_udp_listener(&topo.receiver_ns, SRT_SERVER_PORT, Duration::from_secs(5))
             .context("wait for srt-live-transmit")?;
@@ -423,9 +412,12 @@ impl SrtlaTestStack {
             &topo.receiver_ns,
             "srtla_rec",
             &[
-                "--srtla_port", &srtla_port_str,
-                "--srt_hostname", "127.0.0.1",
-                "--srt_port", &srt_port_str,
+                "--srtla_port",
+                &srtla_port_str,
+                "--srt_hostname",
+                "127.0.0.1",
+                "--srt_port",
+                &srt_port_str,
             ],
         )
         .context("start srtla_rec")?;
@@ -433,9 +425,7 @@ impl SrtlaTestStack {
         // Wait for srtla_rec to be listening
         std::thread::sleep(Duration::from_millis(500));
         if let Some((code, stderr)) = srtla_rec.check_exit() {
-            bail!(
-                "srtla_rec exited immediately (code: {code:?})\nstderr:\n{stderr}"
-            );
+            bail!("srtla_rec exited immediately (code: {code:?})\nstderr:\n{stderr}");
         }
         wait_for_udp_listener(&topo.receiver_ns, SRTLA_REC_PORT, Duration::from_secs(5))
             .context("wait for srtla_rec")?;
@@ -536,8 +526,7 @@ pub fn inject_udp_packets(ns: &Namespace, target_ip: &str, port: u16, count: usi
     let addr = format!("{target_ip}:{port}");
     let script = format!(
         "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); \
-         [s.sendto(b'\\x00'*188,('{target_ip}',{port})) for _ in range({count})]; \
-         s.close()"
+         [s.sendto(b'\\x00'*188,('{target_ip}',{port})) for _ in range({count})]; s.close()"
     );
     ns.exec_checked("python3", &["-c", &script])
         .with_context(|| format!("inject {count} UDP packets to {addr}"))?;
@@ -556,14 +545,10 @@ pub fn inject_udp_stream(
     let dur_secs = duration.as_secs_f64();
 
     let script = format!(
-        "import socket,time; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); \
-         d=b'\\x00'*188; start=time.time(); \
-         i=0\n\
-         while time.time()-start<{dur_secs}:\n\
-           s.sendto(d,('{target_ip}',{port}))\n\
-           i+=1\n\
-           time.sleep({interval_us}/1e6)\n\
-         s.close(); print(f'sent {{i}} packets')"
+        "import socket,time; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); d=b'\\x00'*188; \
+         start=time.time(); i=0\nwhile \
+         time.time()-start<{dur_secs}:\ns.sendto(d,('{target_ip}',{port}))\ni+=1\ntime.\
+         sleep({interval_us}/1e6)\ns.close(); print(f'sent {{i}} packets')"
     );
     ns.exec_checked("python3", &["-c", &script])
         .context("inject UDP stream")?;
@@ -601,9 +586,10 @@ fn find_srtla_send_binary() -> Result<PathBuf> {
     }
 
     // Fall back to PATH
-    check_binary("srtla_send")
-        .ok_or_else(|| anyhow::anyhow!(
+    check_binary("srtla_send").ok_or_else(|| {
+        anyhow::anyhow!(
             "srtla_send binary not found. Run `cargo build` first. Checked: {:?}",
             candidates
-        ))
+        )
+    })
 }

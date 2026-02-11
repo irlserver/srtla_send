@@ -17,8 +17,7 @@ fn test_asymmetric_delay() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("asym", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("asym", 2, &[]).expect("start stack");
 
     // Link 0: low delay, Link 1: high delay
     stack
@@ -65,8 +64,7 @@ fn test_loss_triggers_window_reduction() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("loss", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("loss", 2, &[]).expect("start stack");
 
     // Wait for clean registration first
     thread::sleep(Duration::from_secs(5));
@@ -103,8 +101,7 @@ fn test_tbf_bandwidth_limit() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("tbf", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("tbf", 2, &[]).expect("start stack");
 
     // Link 0: 1 Mbps, Link 1: 5 Mbps
     stack

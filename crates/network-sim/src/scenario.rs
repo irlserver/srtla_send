@@ -94,8 +94,7 @@ impl Scenario {
                             + rand_signed(&mut self.rng, link_cfg.rate_step_kbit as f64))
                         .clamp(link_cfg.min_rate_kbit as f64, link_cfg.max_rate_kbit as f64);
 
-                        let max_delay =
-                            (link_cfg.base_delay_ms + link_cfg.delay_jitter_ms) as f64;
+                        let max_delay = (link_cfg.base_delay_ms + link_cfg.delay_jitter_ms) as f64;
                         state.delay_ms = (state.delay_ms
                             + rand_signed(&mut self.rng, link_cfg.delay_step_ms as f64))
                         .clamp(1.0, max_delay);

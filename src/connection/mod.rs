@@ -23,7 +23,6 @@ pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
 pub use socket::{bind_from_ip, resolve_remote};
 use tokio::time::Instant;
-
 use tracing::debug;
 
 use crate::protocol::*;

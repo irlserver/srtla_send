@@ -109,9 +109,7 @@ impl ImpairmentConfig {
             args.extend(["corrupt".into(), format!("{corrupt}%")]);
         }
 
-        if include_rate
-            && let Some(rate) = self.rate_kbit
-        {
+        if include_rate && let Some(rate) = self.rate_kbit {
             args.extend(["rate".into(), format!("{rate}kbit")]);
         }
 

@@ -8,9 +8,7 @@ mod common;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use network_sim::{
-    ImpairmentConfig, LinkScenarioConfig, Scenario, ScenarioConfig, SrtlaTestStack,
-};
+use network_sim::{ImpairmentConfig, LinkScenarioConfig, Scenario, ScenarioConfig, SrtlaTestStack};
 
 #[test]
 fn test_random_walk_stability() {
@@ -19,8 +17,7 @@ fn test_random_walk_stability() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("rw", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("rw", 2, &[]).expect("start stack");
 
     // Wait for registration
     thread::sleep(Duration::from_secs(5));
@@ -68,8 +65,12 @@ fn test_random_walk_stability() {
                 // Use a raw command since we don't have the Namespace object
                 let _ = std::process::Command::new("sudo")
                     .args([
-                        "ip", "netns", "exec", &sender_ns_name,
-                        "python3", "-c",
+                        "ip",
+                        "netns",
+                        "exec",
+                        &sender_ns_name,
+                        "python3",
+                        "-c",
                         &format!(
                             "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); \
                              [s.sendto(b'\\x00'*188,('127.0.0.1',{port})) for _ in range(50)]; \
@@ -113,8 +114,7 @@ fn test_step_change_convergence() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("step", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("step", 2, &[]).expect("start stack");
 
     // Wait for registration
     thread::sleep(Duration::from_secs(5));

@@ -26,5 +26,9 @@ pub fn unique_ns_name(prefix: &str) -> String {
     let seq = NS_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id() % 0xffff;
     let name = format!("{prefix}_{pid:x}_{seq}");
-    if name.len() > 15 { name[..15].to_string() } else { name }
+    if name.len() > 15 {
+        name[..15].to_string()
+    } else {
+        name
+    }
 }

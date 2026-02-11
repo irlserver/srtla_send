@@ -17,8 +17,7 @@ fn test_two_link_registration() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("reg2", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("reg2", 2, &[]).expect("start stack");
 
     // Allow time for registration handshake on both links
     thread::sleep(Duration::from_secs(5));
@@ -44,8 +43,7 @@ fn test_data_forwarding() {
     }
     common::build_srtla_send();
 
-    let mut stack =
-        SrtlaTestStack::start("fwd", 2, &[]).expect("start stack");
+    let mut stack = SrtlaTestStack::start("fwd", 2, &[]).expect("start stack");
 
     // Wait for registration
     thread::sleep(Duration::from_secs(5));

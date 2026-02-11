@@ -1,8 +1,7 @@
 use tracing::{debug, info};
 
-use crate::utils::now_ms;
-
 use super::STARTUP_GRACE_MS;
+use crate::utils::now_ms;
 const BASE_RECONNECT_DELAY_MS: u64 = 5000;
 const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
 const MAX_BACKOFF_COUNT: u32 = 5;
