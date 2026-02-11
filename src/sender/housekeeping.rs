@@ -6,7 +6,7 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use super::uplink::{ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
-use crate::connection::SrtlaConnection;
+use crate::connection::{STARTUP_GRACE_MS, SrtlaConnection};
 use crate::registration::SrtlaRegistrationManager;
 use crate::utils::now_ms;
 
@@ -36,7 +36,7 @@ pub async fn handle_housekeeping(
         if !reg.is_probing() && was_probing {
             if let Some(idx) = reg.get_selected_connection_idx() {
                 if let Some(conn) = connections.get_mut(idx) {
-                    conn.reconnection.startup_grace_deadline_ms = current_ms + 1500;
+                    conn.reconnection.startup_grace_deadline_ms = current_ms + STARTUP_GRACE_MS;
                     debug!(
                         "{}: Reset grace period after being selected for initial registration",
                         conn.label
@@ -53,7 +53,11 @@ pub async fn handle_housekeeping(
             if conn.should_attempt_reconnect() {
                 let label = conn.label.clone();
                 conn.record_reconnect_attempt();
-                warn!("{} timed out; attempting full socket reconnection", label);
+                if conn.connection_established_ms() == 0 {
+                    debug!("{} initial registration timed out; retrying", label);
+                } else {
+                    warn!("{} timed out; attempting full socket reconnection", label);
+                }
                 // Perform full socket reconnection
                 if let Err(e) = conn.reconnect().await {
                     warn!("{} failed to reconnect: {}", label, e);

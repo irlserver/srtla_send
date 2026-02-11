@@ -27,7 +27,7 @@ use tokio::time::Instant;
 use crate::protocol::*;
 use crate::utils::now_ms;
 
-const STARTUP_GRACE_MS: u64 = 1_500;
+pub(crate) const STARTUP_GRACE_MS: u64 = 5_000;
 
 /// Interval in milliseconds between quality multiplier recalculations.
 /// Caching reduces expensive exp() calls from every packet to ~20 times per second.
