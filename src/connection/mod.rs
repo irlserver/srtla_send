@@ -168,10 +168,14 @@ impl SrtlaConnection {
         if !self.connected {
             return -1;
         }
-        // Mirror classic implementations: score is window divided by in-flight load.
-        // Use saturating_add to avoid overflow when the queue is extremely large and
-        // clamp the denominator to at least 1 to prevent division by zero.
-        let denom = self.in_flight_packets.saturating_add(1).max(1);
+        // Mirror C's select_conn(): score = window / (in_flight + 1).
+        // Include queued (not-yet-flushed) packets so the score drops immediately
+        // when a packet is queued, matching C's reg_pkt() which increments
+        // in_flight_pkts per packet before the next select_conn() call.
+        let total_in_flight = self
+            .in_flight_packets
+            .saturating_add(self.batch_sender.queued_count());
+        let denom = total_in_flight.saturating_add(1).max(1);
         self.window / denom
     }
 
