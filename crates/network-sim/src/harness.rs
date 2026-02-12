@@ -22,8 +22,8 @@ use crate::topology::Namespace;
 
 /// Check if a binary exists in PATH.
 pub fn check_binary(name: &str) -> Option<PathBuf> {
-    Command::new("which")
-        .arg(name)
+    Command::new("sh")
+        .args(["-c", &format!("command -v {name}")])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -510,10 +510,11 @@ impl SrtlaTestStack {
 
 impl Drop for SrtlaTestStack {
     fn drop(&mut self) {
-        // Ensure all processes are killed even if stop() wasn't called
-        self.srtla_send.take();
-        self.srtla_rec.take();
-        self.srt_server.take();
+        // Ensure all processes are killed even if stop() wasn't called.
+        // Dropping NamespaceProcess triggers its Drop impl which calls kill().
+        drop(self.srtla_send.take());
+        drop(self.srtla_rec.take());
+        drop(self.srt_server.take());
     }
 }
 
@@ -551,7 +552,7 @@ pub fn inject_udp_stream(
     let dur_secs = duration.as_secs_f64();
 
     let script = format!(
-        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\nd=b'\\x00'*188\\
+        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\nd=b'\\x00'*188\\\
          nstart=time.time(); i=0\nwhile time.time()-start<{dur_secs}:\n\x20 \
          s.sendto(d,('{target_ip}',{port}))\n\x20 i+=1\n\x20 \
          time.sleep({interval_us}/1e6)\ns.close()\nprint(f'sent {{i}} packets')"
