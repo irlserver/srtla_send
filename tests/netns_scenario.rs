@@ -96,7 +96,7 @@ fn test_random_walk_stability() {
         }
     }
 
-    let _ = inject_handle.join();
+    inject_handle.join().expect("injection thread panicked");
 
     let output = stack.stop();
     common::dump_output(&output);
