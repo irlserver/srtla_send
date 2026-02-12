@@ -152,7 +152,11 @@ impl RttTracker {
                 debug!(
                     "{}: RTT from keepalive: {}ms (smooth: {:.1}ms, fast: {:.1}ms, jitter: \
                      {:.1}ms)",
-                    label, rtt, self.smooth_rtt.value(), self.fast_rtt.value(), self.rtt_jitter_ms
+                    label,
+                    rtt,
+                    self.smooth_rtt.value(),
+                    self.fast_rtt.value(),
+                    self.rtt_jitter_ms
                 );
                 return Some(rtt);
             }
