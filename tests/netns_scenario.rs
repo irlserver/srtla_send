@@ -83,6 +83,7 @@ fn test_random_walk_stability() {
         })
     };
 
+    let mut impair_errors: Vec<String> = Vec::new();
     for frame in &frames {
         let elapsed = start.elapsed();
         if elapsed < frame.t {
@@ -90,7 +91,7 @@ fn test_random_walk_stability() {
         }
         for (i, cfg) in frame.configs.iter().enumerate() {
             if let Err(e) = stack.impair_link(i, cfg.clone()) {
-                eprintln!("impair_link({i}) at t={:?}: {e}", frame.t);
+                impair_errors.push(format!("impair_link({i}) at t={:?}: {e}", frame.t));
             }
         }
     }
@@ -99,6 +100,12 @@ fn test_random_walk_stability() {
 
     let output = stack.stop();
     common::dump_output(&output);
+
+    assert!(
+        impair_errors.is_empty(),
+        "impairment errors during scenario:\n{}",
+        impair_errors.join("\n")
+    );
 
     let all_stderr: String = output.srtla_send_stderr.join("\n");
     assert!(

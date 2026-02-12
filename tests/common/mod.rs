@@ -50,7 +50,7 @@ pub fn inject_packets(stack: &SrtlaTestStack, count: usize) -> anyhow::Result<()
 }
 
 /// Inject a steady UDP stream into srtla_send for `duration`.
-#[expect(dead_code)]
+#[allow(dead_code)]
 pub fn inject_stream(
     stack: &SrtlaTestStack,
     packets_per_sec: u32,
