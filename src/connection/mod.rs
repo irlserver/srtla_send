@@ -361,6 +361,7 @@ impl SrtlaConnection {
         self.in_flight_packets = 0;
         self.highest_acked_seq = i32::MIN;
         self.congestion.reset();
+        self.batch_sender.reset();
         self.quality_cache = CachedQuality::default();
     }
 
