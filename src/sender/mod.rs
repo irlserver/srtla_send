@@ -62,11 +62,7 @@ pub async fn run_sender_with_config(
         receiver_host,
         receiver_port,
         ips_file,
-        match config.mode() {
-            crate::mode::SchedulingMode::Classic => "classic",
-            crate::mode::SchedulingMode::Enhanced => "enhanced",
-            crate::mode::SchedulingMode::RttThreshold => "rtt-threshold",
-        }
+        config.mode()
     );
     let ips = read_ip_list(ips_file).await?;
     debug!(
