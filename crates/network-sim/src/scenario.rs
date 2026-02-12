@@ -199,6 +199,11 @@ mod tests {
                 let loss = config.loss_percent.unwrap();
                 assert!(loss >= 0.0, "negative loss");
                 assert!(loss <= link_cfg.max_loss_percent, "loss {loss} > max");
+
+                let delay = config.delay_ms.unwrap();
+                assert!(delay >= 1, "delay {delay} < 1");
+                let max_delay = link_cfg.base_delay_ms + link_cfg.delay_jitter_ms;
+                assert!(delay <= max_delay, "delay {delay} > max {max_delay}");
             }
         }
     }
