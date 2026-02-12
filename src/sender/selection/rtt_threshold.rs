@@ -125,8 +125,8 @@ pub fn select_connection(
     let time_since_last_switch = current_time_ms.saturating_sub(last_switch_time_ms);
     let in_cooldown = time_since_last_switch < MIN_SWITCH_INTERVAL_MS;
 
-    if let Some(last) = last_idx {
-        if best_idx != Some(last) && in_cooldown {
+    if let Some(last) = last_idx
+        && best_idx != Some(last) && in_cooldown {
             // Check if last connection is still valid
             let last_valid =
                 last < conns.len() && !conns[last].is_timed_out() && conns[last].connected;
@@ -134,7 +134,6 @@ pub fn select_connection(
                 return Some(last);
             }
         }
-    }
 
     best_idx
 }

@@ -73,12 +73,11 @@ pub async fn process_connection_events(
         let mut handled = false;
 
         // O(1) lookup in the ring buffer
-        if let Some(conn_id) = seq_tracker.get(*nak, current_time_ms) {
-            if let Some(conn) = connections.iter_mut().find(|c| c.conn_id == conn_id) {
+        if let Some(conn_id) = seq_tracker.get(*nak, current_time_ms)
+            && let Some(conn) = connections.iter_mut().find(|c| c.conn_id == conn_id) {
                 conn.handle_nak(*nak as i32);
                 handled = true;
             }
-        }
 
         if !handled {
             for conn in connections.iter_mut() {
@@ -200,13 +199,11 @@ fn select_pre_registration_connection(
     last_selected_idx: Option<usize>,
 ) -> Option<usize> {
     // Try to reuse the last selected connection if it's still valid
-    if let Some(idx) = last_selected_idx {
-        if let Some(conn) = connections.get(idx) {
-            if conn.connected && !conn.is_timed_out() {
+    if let Some(idx) = last_selected_idx
+        && let Some(conn) = connections.get(idx)
+            && conn.connected && !conn.is_timed_out() {
                 return Some(idx);
             }
-        }
-    }
 
     // Otherwise, find any non-timed-out connection
     connections
@@ -307,14 +304,13 @@ pub async fn forward_via_connection(
         if let Some(prev_idx) = *last_selected_idx {
             if prev_idx < connections.len() {
                 // Flush the previous connection's batch before switching
-                if connections[prev_idx].has_queued_packets() {
-                    if let Err(e) = connections[prev_idx].flush_batch().await {
+                if connections[prev_idx].has_queued_packets()
+                    && let Err(e) = connections[prev_idx].flush_batch().await {
                         warn!(
                             "{}: batch flush on switch failed: {}",
                             connections[prev_idx].label, e
                         );
                     }
-                }
                 debug!(
                     "Connection switch: {} → {} (seq: {:?})",
                     connections[prev_idx].label, connections[sel_idx].label, seq
@@ -372,10 +368,9 @@ pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
 
     // Now do the actual flush for connections that need it
     for conn in connections.iter_mut() {
-        if conn.needs_batch_flush() || conn.has_queued_packets() {
-            if let Err(e) = conn.flush_batch().await {
+        if (conn.needs_batch_flush() || conn.has_queued_packets())
+            && let Err(e) = conn.flush_batch().await {
                 warn!("{}: periodic batch flush failed: {}", conn.label, e);
             }
-        }
     }
 }

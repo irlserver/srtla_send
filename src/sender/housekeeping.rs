@@ -33,17 +33,15 @@ pub async fn handle_housekeeping(
         let was_probing = true;
         reg.check_probing_complete();
         // If probing just completed, reset grace period for the selected connection
-        if !reg.is_probing() && was_probing {
-            if let Some(idx) = reg.get_selected_connection_idx() {
-                if let Some(conn) = connections.get_mut(idx) {
+        if !reg.is_probing() && was_probing
+            && let Some(idx) = reg.get_selected_connection_idx()
+                && let Some(conn) = connections.get_mut(idx) {
                     conn.reconnection.startup_grace_deadline_ms = current_ms + STARTUP_GRACE_MS;
                     debug!(
                         "{}: Reset grace period after being selected for initial registration",
                         conn.label
                     );
                 }
-            }
-        }
     }
 
     // housekeeping: drive registration, send keepalives
