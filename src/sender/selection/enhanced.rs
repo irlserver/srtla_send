@@ -114,19 +114,20 @@ pub fn select_connection(
             // Apply score-based hysteresis if not in cooldown
             // If current connection is still valid and new best isn't significantly better
             if let Some(current) = current_score
-                && best_score < current * SWITCH_THRESHOLD {
-                    // Only log occasionally to reduce spam
-                    if current_time_ms % 1000 < 10 {
-                        debug!(
-                            "Score hysteresis: staying with current connection (current: {:.1}, \
-                             best: {:.1}, threshold: {:.1})",
-                            current,
-                            best_score,
-                            current * SWITCH_THRESHOLD
-                        );
-                    }
-                    return Some(last);
+                && best_score < current * SWITCH_THRESHOLD
+            {
+                // Only log occasionally to reduce spam
+                if current_time_ms % 1000 < 10 {
+                    debug!(
+                        "Score hysteresis: staying with current connection (current: {:.1}, best: \
+                         {:.1}, threshold: {:.1})",
+                        current,
+                        best_score,
+                        current * SWITCH_THRESHOLD
+                    );
                 }
+                return Some(last);
+            }
         }
     }
 
@@ -140,10 +141,11 @@ pub fn select_connection(
     if explore_now {
         // Exploration wants to try second-best, but only if different from current
         if let (Some(second), Some(last)) = (second_idx, last_idx)
-            && second != last {
-                debug!("Exploration: trying second-best connection");
-                return second_idx.or(best_idx);
-            }
+            && second != last
+        {
+            debug!("Exploration: trying second-best connection");
+            return second_idx.or(best_idx);
+        }
         // If second is same as current, just use best
         best_idx
     } else {
