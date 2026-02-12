@@ -20,15 +20,14 @@ pub fn check_privileges() -> bool {
 
 /// Generate a unique namespace/interface name safe for parallel tests.
 ///
-/// Combines prefix + PID + atomic counter, truncated to 15 chars
-/// (Linux netdev name limit).
+/// Combines prefix + PID + atomic counter. The uniqueness suffix
+/// (`_{pid:x}_{seq}`) is always preserved; the prefix is truncated
+/// if the total would exceed 15 chars (Linux netdev name limit).
 pub fn unique_ns_name(prefix: &str) -> String {
     let seq = NS_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id() % 0xffff;
-    let name = format!("{prefix}_{pid:x}_{seq}");
-    if name.len() > 15 {
-        name[..15].to_string()
-    } else {
-        name
-    }
+    let suffix = format!("_{pid:x}_{seq}");
+    let max_prefix = 15_usize.saturating_sub(suffix.len());
+    let truncated_prefix = &prefix[..prefix.len().min(max_prefix)];
+    format!("{truncated_prefix}{suffix}")
 }

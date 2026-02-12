@@ -168,11 +168,14 @@ impl NamespaceProcess {
     }
 
     /// Send SIGTERM, wait briefly, then SIGKILL if needed.
+    ///
+    /// Signals the entire process group (negative PID) so the inner process
+    /// receives the signal even when wrapped by `sudo ip netns exec`.
     pub fn kill(&mut self) {
-        // Try SIGTERM via sudo kill (since the child runs under sudo)
         if let Some(pid) = self.pid() {
+            // Signal the entire process group so the inner process receives it
             let _ = Command::new("sudo")
-                .args(["kill", "-TERM", &pid.to_string()])
+                .args(["kill", "-TERM", "--", &format!("-{pid}")])
                 .output();
         }
 
@@ -187,10 +190,10 @@ impl NamespaceProcess {
             }
         }
 
-        // Force kill
+        // Force kill the process group
         if let Some(pid) = self.pid() {
             let _ = Command::new("sudo")
-                .args(["kill", "-9", &pid.to_string()])
+                .args(["kill", "-9", "--", &format!("-{pid}")])
                 .output();
         }
         let _ = self.child.wait();
@@ -541,14 +544,23 @@ pub fn inject_udp_stream(
     packets_per_sec: u32,
     duration: Duration,
 ) -> Result<()> {
+    if packets_per_sec == 0 {
+        bail!("packets_per_sec must be > 0");
+    }
     let interval_us = 1_000_000 / packets_per_sec;
     let dur_secs = duration.as_secs_f64();
 
     let script = format!(
-        "import socket,time; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); d=b'\\x00'*188; \
-         start=time.time(); i=0\nwhile \
-         time.time()-start<{dur_secs}:\ns.sendto(d,('{target_ip}',{port}))\ni+=1\ntime.\
-         sleep({interval_us}/1e6)\ns.close(); print(f'sent {{i}} packets')"
+        "import socket,time\n\
+         s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n\
+         d=b'\\x00'*188\n\
+         start=time.time(); i=0\n\
+         while time.time()-start<{dur_secs}:\n\
+         \x20 s.sendto(d,('{target_ip}',{port}))\n\
+         \x20 i+=1\n\
+         \x20 time.sleep({interval_us}/1e6)\n\
+         s.close()\n\
+         print(f'sent {{i}} packets')"
     );
     ns.exec_checked("python3", &["-c", &script])
         .context("inject UDP stream")?;

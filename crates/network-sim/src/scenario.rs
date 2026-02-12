@@ -77,7 +77,13 @@ impl Scenario {
     }
 
     /// Generate all frames for the configured duration.
+    ///
+    /// Panics if `cfg.step` is zero.
     pub fn frames(&mut self) -> Vec<ScenarioFrame> {
+        assert!(
+            !self.cfg.step.is_zero(),
+            "ScenarioConfig.step must be non-zero"
+        );
         let total_steps =
             (self.cfg.duration.as_secs_f64() / self.cfg.step.as_secs_f64()).ceil() as u64;
 
