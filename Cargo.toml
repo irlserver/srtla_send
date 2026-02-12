@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/network-sim"]
+
 [package]
 resolver = "3"
 name = "srtla_send"
@@ -11,7 +14,7 @@ homepage = "https://github.com/irlserver/srtla_send"
 readme = "README.md"
 keywords = ["srt", "streaming", "bonding", "aggregation", "networking"]
 categories = ["network-programming", "multimedia"]
-rust-version = "1.87"
+rust-version = "1.88"
 
 [dependencies]
 anyhow = "1.0"
@@ -33,7 +36,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 socket2 = { version = "0.6", features = ["all"] }
 bytes = "1.11.0"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 smallvec = "=2.0.0-alpha.12"
 mimalloc = { version = "0.1", default-features = false, features = [
 	"secure",
@@ -58,6 +60,7 @@ path = "src/main.rs"
 tokio-test = "0.4"
 tempfile = "3"
 assert_matches = "1"
+network-sim = { path = "crates/network-sim" }
 
 [profile.dev]
 opt-level = 1

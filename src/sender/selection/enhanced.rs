@@ -3,7 +3,7 @@
 //! This module implements the enhanced SRTLA connection selection with:
 //! - Quality-aware scoring based on NAK history
 //! - RTT-aware bonuses for low-latency connections
-//! - Minimal hysteresis to prevent flip-flopping (2%)
+//! - Score hysteresis to prevent flip-flopping (10%)
 //! - Optional smart exploration of alternative connections
 //!
 //! The enhanced mode provides better connection quality awareness while
@@ -15,10 +15,11 @@ use super::MIN_SWITCH_INTERVAL_MS;
 use super::exploration::should_explore_now;
 use crate::connection::SrtlaConnection;
 
-/// Switching hysteresis: require new connection to be significantly better
-/// REDUCED to 2% to allow better load distribution across multiple connections
-/// Original 15% was preventing traffic from spreading across all uplinks
-const SWITCH_THRESHOLD: f64 = 1.02; // New connection must be 2% better
+/// Switching hysteresis: require new connection to be meaningfully better.
+/// At 10%, this prevents noise-driven flip-flopping between connections with
+/// similar scores while still allowing switches when one connection genuinely
+/// degrades (e.g., higher in_flight due to congestion or packet loss).
+const SWITCH_THRESHOLD: f64 = 1.10; // New connection must be 10% better
 
 /// Select best connection using enhanced algorithm with quality awareness
 ///
@@ -112,20 +113,20 @@ pub fn select_connection(
 
             // Apply score-based hysteresis if not in cooldown
             // If current connection is still valid and new best isn't significantly better
-            if let Some(current) = current_score {
-                if best_score < current * SWITCH_THRESHOLD {
-                    // Only log occasionally to reduce spam
-                    if current_time_ms % 1000 < 10 {
-                        debug!(
-                            "Score hysteresis: staying with current connection (current: {:.1}, \
-                             best: {:.1}, threshold: {:.1})",
-                            current,
-                            best_score,
-                            current * SWITCH_THRESHOLD
-                        );
-                    }
-                    return Some(last);
+            if let Some(current) = current_score
+                && best_score < current * SWITCH_THRESHOLD
+            {
+                // Only log occasionally to reduce spam
+                if current_time_ms % 1000 < 10 {
+                    debug!(
+                        "Score hysteresis: staying with current connection (current: {:.1}, best: \
+                         {:.1}, threshold: {:.1})",
+                        current,
+                        best_score,
+                        current * SWITCH_THRESHOLD
+                    );
                 }
+                return Some(last);
             }
         }
     }
@@ -139,11 +140,11 @@ pub fn select_connection(
 
     if explore_now {
         // Exploration wants to try second-best, but only if different from current
-        if let (Some(second), Some(last)) = (second_idx, last_idx) {
-            if second != last {
-                debug!("Exploration: trying second-best connection");
-                return second_idx.or(best_idx);
-            }
+        if let (Some(second), Some(last)) = (second_idx, last_idx)
+            && second != last
+        {
+            debug!("Exploration: trying second-best connection");
+            return second_idx.or(best_idx);
         }
         // If second is same as current, just use best
         best_idx

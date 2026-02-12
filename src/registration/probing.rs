@@ -80,15 +80,14 @@ impl SrtlaRegistrationManager {
             .probe_results
             .iter_mut()
             .find(|r| r.conn_idx == conn_idx)
+            && result.rtt_ms.is_none()
         {
-            if result.rtt_ms.is_none() {
-                let rtt = now.saturating_sub(result.probe_sent_ms);
-                result.rtt_ms = Some(rtt);
-                info!(
-                    "Probe response from connection #{} (RTT: {}ms)",
-                    conn_idx, rtt
-                );
-            }
+            let rtt = now.saturating_sub(result.probe_sent_ms);
+            result.rtt_ms = Some(rtt);
+            info!(
+                "Probe response from connection #{} (RTT: {}ms)",
+                conn_idx, rtt
+            );
         }
     }
 

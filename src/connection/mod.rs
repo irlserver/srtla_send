@@ -23,11 +23,12 @@ pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
 pub use socket::{bind_from_ip, resolve_remote};
 use tokio::time::Instant;
+use tracing::debug;
 
 use crate::protocol::*;
 use crate::utils::now_ms;
 
-const STARTUP_GRACE_MS: u64 = 1_500;
+pub(crate) const STARTUP_GRACE_MS: u64 = 5_000;
 
 /// Interval in milliseconds between quality multiplier recalculations.
 /// Caching reduces expensive exp() calls from every packet to ~20 times per second.
@@ -168,10 +169,14 @@ impl SrtlaConnection {
         if !self.connected {
             return -1;
         }
-        // Mirror classic implementations: score is window divided by in-flight load.
-        // Use saturating_add to avoid overflow when the queue is extremely large and
-        // clamp the denominator to at least 1 to prevent division by zero.
-        let denom = self.in_flight_packets.saturating_add(1).max(1);
+        // Mirror C's select_conn(): score = window / (in_flight + 1).
+        // Include queued (not-yet-flushed) packets so the score drops immediately
+        // when a packet is queued, matching C's reg_pkt() which increments
+        // in_flight_pkts per packet before the next select_conn() call.
+        let total_in_flight = self
+            .in_flight_packets
+            .saturating_add(self.batch_sender.queued_count());
+        let denom = total_in_flight.saturating_add(1).max(1);
         self.window / denom
     }
 
@@ -228,7 +233,7 @@ impl SrtlaConnection {
             conn_id: self.conn_id as u32,
             window: self.window,
             in_flight: self.in_flight_packets,
-            rtt_ms: self.rtt.smooth_rtt_ms as u32,
+            rtt_ms: self.rtt.smooth_rtt.value() as u32,
             nak_count: self.congestion.nak_count as u32,
             bitrate_bytes_per_sec: (self.bitrate.current_bitrate_bps / 8.0) as u32,
         };
@@ -267,11 +272,15 @@ impl SrtlaConnection {
     }
 
     pub fn get_smooth_rtt_ms(&self) -> f64 {
-        self.rtt.smooth_rtt_ms
+        self.rtt.smooth_rtt.value()
     }
 
     pub fn get_fast_rtt_ms(&self) -> f64 {
-        self.rtt.fast_rtt_ms
+        self.rtt.fast_rtt.value()
+    }
+
+    pub fn get_rtt_min_ms(&self) -> f64 {
+        self.rtt.rtt_min_ms
     }
 
     pub fn get_rtt_jitter_ms(&self) -> f64 {
@@ -329,6 +338,31 @@ impl SrtlaConnection {
         } else {
             false
         }
+    }
+
+    /// Clear state accumulated during pre-registration phase.
+    ///
+    /// Called when REG3 is received to prevent phantom in-flight counts
+    /// and early NAK penalties from persisting into the connected state.
+    /// Before REG3, `forward_via_connection()` may have queued and sent
+    /// data packets, creating `packet_log` entries that will never be
+    /// properly ACKed. Early NAKs from these packets would also penalize
+    /// the connection's quality score during startup.
+    pub(crate) fn clear_pre_registration_state(&mut self) {
+        if !self.packet_log.is_empty() || self.congestion.nak_count > 0 {
+            debug!(
+                "{}: clearing pre-registration state ({} in-flight, {} NAKs)",
+                self.label,
+                self.packet_log.len(),
+                self.congestion.nak_count
+            );
+        }
+        self.packet_log.clear();
+        self.in_flight_packets = 0;
+        self.highest_acked_seq = i32::MIN;
+        self.congestion.reset();
+        self.batch_sender.reset();
+        self.quality_cache = CachedQuality::default();
     }
 
     /// Reset core connection state (window, packet tracking, batch queue).

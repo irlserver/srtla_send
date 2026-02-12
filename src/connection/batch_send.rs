@@ -81,6 +81,14 @@ impl BatchSender {
         !self.queue.is_empty()
     }
 
+    /// Number of data packets currently queued (not yet flushed).
+    /// Used by `get_score()` so the selection algorithm sees the true load,
+    /// matching the C behaviour where `reg_pkt()` increments in_flight per packet.
+    #[inline]
+    pub fn queued_count(&self) -> i32 {
+        self.queue.len() as i32
+    }
+
     /// Flush all queued packets to the socket
     ///
     /// Returns a vector of (seq, queue_time) pairs for packets that need tracking.

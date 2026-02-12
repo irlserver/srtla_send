@@ -13,7 +13,7 @@
 //! - Exponential NAK decay (smooth ~8s recovery)
 //! - NAK burst detection and penalties
 //! - RTT-aware scoring (small bonus for low latency)
-//! - Minimal hysteresis (2%) to prevent flip-flopping
+//! - Hysteresis (10%) to prevent flip-flopping
 //! - Optional smart exploration
 //! - Time-based switch dampening to prevent rapid thrashing
 //!
@@ -42,9 +42,10 @@ use crate::connection::SrtlaConnection;
 use crate::mode::SchedulingMode;
 
 /// Minimum time in milliseconds between connection switches
-/// Prevents rapid thrashing when scores fluctuate due to bursty ACK/NAK patterns
-/// Works in combination with score-based hysteresis for stable connection selection
-pub const MIN_SWITCH_INTERVAL_MS: u64 = 500;
+/// Prevents rapid thrashing when scores fluctuate due to bursty ACK/NAK patterns.
+/// Aligned with FLUSH_INTERVAL_MS (15ms) so connections can rotate between batches
+/// while avoiding intra-batch flip-flopping.
+pub const MIN_SWITCH_INTERVAL_MS: u64 = 15;
 
 /// Select the best connection index based on mode and configuration
 ///
@@ -147,7 +148,7 @@ mod tests {
         connections[2].in_flight_packets = 10; // Lowest score
 
         let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 100; // Within cooldown
+        let current_time_ms = last_switch_time_ms + 5; // Within 15ms cooldown
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
@@ -171,7 +172,7 @@ mod tests {
         );
 
         // After cooldown expires, should allow switching
-        let current_time_after_cooldown = last_switch_time_ms + 600; // Past cooldown
+        let current_time_after_cooldown = last_switch_time_ms + 20; // Past 15ms cooldown
         let result_after = select_connection_idx(
             &mut connections,
             Some(0),

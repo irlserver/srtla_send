@@ -36,7 +36,7 @@ The sender supports three mutually exclusive scheduling modes:
 - **NAK Burst Detection**: Extra penalties for connections experiencing severe packet loss (≥5 NAKs)
 - **RTT-Aware Selection**: Small bonus (3% max) for lower-latency connections
 - **Quality Scoring**: Automatic preference for higher-quality connections
-- **Minimal Hysteresis**: 2% threshold prevents flip-flopping while maintaining natural load distribution
+- **Score Hysteresis**: 10% threshold prevents noise-driven flip-flopping while maintaining natural load distribution
 
 #### Classic Mode
 
@@ -346,7 +346,7 @@ With properly configured connections, you should observe:
 
 **If connections are flip-flopping**:
 
-1. This should be minimal with 2% hysteresis in enhanced mode
+1. This should be minimal with 10% hysteresis in enhanced mode
 2. Check if scores are truly identical (look for hysteresis messages in debug logs)
 3. Verify connections have stable quality (no intermittent NAKs)
 4. Consider using classic mode for perfectly equal connections
@@ -359,7 +359,7 @@ If needed, these can be adjusted in `src/sender/selection/`:
 
 **Enhanced Mode (`enhanced.rs`):**
 
-- `SWITCH_THRESHOLD`: 1.02 (2% hysteresis) - increase for more stability, decrease for faster response
+- `SWITCH_THRESHOLD`: 1.10 (10% hysteresis) - increase for more stability, decrease for faster response
 
 **Quality Scoring (`quality.rs`):**
 
