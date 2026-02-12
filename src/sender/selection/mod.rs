@@ -13,7 +13,7 @@
 //! - Exponential NAK decay (smooth ~8s recovery)
 //! - NAK burst detection and penalties
 //! - RTT-aware scoring (small bonus for low latency)
-//! - Minimal hysteresis (2%) to prevent flip-flopping
+//! - Hysteresis (10%) to prevent flip-flopping
 //! - Optional smart exploration
 //! - Time-based switch dampening to prevent rapid thrashing
 //!
