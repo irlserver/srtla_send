@@ -11,6 +11,7 @@
 /// Asymmetric mode uses different alphas for rising vs falling measurements,
 /// matching the existing pattern in `RttTracker` for fast-decrease/slow-increase
 /// or vice versa.
+#[derive(Debug, Clone)]
 pub struct Ewma {
     value: f64,
     alpha_up: f64,

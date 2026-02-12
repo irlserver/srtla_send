@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use tracing::debug;
 
+use crate::ewma::Ewma;
 use crate::protocol::extract_keepalive_timestamp;
 use crate::utils::now_ms;
 
@@ -16,11 +17,14 @@ pub struct RttTracker {
     pub last_keepalive_sent_ms: u64,
     pub waiting_for_keepalive_response: bool,
     pub last_rtt_measurement_ms: u64,
-    pub smooth_rtt_ms: f64,
-    pub fast_rtt_ms: f64,
+    /// Smooth RTT in ms: slow rise (alpha=0.04), fast fall (alpha=0.40).
+    pub smooth_rtt: Ewma,
+    /// Fast RTT in ms: catches spikes quickly (up=0.10, down=0.30).
+    pub fast_rtt: Ewma,
     pub rtt_jitter_ms: f64,
     pub prev_rtt_ms: f64,
-    pub rtt_avg_delta_ms: f64,
+    /// Smoothed RTT change rate in ms/sample (symmetric alpha=0.2).
+    pub rtt_avg_delta: Ewma,
     /// Dual-window minimum RTT baseline. Computed as min(fast_window_min, slow_window_min).
     pub rtt_min_ms: f64,
     pub estimated_rtt_ms: f64,
@@ -36,11 +40,11 @@ impl Default for RttTracker {
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,
             last_rtt_measurement_ms: 0,
-            smooth_rtt_ms: 0.0,
-            fast_rtt_ms: 0.0,
+            smooth_rtt: Ewma::asymmetric(0.04, 0.40),
+            fast_rtt: Ewma::asymmetric(0.10, 0.30),
             rtt_jitter_ms: 0.0,
             prev_rtt_ms: 0.0,
-            rtt_avg_delta_ms: 0.0,
+            rtt_avg_delta: Ewma::new(0.2),
             rtt_min_ms: 200.0,
             estimated_rtt_ms: 0.0,
             rtt_min_fast_window: VecDeque::with_capacity(FAST_WINDOW_SAMPLES),
@@ -54,11 +58,11 @@ impl RttTracker {
     /// Used during reconnection to start with a clean slate
     pub fn reset(&mut self) {
         self.last_rtt_measurement_ms = 0;
-        self.smooth_rtt_ms = 0.0;
-        self.fast_rtt_ms = 0.0;
+        self.smooth_rtt.reset();
+        self.fast_rtt.reset();
         self.rtt_jitter_ms = 0.0;
         self.prev_rtt_ms = 0.0;
-        self.rtt_avg_delta_ms = 0.0;
+        self.rtt_avg_delta.reset();
         self.rtt_min_ms = 200.0;
         self.estimated_rtt_ms = 0.0;
         self.last_keepalive_sent_ms = 0;
@@ -71,9 +75,9 @@ impl RttTracker {
         let current_rtt = rtt_ms as f64;
 
         // Initialize on first measurement
-        if self.smooth_rtt_ms == 0.0 {
-            self.smooth_rtt_ms = current_rtt;
-            self.fast_rtt_ms = current_rtt;
+        if !self.smooth_rtt.is_initialized() {
+            self.smooth_rtt.update(current_rtt);
+            self.fast_rtt.update(current_rtt);
             self.prev_rtt_ms = current_rtt;
             self.estimated_rtt_ms = current_rtt;
             self.rtt_min_ms = current_rtt;
@@ -83,23 +87,12 @@ impl RttTracker {
             return;
         }
 
-        // Asymmetric smoothing for smooth RTT: fast decrease, slow increase
-        if self.smooth_rtt_ms > current_rtt {
-            self.smooth_rtt_ms = self.smooth_rtt_ms * 0.60 + current_rtt * 0.40;
-        } else {
-            self.smooth_rtt_ms = self.smooth_rtt_ms * 0.96 + current_rtt * 0.04;
-        }
-
-        // Asymmetric smoothing for fast RTT: catches spikes quickly
-        if self.fast_rtt_ms > current_rtt {
-            self.fast_rtt_ms = self.fast_rtt_ms * 0.70 + current_rtt * 0.30;
-        } else {
-            self.fast_rtt_ms = self.fast_rtt_ms * 0.90 + current_rtt * 0.10;
-        }
+        self.smooth_rtt.update(current_rtt);
+        self.fast_rtt.update(current_rtt);
 
         // Track RTT change rate
         let delta_rtt = current_rtt - self.prev_rtt_ms;
-        self.rtt_avg_delta_ms = self.rtt_avg_delta_ms * 0.8 + delta_rtt * 0.2;
+        self.rtt_avg_delta.update(delta_rtt);
         self.prev_rtt_ms = current_rtt;
 
         // Dual-window minimum RTT baseline tracking.
@@ -133,12 +126,12 @@ impl RttTracker {
         }
 
         // Update legacy field for backwards compatibility
-        self.estimated_rtt_ms = self.smooth_rtt_ms;
+        self.estimated_rtt_ms = self.smooth_rtt.value();
         self.last_rtt_measurement_ms = now_ms();
     }
 
     pub fn is_stable(&self) -> bool {
-        self.rtt_avg_delta_ms.abs() < 1.0
+        self.rtt_avg_delta.value().abs() < 1.0
     }
 
     pub fn record_keepalive_sent(&mut self) {
@@ -159,7 +152,7 @@ impl RttTracker {
                 debug!(
                     "{}: RTT from keepalive: {}ms (smooth: {:.1}ms, fast: {:.1}ms, jitter: \
                      {:.1}ms)",
-                    label, rtt, self.smooth_rtt_ms, self.fast_rtt_ms, self.rtt_jitter_ms
+                    label, rtt, self.smooth_rtt.value(), self.fast_rtt.value(), self.rtt_jitter_ms
                 );
                 return Some(rtt);
             }

@@ -13,11 +13,11 @@ mod tests {
         let current_time = now_ms();
 
         // Connection 0: Low RTT (50ms)
-        connections[0].rtt.smooth_rtt_ms = 50.0;
+        connections[0].rtt.smooth_rtt.update(50.0);
         connections[0].in_flight_packets = 0;
 
         // Connection 1: High RTT (200ms)
-        connections[1].rtt.smooth_rtt_ms = 200.0;
+        connections[1].rtt.smooth_rtt.update(200.0);
         connections[1].in_flight_packets = 0;
 
         // With 30ms delta, only connection 0 (50ms) is "fast"
@@ -36,11 +36,11 @@ mod tests {
         let current_time = now_ms();
 
         // Connection 0: 50ms RTT, lower capacity
-        connections[0].rtt.smooth_rtt_ms = 50.0;
+        connections[0].rtt.smooth_rtt.update(50.0);
         connections[0].in_flight_packets = 5; // Lower score
 
         // Connection 1: 70ms RTT (within 30ms delta), higher capacity
-        connections[1].rtt.smooth_rtt_ms = 70.0;
+        connections[1].rtt.smooth_rtt.update(70.0);
         connections[1].in_flight_packets = 0; // Higher score
 
         // Both are "fast" (within 50 + 30 = 80ms), should pick higher capacity
@@ -62,12 +62,12 @@ mod tests {
         let current_time = now_ms();
 
         // Connection 0: Fast but saturated (window=0)
-        connections[0].rtt.smooth_rtt_ms = 50.0;
+        connections[0].rtt.smooth_rtt.update(50.0);
         connections[0].window = 0;
         connections[0].in_flight_packets = 10;
 
         // Connection 1: Slow but has capacity
-        connections[1].rtt.smooth_rtt_ms = 200.0;
+        connections[1].rtt.smooth_rtt.update(200.0);
         connections[1].window = 100;
         connections[1].in_flight_packets = 0;
 
@@ -89,7 +89,7 @@ mod tests {
         let current_time = now_ms();
 
         // Connection 0: Fast, equal capacity, but has recent NAKs
-        connections[0].rtt.smooth_rtt_ms = 50.0;
+        connections[0].rtt.smooth_rtt.update(50.0);
         connections[0].in_flight_packets = 0;
         connections[0].congestion.nak_count = 5;
         connections[0].congestion.last_nak_time_ms = current_time - 1000;
@@ -97,7 +97,7 @@ mod tests {
         connections[0].reconnection.connection_established_ms = current_time - 35000;
 
         // Connection 1: Fast, equal capacity, no NAKs
-        connections[1].rtt.smooth_rtt_ms = 60.0; // Still fast (within delta)
+        connections[1].rtt.smooth_rtt.update(60.0); // Still fast (within delta)
         connections[1].in_flight_packets = 0;
         connections[1].congestion.nak_count = 0;
         // Set connection established time to beyond startup grace
@@ -122,11 +122,11 @@ mod tests {
         let current_time = now_ms();
 
         // Connection 0: No RTT data (0.0)
-        connections[0].rtt.smooth_rtt_ms = 0.0;
+        connections[0].rtt.smooth_rtt.update(0.0);
         connections[0].in_flight_packets = 5;
 
         // Connection 1: Has RTT data
-        connections[1].rtt.smooth_rtt_ms = 100.0;
+        connections[1].rtt.smooth_rtt.update(100.0);
         connections[1].in_flight_packets = 0; // Higher capacity
 
         // Connection 0 should be treated as fast (no RTT data)
@@ -149,13 +149,13 @@ mod tests {
         let current_time = now_ms();
 
         // Various RTTs
-        connections[0].rtt.smooth_rtt_ms = 50.0;
+        connections[0].rtt.smooth_rtt.update(50.0);
         connections[0].in_flight_packets = 5;
 
-        connections[1].rtt.smooth_rtt_ms = 150.0;
+        connections[1].rtt.smooth_rtt.update(150.0);
         connections[1].in_flight_packets = 0; // Best capacity
 
-        connections[2].rtt.smooth_rtt_ms = 200.0;
+        connections[2].rtt.smooth_rtt.update(200.0);
         connections[2].in_flight_packets = 3;
 
         // With 200ms delta, all are fast (min 50 + 200 = 250ms threshold)
@@ -178,11 +178,11 @@ mod tests {
         let last_switch_time = current_time - 5; // 5ms ago (within 15ms cooldown)
 
         // Connection 0: Currently selected, lower capacity
-        connections[0].rtt.smooth_rtt_ms = 50.0;
+        connections[0].rtt.smooth_rtt.update(50.0);
         connections[0].in_flight_packets = 5;
 
         // Connection 1: Better link
-        connections[1].rtt.smooth_rtt_ms = 50.0;
+        connections[1].rtt.smooth_rtt.update(50.0);
         connections[1].in_flight_packets = 0;
 
         let selected = select_connection(
@@ -254,14 +254,14 @@ mod tests {
         let current_time = now_ms();
 
         // Connection 0: Fast, good capacity, but terrible NAK history
-        connections[0].rtt.smooth_rtt_ms = 50.0;
+        connections[0].rtt.smooth_rtt.update(50.0);
         connections[0].in_flight_packets = 0; // Best capacity
         connections[0].congestion.nak_count = 100;
         connections[0].congestion.last_nak_time_ms = current_time - 100;
         connections[0].reconnection.connection_established_ms = current_time - 35000;
 
         // Connection 1: Fast, slightly worse capacity, clean history
-        connections[1].rtt.smooth_rtt_ms = 50.0;
+        connections[1].rtt.smooth_rtt.update(50.0);
         connections[1].in_flight_packets = 1;
         connections[1].congestion.nak_count = 0;
         connections[1].reconnection.connection_established_ms = current_time - 35000;
