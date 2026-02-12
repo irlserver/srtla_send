@@ -552,8 +552,7 @@ pub fn inject_udp_stream(
     let dur_secs = duration.as_secs_f64();
 
     let script = format!(
-        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\nd=b'\\x00'*188\\\
-         nstart=time.time(); i=0\nwhile time.time()-start<{dur_secs}:\n\x20 \
+        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\nd=b'\\x00'*188\\nstart=time.time(); i=0\nwhile time.time()-start<{dur_secs}:\n\x20 \
          s.sendto(d,('{target_ip}',{port}))\n\x20 i+=1\n\x20 \
          time.sleep({interval_us}/1e6)\ns.close()\nprint(f'sent {{i}} packets')"
     );
