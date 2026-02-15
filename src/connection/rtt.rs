@@ -10,6 +10,8 @@ use crate::utils::now_ms;
 const FAST_WINDOW_SAMPLES: usize = 10;
 /// Number of samples in the slow sliding window (~30s at 300ms keepalive interval).
 const SLOW_WINDOW_SAMPLES: usize = 100;
+/// Number of samples in the min-RTT sample filter.
+const RTT_SAMPLE_FILTER_SIZE: usize = 15;
 
 /// RTT measurement and tracking
 #[derive(Debug, Clone)]
@@ -32,6 +34,8 @@ pub struct RttTracker {
     rtt_min_fast_window: VecDeque<f64>,
     /// Slow sliding window for minimum RTT tracking (~30s).
     rtt_min_slow_window: VecDeque<f64>,
+    /// 15-sample min filter applied before feeding dual-window baseline.
+    rtt_sample_filter: VecDeque<f64>,
 }
 
 impl Default for RttTracker {
@@ -49,6 +53,7 @@ impl Default for RttTracker {
             estimated_rtt_ms: 0.0,
             rtt_min_fast_window: VecDeque::with_capacity(FAST_WINDOW_SAMPLES),
             rtt_min_slow_window: VecDeque::with_capacity(SLOW_WINDOW_SAMPLES),
+            rtt_sample_filter: VecDeque::with_capacity(RTT_SAMPLE_FILTER_SIZE),
         }
     }
 }
@@ -69,10 +74,23 @@ impl RttTracker {
         self.waiting_for_keepalive_response = false;
         self.rtt_min_fast_window.clear();
         self.rtt_min_slow_window.clear();
+        self.rtt_sample_filter.clear();
     }
 
     pub fn update_estimate(&mut self, rtt_ms: u64) {
         let current_rtt = rtt_ms as f64;
+
+        // Min-RTT sample filter: smooth jitter before feeding baseline tracker.
+        // EWMA smoothing still uses raw current_rtt (asymmetric alpha handles spikes).
+        self.rtt_sample_filter.push_back(current_rtt);
+        while self.rtt_sample_filter.len() > RTT_SAMPLE_FILTER_SIZE {
+            self.rtt_sample_filter.pop_front();
+        }
+        let filtered_rtt = self
+            .rtt_sample_filter
+            .iter()
+            .copied()
+            .fold(f64::MAX, f64::min);
 
         // Initialize on first measurement
         if !self.smooth_rtt.is_initialized() {
@@ -80,13 +98,14 @@ impl RttTracker {
             self.fast_rtt.update(current_rtt);
             self.prev_rtt_ms = current_rtt;
             self.estimated_rtt_ms = current_rtt;
-            self.rtt_min_ms = current_rtt;
-            self.rtt_min_fast_window.push_back(current_rtt);
-            self.rtt_min_slow_window.push_back(current_rtt);
+            self.rtt_min_ms = filtered_rtt;
+            self.rtt_min_fast_window.push_back(filtered_rtt);
+            self.rtt_min_slow_window.push_back(filtered_rtt);
             self.last_rtt_measurement_ms = now_ms();
             return;
         }
 
+        // EWMA uses raw RTT (asymmetric alpha already handles spikes)
         self.smooth_rtt.update(current_rtt);
         self.fast_rtt.update(current_rtt);
 
@@ -95,15 +114,15 @@ impl RttTracker {
         self.rtt_avg_delta.update(delta_rtt);
         self.prev_rtt_ms = current_rtt;
 
-        // Dual-window minimum RTT baseline tracking.
+        // Dual-window minimum RTT baseline tracking (fed with filtered RTT).
         // Fast window (~3s) adapts quickly to cellular handovers.
         // Slow window (~30s) retains the true floor during stable periods.
         // Baseline = min(fast_min, slow_min).
-        self.rtt_min_fast_window.push_back(current_rtt);
+        self.rtt_min_fast_window.push_back(filtered_rtt);
         while self.rtt_min_fast_window.len() > FAST_WINDOW_SAMPLES {
             self.rtt_min_fast_window.pop_front();
         }
-        self.rtt_min_slow_window.push_back(current_rtt);
+        self.rtt_min_slow_window.push_back(filtered_rtt);
         while self.rtt_min_slow_window.len() > SLOW_WINDOW_SAMPLES {
             self.rtt_min_slow_window.pop_front();
         }
@@ -199,27 +218,16 @@ mod tests {
             tracker.rtt_min_ms
         );
 
-        // Simulate cellular handover: RTT jumps to 120ms
-        for _ in 0..FAST_WINDOW_SAMPLES {
+        // Simulate cellular handover: RTT jumps to 120ms.
+        // Need enough samples to flush the 15-sample min filter AND the slow window.
+        // The min filter holds old 50ms values for up to RTT_SAMPLE_FILTER_SIZE samples,
+        // so the slow window keeps getting 50ms as filtered_rtt until the filter flushes.
+        let flush_count = RTT_SAMPLE_FILTER_SIZE + SLOW_WINDOW_SAMPLES;
+        for _ in 0..flush_count {
             tracker.update_estimate(120);
         }
 
-        // After fast_window_samples of 120ms, the fast window no longer
-        // contains any 50ms samples — baseline should have adapted upward.
-        // The slow window still has 50ms samples, so baseline = slow_min = 50.
-        // But the fast window min is now 120. baseline = min(120, 50) = 50.
-        // After slow window also fills:
-        // We need to fill slow window to fully adapt. But within fast window
-        // the baseline should at least reflect that the fast min changed.
-        // The key insight: baseline adapts within seconds because the fast
-        // window forgets old samples quickly.
-
-        // Feed enough samples to also push 50ms out of slow window
-        for _ in 0..(SLOW_WINDOW_SAMPLES) {
-            tracker.update_estimate(120);
-        }
-
-        // Now both windows only contain 120ms samples
+        // Now the min filter, fast window, and slow window all contain only 120ms
         assert!(
             (tracker.rtt_min_ms - 120.0).abs() < 1.0,
             "baseline should have adapted to ~120ms after handover, got {}",
@@ -278,25 +286,27 @@ mod tests {
         // One very low sample
         tracker.update_estimate(20);
 
-        // Fill fast window with higher values
+        // Fill fast window with higher values. The min filter (15 samples)
+        // will still hold the 20ms value, so the slow window keeps seeing it.
         for _ in 0..FAST_WINDOW_SAMPLES {
             tracker.update_estimate(100);
         }
 
-        // Fast window no longer has 20ms, but slow window does
-        // So baseline = min(fast_min=100, slow_min=20) = 20
+        // Min filter still has 20ms, so slow window got fed 20ms as filtered_rtt.
+        // baseline = min(fast_min, slow_min) still includes 20 from slow window.
         assert!(
             (tracker.rtt_min_ms - 20.0).abs() < 1.0,
             "slow window should still hold 20ms minimum, got {}",
             tracker.rtt_min_ms
         );
 
-        // Fill slow window too
-        for _ in 0..SLOW_WINDOW_SAMPLES {
+        // Fill slow window AND flush the min filter with enough 100ms samples
+        let flush_count = RTT_SAMPLE_FILTER_SIZE + SLOW_WINDOW_SAMPLES;
+        for _ in 0..flush_count {
             tracker.update_estimate(100);
         }
 
-        // Now both windows only have 100ms
+        // Now min filter, fast window, and slow window all contain only 100ms
         assert!(
             (tracker.rtt_min_ms - 100.0).abs() < 1.0,
             "after both windows filled, baseline should be 100ms, got {}",
