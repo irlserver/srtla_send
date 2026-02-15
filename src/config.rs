@@ -172,6 +172,7 @@ pub fn spawn_config_listener(
 }
 
 /// Response from apply_cmd that can be sent back to the client.
+#[allow(dead_code)] // Json variant's inner value is read in #[cfg(unix)] code
 pub enum CmdResponse {
     /// No response needed (command logged via tracing)
     None,
