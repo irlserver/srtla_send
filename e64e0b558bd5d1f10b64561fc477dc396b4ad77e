@@ -1,0 +1,33 @@
+src/sender/selection/sbd.rs
+  7ca2286fc6b227db 236
+src/sender/keyframe.rs
+  7ca2286fc6b227db 75,82
+src/sender/selection/blest.rs
+  7ca2286fc6b227db 37
+src/ewma.rs
+  7ca2286fc6b227db 65,74
+src/sender/selection/iods.rs
+  7ca2286fc6b227db 47
+src/sender/selection/edpf.rs
+  7ca2286fc6b227db 81,101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "e64e0b558bd5d1f10b64561fc477dc396b4ad77e",
+  "prompts": {
+    "7ca2286fc6b227db": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "951ca67d-827d-449f-be9b-7355c449cb0e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 522,
+      "total_deletions": 522,
+      "accepted_lines": 92,
+      "overriden_lines": 0
+    }
+  }
+}
