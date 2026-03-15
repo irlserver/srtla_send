@@ -30,9 +30,17 @@ fn predicted_arrival(conn: &SrtlaConnection, pkt_size: usize) -> Option<f64> {
     }
 
     let in_flight_bytes = (conn.in_flight_packets.max(0) as usize * SRT_PKT_SIZE) as f64;
-    let base_rtt_s = conn.rtt.rtt_min_ms / 1000.0;
 
-    Some((in_flight_bytes + pkt_size as f64) / effective_capacity + base_rtt_s)
+    // Use Kalman-smoothed RTT as propagation delay estimate.
+    // Falls back to rtt_min_ms if Kalman hasn't initialized yet.
+    let smooth_rtt = conn.rtt.kalman_rtt.value();
+    let propagation_s = if smooth_rtt > 0.0 {
+        smooth_rtt / 1000.0
+    } else {
+        conn.rtt.rtt_min_ms / 1000.0
+    };
+
+    Some((in_flight_bytes + pkt_size as f64) / effective_capacity + propagation_s)
 }
 
 /// Select the connection with lowest predicted arrival time from all connections.
