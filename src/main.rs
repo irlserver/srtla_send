@@ -10,6 +10,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod config;
 mod connection;
 mod ewma;
+mod kalman;
 mod mode;
 mod protocol;
 mod registration;

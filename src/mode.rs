@@ -22,6 +22,11 @@ pub enum SchedulingMode {
     /// Selects from "fast" links (within rtt_delta of minimum).
     /// Supports quality scoring within the fast group.
     RttThreshold,
+
+    /// EDPF mode: Earliest Delivery Path First with BLEST + IoDS pipeline.
+    /// Selects link with lowest predicted arrival time, filtered by
+    /// head-of-line blocking guard and in-order delivery constraint.
+    Edpf,
 }
 
 impl SchedulingMode {
@@ -31,6 +36,7 @@ impl SchedulingMode {
             SchedulingMode::Classic => 0,
             SchedulingMode::Enhanced => 1,
             SchedulingMode::RttThreshold => 2,
+            SchedulingMode::Edpf => 3,
         }
     }
 
@@ -40,6 +46,7 @@ impl SchedulingMode {
             0 => SchedulingMode::Classic,
             1 => SchedulingMode::Enhanced,
             2 => SchedulingMode::RttThreshold,
+            3 => SchedulingMode::Edpf,
             _ => SchedulingMode::Enhanced,
         }
     }
@@ -59,6 +66,12 @@ impl SchedulingMode {
     pub const fn is_rtt_threshold(self) -> bool {
         matches!(self, SchedulingMode::RttThreshold)
     }
+
+    /// Check if this mode is EDPF.
+    #[allow(dead_code)]
+    pub const fn is_edpf(self) -> bool {
+        matches!(self, SchedulingMode::Edpf)
+    }
 }
 
 impl fmt::Display for SchedulingMode {
@@ -67,6 +80,7 @@ impl fmt::Display for SchedulingMode {
             SchedulingMode::Classic => write!(f, "classic"),
             SchedulingMode::Enhanced => write!(f, "enhanced"),
             SchedulingMode::RttThreshold => write!(f, "rtt-threshold"),
+            SchedulingMode::Edpf => write!(f, "edpf"),
         }
     }
 }
@@ -79,8 +93,9 @@ impl std::str::FromStr for SchedulingMode {
             "classic" => Ok(SchedulingMode::Classic),
             "enhanced" => Ok(SchedulingMode::Enhanced),
             "rtt-threshold" => Ok(SchedulingMode::RttThreshold),
+            "edpf" => Ok(SchedulingMode::Edpf),
             _ => Err(format!(
-                "invalid mode '{}': use classic, enhanced, or rtt-threshold",
+                "invalid mode '{}': use classic, enhanced, rtt-threshold, or edpf",
                 s
             )),
         }
@@ -93,6 +108,7 @@ impl clap::ValueEnum for SchedulingMode {
             SchedulingMode::Classic,
             SchedulingMode::Enhanced,
             SchedulingMode::RttThreshold,
+            SchedulingMode::Edpf,
         ]
     }
 
@@ -103,6 +119,7 @@ impl clap::ValueEnum for SchedulingMode {
             SchedulingMode::RttThreshold => {
                 Some(clap::builder::PossibleValue::new("rtt-threshold"))
             }
+            SchedulingMode::Edpf => Some(clap::builder::PossibleValue::new("edpf")),
         }
     }
 }
@@ -122,6 +139,7 @@ mod tests {
             SchedulingMode::Classic,
             SchedulingMode::Enhanced,
             SchedulingMode::RttThreshold,
+            SchedulingMode::Edpf,
         ] {
             assert_eq!(SchedulingMode::from_u8(mode.as_u8()), mode);
         }
@@ -141,6 +159,10 @@ mod tests {
             "rtt-threshold".parse::<SchedulingMode>().unwrap(),
             SchedulingMode::RttThreshold
         );
+        assert_eq!(
+            "edpf".parse::<SchedulingMode>().unwrap(),
+            SchedulingMode::Edpf
+        );
         assert!("invalid".parse::<SchedulingMode>().is_err());
     }
 
@@ -149,6 +171,7 @@ mod tests {
         assert_eq!(format!("{}", SchedulingMode::Classic), "classic");
         assert_eq!(format!("{}", SchedulingMode::Enhanced), "enhanced");
         assert_eq!(format!("{}", SchedulingMode::RttThreshold), "rtt-threshold");
+        assert_eq!(format!("{}", SchedulingMode::Edpf), "edpf");
     }
 
     #[test]
@@ -164,5 +187,8 @@ mod tests {
         assert!(!SchedulingMode::RttThreshold.is_classic());
         assert!(!SchedulingMode::RttThreshold.is_enhanced());
         assert!(SchedulingMode::RttThreshold.is_rtt_threshold());
+
+        assert!(SchedulingMode::Edpf.is_edpf());
+        assert!(!SchedulingMode::Edpf.is_classic());
     }
 }

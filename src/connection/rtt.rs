@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use tracing::debug;
 
 use crate::ewma::Ewma;
+use crate::kalman::{KalmanConfig, KalmanFilter};
 use crate::protocol::extract_keepalive_timestamp;
 use crate::utils::now_ms;
 
@@ -36,6 +37,8 @@ pub struct RttTracker {
     rtt_min_slow_window: VecDeque<f64>,
     /// 15-sample min filter applied before feeding dual-window baseline.
     rtt_sample_filter: VecDeque<f64>,
+    /// Kalman filter for RTT smoothing with trend detection.
+    pub kalman_rtt: KalmanFilter,
 }
 
 impl Default for RttTracker {
@@ -54,6 +57,7 @@ impl Default for RttTracker {
             rtt_min_fast_window: VecDeque::with_capacity(FAST_WINDOW_SAMPLES),
             rtt_min_slow_window: VecDeque::with_capacity(SLOW_WINDOW_SAMPLES),
             rtt_sample_filter: VecDeque::with_capacity(RTT_SAMPLE_FILTER_SIZE),
+            kalman_rtt: KalmanFilter::new(KalmanConfig::for_rtt()),
         }
     }
 }
@@ -75,6 +79,7 @@ impl RttTracker {
         self.rtt_min_fast_window.clear();
         self.rtt_min_slow_window.clear();
         self.rtt_sample_filter.clear();
+        self.kalman_rtt.reset();
     }
 
     pub fn update_estimate(&mut self, rtt_ms: u64) {
@@ -108,6 +113,9 @@ impl RttTracker {
         // EWMA uses raw RTT (asymmetric alpha already handles spikes)
         self.smooth_rtt.update(current_rtt);
         self.fast_rtt.update(current_rtt);
+
+        // Kalman filter for trend-aware smoothing
+        self.kalman_rtt.update(current_rtt);
 
         // Track RTT change rate
         let delta_rtt = current_rtt - self.prev_rtt_ms;

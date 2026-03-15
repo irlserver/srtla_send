@@ -24,9 +24,12 @@
 //! - Quality scoring applied within fast link group
 //! - Falls back to slow links only when fast links saturated
 
+pub mod blest;
 mod classic;
+pub mod edpf;
 mod enhanced;
 mod exploration;
+pub mod iods;
 mod quality;
 
 #[cfg(feature = "test-internals")]
@@ -93,7 +96,63 @@ pub fn select_connection_idx(
                 config.effective_quality_enabled(),
             )
         }
+        SchedulingMode::Edpf => {
+            // EDPF mode: BLEST → IoDS → EDPF pipeline
+            edpf_pipeline_select(conns, config)
+        }
     }
+}
+
+/// EDPF pipeline: BLEST filters → IoDS ordering → EDPF argmin.
+///
+/// Matches strata's bonding.rs:30-35:
+/// 1. BLEST filters out HoL-blocking links
+/// 2. IoDS filters for monotonic ordering
+/// 3. EDPF selects argmin(predicted_arrival) from remaining
+fn edpf_pipeline_select(
+    conns: &[SrtlaConnection],
+    _config: &ConfigSnapshot,
+) -> Option<usize> {
+    const SRT_PKT_SIZE: usize = 1316;
+
+    // Use thread-local BLEST and IoDS state
+    thread_local! {
+        static BLEST: std::cell::RefCell<blest::BlestFilter> =
+            std::cell::RefCell::new(blest::BlestFilter::new());
+        static IODS: std::cell::RefCell<iods::IodsFilter> =
+            std::cell::RefCell::new(iods::IodsFilter::new());
+    }
+
+    BLEST.with(|blest_cell| {
+        IODS.with(|iods_cell| {
+            let mut blest_filter = blest_cell.borrow_mut();
+            let mut iods_filter = iods_cell.borrow_mut();
+
+            blest_filter.tick();
+
+            // 1. BLEST filters out HoL-blocking links
+            let candidates = blest_filter.filter(conns);
+
+            // 2. IoDS filters for monotonic ordering
+            let ordered = iods_filter.filter_valid(&candidates, |idx| {
+                edpf::arrival_time(&conns[idx], SRT_PKT_SIZE)
+            });
+
+            // 3. EDPF selects argmin from remaining, with fallbacks
+            let selected = edpf::select_from_indices(conns, &ordered, SRT_PKT_SIZE)
+                .or_else(|| edpf::select_from_indices(conns, &candidates, SRT_PKT_SIZE))
+                .or_else(|| edpf::select_from(conns, SRT_PKT_SIZE));
+
+            // Record the scheduled arrival for IoDS
+            if let Some(idx) = selected {
+                if let Some(arrival) = edpf::arrival_time(&conns[idx], SRT_PKT_SIZE) {
+                    iods_filter.record_scheduled(arrival);
+                }
+            }
+
+            selected
+        })
+    })
 }
 
 #[cfg(test)]

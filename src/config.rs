@@ -203,7 +203,7 @@ pub fn apply_cmd(config: &DynamicConfig, cmd: &str, stats: Option<&SharedStats>)
     match parts[0] {
         "mode" => {
             if parts.len() != 2 {
-                warn!("usage: mode classic|enhanced|rtt-threshold");
+                warn!("usage: mode classic|enhanced|rtt-threshold|edpf");
                 return CmdResponse::None;
             }
             match parts[1] {
@@ -219,9 +219,13 @@ pub fn apply_cmd(config: &DynamicConfig, cmd: &str, stats: Option<&SharedStats>)
                     config.set_mode(SchedulingMode::RttThreshold);
                     info!("mode: rtt-threshold");
                 }
+                "edpf" => {
+                    config.set_mode(SchedulingMode::Edpf);
+                    info!("mode: edpf");
+                }
                 other => {
                     warn!(
-                        "unknown mode '{}': use classic, enhanced, or rtt-threshold",
+                        "unknown mode '{}': use classic, enhanced, rtt-threshold, or edpf",
                         other
                     );
                 }

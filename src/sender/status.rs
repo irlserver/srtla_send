@@ -88,6 +88,9 @@ pub(crate) fn log_connection_status(
                 snap.rtt_delta_ms
             );
         }
+        crate::mode::SchedulingMode::Edpf => {
+            info!("    EDPF pipeline: BLEST + IoDS + EDPF");
+        }
     }
 
     // Show packet log utilization
