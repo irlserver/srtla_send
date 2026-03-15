@@ -1,0 +1,27 @@
+src/sender/mod.rs
+  7ca2286fc6b227db 3,139-140,182
+src/sender/keyframe.rs
+  7ca2286fc6b227db 1-12,14-15,17-18,20-30,32-40,42-50,52-56,58-69,74-79,81-86,88-92,94-98,103-112,117-119,121-130,132-143,145-156,158-164,166-169,171-173,175-180,182-184,186-192,194-210,212-214,219-221,226-228,233-236,241-246
+src/sender/packet_handler.rs
+  7ca2286fc6b227db 7,9,224-228,240,271-272,279-297
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "b419ef6243204b33db196654bba6e91cd7fa75ea",
+  "prompts": {
+    "7ca2286fc6b227db": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "951ca67d-827d-449f-be9b-7355c449cb0e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 1583,
+      "total_deletions": 911,
+      "accepted_lines": 771,
+      "overriden_lines": 61
+    }
+  }
+}
