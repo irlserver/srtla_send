@@ -16,6 +16,7 @@ mod protocol;
 mod registration;
 mod sender;
 mod stats;
+mod toml_config;
 mod utils;
 
 // Test helpers for binary tests
@@ -57,6 +58,10 @@ struct Cli {
     /// /tmp/srtla.sock)
     #[arg(long = "control-socket")]
     control_socket: Option<String>,
+
+    /// Path to TOML config file (reloaded on SIGHUP)
+    #[arg(long = "config")]
+    config_file: Option<String>,
 
     /// Scheduling mode: classic, enhanced (default), rtt-threshold
     #[arg(long = "mode", value_enum, default_value = "enhanced")]
@@ -101,6 +106,12 @@ async fn main() -> Result<()> {
     let receiver_host = args.receiver_host.as_deref().expect("required");
     let receiver_port = args.receiver_port.expect("required");
     let ips_file = args.ips_file.as_deref().expect("required");
+
+    // Load TOML config (if specified), then apply CLI overrides
+    if let Some(ref path) = args.config_file {
+        let toml_cfg = toml_config::TomlConfig::load_or_default(std::path::Path::new(path));
+        tracing::debug!("TOML config loaded: {:?}", toml_cfg);
+    }
 
     let config = config::DynamicConfig::from_cli(
         args.mode,
