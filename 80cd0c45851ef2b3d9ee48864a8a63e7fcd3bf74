@@ -1,0 +1,23 @@
+src/sender/selection/edpf.rs
+  270623ab9fb0bb80 34-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "80cd0c45851ef2b3d9ee48864a8a63e7fcd3bf74",
+  "prompts": {
+    "270623ab9fb0bb80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "778b984f-d859-47ba-b5ae-ecc886a4950f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 163,
+      "total_deletions": 155,
+      "accepted_lines": 57,
+      "overriden_lines": 0
+    }
+  }
+}
