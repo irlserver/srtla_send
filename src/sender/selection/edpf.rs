@@ -8,6 +8,14 @@ use crate::connection::SrtlaConnection;
 /// SRT payload packet size in bytes.
 const SRT_PKT_SIZE: usize = 1316;
 
+/// Velocity penalty scaling factor.
+///
+/// When the Kalman velocity is positive (RTT rising), we add a penalty term
+/// proportional to the velocity. This penalises links with building congestion
+/// before loss manifests, giving EDPF a proactive avoidance signal.
+/// The factor converts ms/sample velocity into seconds of penalty.
+const VELOCITY_PENALTY_FACTOR: f64 = 0.005;
+
 /// Compute predicted arrival time for a connection.
 ///
 /// Returns `None` if the connection lacks valid capacity or RTT data.
@@ -40,7 +48,20 @@ fn predicted_arrival(conn: &SrtlaConnection, pkt_size: usize) -> Option<f64> {
         conn.rtt.rtt_min_ms / 1000.0
     };
 
-    Some((in_flight_bytes + pkt_size as f64) / effective_capacity + propagation_s)
+    // Velocity penalty: penalise links with rising RTT (positive velocity)
+    // to proactively avoid congestion before it manifests as loss.
+    let velocity = conn.rtt.kalman_rtt.velocity();
+    let velocity_penalty_s = if velocity > 0.0 {
+        velocity * VELOCITY_PENALTY_FACTOR
+    } else {
+        0.0
+    };
+
+    Some(
+        (in_flight_bytes + pkt_size as f64) / effective_capacity
+            + propagation_s
+            + velocity_penalty_s,
+    )
 }
 
 /// Select the connection with lowest predicted arrival time from all connections.
@@ -49,11 +70,11 @@ pub fn select_from(conns: &[SrtlaConnection], pkt_size: usize) -> Option<usize> 
     let mut best_arrival = f64::MAX;
 
     for (i, conn) in conns.iter().enumerate() {
-        if let Some(arrival) = predicted_arrival(conn, pkt_size) {
-            if arrival < best_arrival {
-                best_arrival = arrival;
-                best_idx = Some(i);
-            }
+        if let Some(arrival) = predicted_arrival(conn, pkt_size)
+            && arrival < best_arrival
+        {
+            best_arrival = arrival;
+            best_idx = Some(i);
         }
     }
 
@@ -72,13 +93,12 @@ pub fn select_from_indices(
     let mut best_arrival = f64::MAX;
 
     for &i in indices {
-        if i < conns.len() {
-            if let Some(arrival) = predicted_arrival(&conns[i], pkt_size) {
-                if arrival < best_arrival {
-                    best_arrival = arrival;
-                    best_idx = Some(i);
-                }
-            }
+        if i < conns.len()
+            && let Some(arrival) = predicted_arrival(&conns[i], pkt_size)
+            && arrival < best_arrival
+        {
+            best_arrival = arrival;
+            best_idx = Some(i);
         }
     }
 
@@ -114,7 +134,11 @@ mod tests {
         conns[2].rtt.rtt_min_ms = 100.0;
 
         let result = select_from(&conns, SRT_PKT_SIZE);
-        assert_eq!(result, Some(1), "Should pick conn with lowest predicted arrival");
+        assert_eq!(
+            result,
+            Some(1),
+            "Should pick conn with lowest predicted arrival"
+        );
     }
 
     #[test]
