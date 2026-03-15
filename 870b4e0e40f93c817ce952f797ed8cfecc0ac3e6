@@ -1,0 +1,23 @@
+src/ewma.rs
+  7ca2286fc6b227db 54-121,260,271
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "870b4e0e40f93c817ce952f797ed8cfecc0ac3e6",
+  "prompts": {
+    "7ca2286fc6b227db": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "951ca67d-827d-449f-be9b-7355c449cb0e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 761,
+      "total_deletions": 419,
+      "accepted_lines": 292,
+      "overriden_lines": 0
+    }
+  }
+}
