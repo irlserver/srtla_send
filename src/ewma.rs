@@ -34,9 +34,7 @@ impl Ewma {
     ///
     /// - `alpha_up`: smoothing factor when measurement > current value (rising)
     /// - `alpha_down`: smoothing factor when measurement < current value (falling)
-    ///
-    /// Example: `Ewma::asymmetric(0.04, 0.40)` gives slow rise, fast fall —
-    /// matching `RttTracker`'s smooth RTT behavior.
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn asymmetric(alpha_up: f64, alpha_down: f64) -> Self {
         Self {
             value: 0.0,
@@ -73,6 +71,7 @@ impl Ewma {
     }
 
     /// Returns whether the filter has received at least one valid measurement.
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }

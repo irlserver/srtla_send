@@ -104,18 +104,15 @@ impl KalmanFilter {
     }
 
     /// Current smoothed value.
-    #[allow(dead_code)]
     pub fn value(&self) -> f64 {
         self.x
     }
 
     /// Current estimated velocity (trend).
-    #[allow(dead_code)]
     pub fn velocity(&self) -> f64 {
         self.v
     }
 
-    #[allow(dead_code)]
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }

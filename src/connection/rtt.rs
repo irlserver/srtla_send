@@ -14,16 +14,19 @@ const SLOW_WINDOW_SAMPLES: usize = 100;
 /// Number of samples in the min-RTT sample filter.
 const RTT_SAMPLE_FILTER_SIZE: usize = 15;
 
-/// RTT measurement and tracking
+/// RTT measurement and tracking.
+///
+/// Uses a 2-state Kalman filter [value, velocity] as the primary smooth RTT
+/// estimator (replaces EWMA). The Kalman filter naturally tracks trends,
+/// providing both a smoothed value and a velocity (rate of change).
 #[derive(Debug, Clone)]
 pub struct RttTracker {
     pub last_keepalive_sent_ms: u64,
     pub waiting_for_keepalive_response: bool,
     pub last_rtt_measurement_ms: u64,
-    /// Smooth RTT in ms: slow rise (alpha=0.04), fast fall (alpha=0.40).
-    pub smooth_rtt: Ewma,
-    /// Fast RTT in ms: catches spikes quickly (up=0.10, down=0.30).
-    pub fast_rtt: Ewma,
+    /// Kalman filter: primary smooth RTT with trend detection.
+    /// `.value()` = smoothed RTT in ms, `.velocity()` = ms/sample trend.
+    pub kalman_rtt: KalmanFilter,
     pub rtt_jitter_ms: f64,
     pub prev_rtt_ms: f64,
     /// Smoothed RTT change rate in ms/sample (symmetric alpha=0.2).
@@ -37,8 +40,6 @@ pub struct RttTracker {
     rtt_min_slow_window: VecDeque<f64>,
     /// 15-sample min filter applied before feeding dual-window baseline.
     rtt_sample_filter: VecDeque<f64>,
-    /// Kalman filter for RTT smoothing with trend detection.
-    pub kalman_rtt: KalmanFilter,
 }
 
 impl Default for RttTracker {
@@ -47,8 +48,7 @@ impl Default for RttTracker {
             last_keepalive_sent_ms: 0,
             waiting_for_keepalive_response: false,
             last_rtt_measurement_ms: 0,
-            smooth_rtt: Ewma::asymmetric(0.04, 0.40),
-            fast_rtt: Ewma::asymmetric(0.10, 0.30),
+            kalman_rtt: KalmanFilter::new(KalmanConfig::for_rtt()),
             rtt_jitter_ms: 0.0,
             prev_rtt_ms: 0.0,
             rtt_avg_delta: Ewma::new(0.2),
@@ -57,18 +57,16 @@ impl Default for RttTracker {
             rtt_min_fast_window: VecDeque::with_capacity(FAST_WINDOW_SAMPLES),
             rtt_min_slow_window: VecDeque::with_capacity(SLOW_WINDOW_SAMPLES),
             rtt_sample_filter: VecDeque::with_capacity(RTT_SAMPLE_FILTER_SIZE),
-            kalman_rtt: KalmanFilter::new(KalmanConfig::for_rtt()),
         }
     }
 }
 
 impl RttTracker {
-    /// Reset all RTT tracking state to initial values
-    /// Used during reconnection to start with a clean slate
+    /// Reset all RTT tracking state to initial values.
+    /// Used during reconnection to start with a clean slate.
     pub fn reset(&mut self) {
         self.last_rtt_measurement_ms = 0;
-        self.smooth_rtt.reset();
-        self.fast_rtt.reset();
+        self.kalman_rtt.reset();
         self.rtt_jitter_ms = 0.0;
         self.prev_rtt_ms = 0.0;
         self.rtt_avg_delta.reset();
@@ -79,14 +77,12 @@ impl RttTracker {
         self.rtt_min_fast_window.clear();
         self.rtt_min_slow_window.clear();
         self.rtt_sample_filter.clear();
-        self.kalman_rtt.reset();
     }
 
     pub fn update_estimate(&mut self, rtt_ms: u64) {
         let current_rtt = rtt_ms as f64;
 
         // Min-RTT sample filter: smooth jitter before feeding baseline tracker.
-        // EWMA smoothing still uses raw current_rtt (asymmetric alpha handles spikes).
         self.rtt_sample_filter.push_back(current_rtt);
         while self.rtt_sample_filter.len() > RTT_SAMPLE_FILTER_SIZE {
             self.rtt_sample_filter.pop_front();
@@ -98,9 +94,8 @@ impl RttTracker {
             .fold(f64::MAX, f64::min);
 
         // Initialize on first measurement
-        if !self.smooth_rtt.is_initialized() {
-            self.smooth_rtt.update(current_rtt);
-            self.fast_rtt.update(current_rtt);
+        if !self.kalman_rtt.is_initialized() {
+            self.kalman_rtt.update(current_rtt);
             self.prev_rtt_ms = current_rtt;
             self.estimated_rtt_ms = current_rtt;
             self.rtt_min_ms = filtered_rtt;
@@ -110,11 +105,7 @@ impl RttTracker {
             return;
         }
 
-        // EWMA uses raw RTT (asymmetric alpha already handles spikes)
-        self.smooth_rtt.update(current_rtt);
-        self.fast_rtt.update(current_rtt);
-
-        // Kalman filter for trend-aware smoothing
+        // Kalman filter: primary smooth RTT with trend detection
         self.kalman_rtt.update(current_rtt);
 
         // Track RTT change rate
@@ -152,8 +143,8 @@ impl RttTracker {
             self.rtt_jitter_ms = delta_rtt.abs();
         }
 
-        // Update legacy field for backwards compatibility
-        self.estimated_rtt_ms = self.smooth_rtt.value();
+        // Smoothed RTT from Kalman
+        self.estimated_rtt_ms = self.kalman_rtt.value();
         self.last_rtt_measurement_ms = now_ms();
     }
 
@@ -177,12 +168,12 @@ impl RttTracker {
                 self.update_estimate(rtt);
                 self.waiting_for_keepalive_response = false;
                 debug!(
-                    "{}: RTT from keepalive: {}ms (smooth: {:.1}ms, fast: {:.1}ms, jitter: \
+                    "{}: RTT from keepalive: {}ms (kalman: {:.1}ms, velocity: {:.2}ms/s, jitter: \
                      {:.1}ms)",
                     label,
                     rtt,
-                    self.smooth_rtt.value(),
-                    self.fast_rtt.value(),
+                    self.kalman_rtt.value(),
+                    self.kalman_rtt.velocity(),
                     self.rtt_jitter_ms
                 );
                 return Some(rtt);
@@ -193,10 +184,6 @@ impl RttTracker {
     }
 
     pub fn needs_measurement(&self, connected: bool, connection_established_ms: u64) -> bool {
-        // Stay lightweight during initial registration: defer RTT probing until the
-        // connection has been fully established via REG3. This mirrors the C
-        // implementation, which does not measure RTT until a link is active, and
-        // avoids spamming keepalives while the uplink is still handshaking.
         if connection_established_ms == 0 {
             return false;
         }
@@ -227,15 +214,11 @@ mod tests {
         );
 
         // Simulate cellular handover: RTT jumps to 120ms.
-        // Need enough samples to flush the 15-sample min filter AND the slow window.
-        // The min filter holds old 50ms values for up to RTT_SAMPLE_FILTER_SIZE samples,
-        // so the slow window keeps getting 50ms as filtered_rtt until the filter flushes.
         let flush_count = RTT_SAMPLE_FILTER_SIZE + SLOW_WINDOW_SAMPLES;
         for _ in 0..flush_count {
             tracker.update_estimate(120);
         }
 
-        // Now the min filter, fast window, and slow window all contain only 120ms
         assert!(
             (tracker.rtt_min_ms - 120.0).abs() < 1.0,
             "baseline should have adapted to ~120ms after handover, got {}",
@@ -247,14 +230,12 @@ mod tests {
     fn test_dual_window_tracks_minimum() {
         let mut tracker = RttTracker::default();
 
-        // Feed mixed RTT values
         tracker.update_estimate(100);
         tracker.update_estimate(80);
         tracker.update_estimate(60);
         tracker.update_estimate(90);
         tracker.update_estimate(70);
 
-        // Baseline should be the minimum across both windows
         assert!(
             (tracker.rtt_min_ms - 60.0).abs() < 1.0,
             "baseline should track minimum of 60ms, got {}",
@@ -266,19 +247,15 @@ mod tests {
     fn test_dual_window_reset_clears_windows() {
         let mut tracker = RttTracker::default();
 
-        // Fill with data
         for _ in 0..20 {
             tracker.update_estimate(50);
         }
         assert!((tracker.rtt_min_ms - 50.0).abs() < 1.0);
 
-        // Reset
         tracker.reset();
 
-        // After reset, windows should be empty and rtt_min_ms back to default
         assert!((tracker.rtt_min_ms - 200.0).abs() < f64::EPSILON);
 
-        // First new measurement should set baseline
         tracker.update_estimate(80);
         assert!(
             (tracker.rtt_min_ms - 80.0).abs() < 1.0,
@@ -291,34 +268,53 @@ mod tests {
     fn test_dual_window_fast_window_forgets_old_minimum() {
         let mut tracker = RttTracker::default();
 
-        // One very low sample
         tracker.update_estimate(20);
 
-        // Fill fast window with higher values. The min filter (15 samples)
-        // will still hold the 20ms value, so the slow window keeps seeing it.
         for _ in 0..FAST_WINDOW_SAMPLES {
             tracker.update_estimate(100);
         }
 
-        // Min filter still has 20ms, so slow window got fed 20ms as filtered_rtt.
-        // baseline = min(fast_min, slow_min) still includes 20 from slow window.
         assert!(
             (tracker.rtt_min_ms - 20.0).abs() < 1.0,
             "slow window should still hold 20ms minimum, got {}",
             tracker.rtt_min_ms
         );
 
-        // Fill slow window AND flush the min filter with enough 100ms samples
         let flush_count = RTT_SAMPLE_FILTER_SIZE + SLOW_WINDOW_SAMPLES;
         for _ in 0..flush_count {
             tracker.update_estimate(100);
         }
 
-        // Now min filter, fast window, and slow window all contain only 100ms
         assert!(
             (tracker.rtt_min_ms - 100.0).abs() < 1.0,
             "after both windows filled, baseline should be 100ms, got {}",
             tracker.rtt_min_ms
+        );
+    }
+
+    #[test]
+    fn test_kalman_smooths_rtt() {
+        let mut tracker = RttTracker::default();
+
+        // Feed stable RTT
+        for _ in 0..50 {
+            tracker.update_estimate(50);
+        }
+        assert!(
+            (tracker.estimated_rtt_ms - 50.0).abs() < 1.0,
+            "Kalman should converge to stable value: {}",
+            tracker.estimated_rtt_ms
+        );
+
+        // Feed rising RTT — velocity should go positive
+        for _ in 0..20 {
+            tracker.update_estimate(80);
+        }
+        assert!(
+            tracker.kalman_rtt.velocity() > 0.0 || tracker.estimated_rtt_ms > 60.0,
+            "should track rising RTT: est={}, vel={}",
+            tracker.estimated_rtt_ms,
+            tracker.kalman_rtt.velocity()
         );
     }
 }

@@ -48,7 +48,7 @@ pub struct LinkStats {
     pub window: i32,
     /// Packets sent but not yet ACKed. Higher = more load on this link.
     pub in_flight: i32,
-    /// Smoothed RTT in milliseconds. From EWMA of ACK round-trips.
+    /// Smoothed RTT in milliseconds. From Kalman filter.
     pub rtt_ms: u32,
     /// Total NAK count since connection established. Indicates packet loss.
     pub nak_count: i32,
@@ -58,8 +58,8 @@ pub struct LinkStats {
     // --- RTT baseline tracking ---
     /// Dual-window minimum RTT baseline in milliseconds.
     pub rtt_min_ms: f64,
-    /// Fast RTT tracker in milliseconds (quicker response to spikes).
-    pub fast_rtt_ms: f64,
+    /// Kalman RTT velocity in ms/sample (positive = rising, negative = falling).
+    pub rtt_velocity: f64,
 
     // --- Selection algorithm context ---
     /// Base score: window / (in_flight + 1). Used by classic mode.
@@ -167,7 +167,7 @@ impl SharedStats {
                 nak_count: conn.total_nak_count(),
                 bitrate_bps: (conn.current_bitrate_mbps() * 1_000_000.0 / 8.0) as u32,
                 rtt_min_ms: conn.get_rtt_min_ms(),
-                fast_rtt_ms: conn.get_fast_rtt_ms(),
+                rtt_velocity: conn.get_rtt_velocity(),
                 base_score: conn.get_score(),
                 quality_multiplier,
             };
