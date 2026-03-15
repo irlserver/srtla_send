@@ -16,11 +16,17 @@ const SRT_PKT_SIZE: usize = 1316;
 /// The factor converts ms/sample velocity into seconds of penalty.
 const VELOCITY_PENALTY_FACTOR: f64 = 0.005;
 
+/// BDP overrun multiplier. Links with in-flight bytes exceeding
+/// `bdp * BDP_OVERRUN_MULT` are excluded from scheduling to prevent
+/// runaway in-flight during RTT inflation on cellular.
+const BDP_OVERRUN_MULT: f64 = 1.5;
+
 /// Compute predicted arrival time for a connection.
 ///
-/// Returns `None` if the connection lacks valid capacity or RTT data.
+/// Returns `None` if the connection lacks valid capacity or RTT data,
+/// or if in-flight bytes exceed the BDP hard-cap.
 fn predicted_arrival(conn: &SrtlaConnection, pkt_size: usize) -> Option<f64> {
-    if !conn.connected {
+    if !conn.connected || !conn.is_schedulable() {
         return None;
     }
 
@@ -47,6 +53,13 @@ fn predicted_arrival(conn: &SrtlaConnection, pkt_size: usize) -> Option<f64> {
     } else {
         conn.rtt.rtt_min_ms / 1000.0
     };
+
+    // BDP hard-cap: exclude links where in-flight exceeds 1.5× BDP.
+    // Prevents runaway in-flight during RTT inflation on cellular.
+    let bdp_bytes = effective_capacity * propagation_s;
+    if bdp_bytes > 0.0 && in_flight_bytes > bdp_bytes * BDP_OVERRUN_MULT {
+        return None;
+    }
 
     // Velocity penalty: penalise links with rising RTT (positive velocity)
     // to proactively avoid congestion before it manifests as loss.
