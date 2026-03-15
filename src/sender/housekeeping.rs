@@ -104,6 +104,12 @@ pub async fn handle_housekeeping(
         conn.update_phase();
     }
 
+    // Run shared bottleneck detection for EDPF mode.
+    // Must run after per-connection updates (bitrate, phase) but before scheduling.
+    if !classic {
+        super::selection::update_sbd(connections);
+    }
+
     // Update active connections count (matches C implementation behavior)
     // C code resets active_connections=0 then counts non-timed-out connections
     reg.update_active_connections(connections);

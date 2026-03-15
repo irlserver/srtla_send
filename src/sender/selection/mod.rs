@@ -31,6 +31,7 @@ mod enhanced;
 mod exploration;
 pub mod iods;
 mod quality;
+pub mod sbd;
 
 #[cfg(feature = "test-internals")]
 pub mod rtt_threshold;
@@ -103,12 +104,30 @@ pub fn select_connection_idx(
     }
 }
 
-/// EDPF pipeline: BLEST filters → IoDS ordering → EDPF argmin.
+// Thread-local SBD state shared between housekeeping (detect) and EDPF (query).
+// Both run on the same tokio task so thread-local is safe and lock-free.
+thread_local! {
+    static SBD: std::cell::RefCell<sbd::SharedBottleneckDetector> =
+        std::cell::RefCell::new(sbd::SharedBottleneckDetector::new());
+}
+
+/// Run shared bottleneck detection on the current set of connections.
+///
+/// Called from housekeeping once per tick. Updates the thread-local SBD
+/// state that the EDPF pipeline reads during per-packet scheduling.
+pub fn update_sbd(connections: &[SrtlaConnection]) {
+    SBD.with(|cell| {
+        cell.borrow_mut().detect(connections);
+    });
+}
+
+/// EDPF pipeline: BLEST filters → SBD capacity reduction → IoDS ordering → EDPF argmin.
 ///
 /// Matches strata's bonding.rs:30-35:
 /// 1. BLEST filters out HoL-blocking links
-/// 2. IoDS filters for monotonic ordering
-/// 3. EDPF selects argmin(predicted_arrival) from remaining
+/// 2. SBD reduces effective capacity for correlated links
+/// 3. IoDS filters for monotonic ordering
+/// 4. EDPF selects argmin(predicted_arrival) from remaining
 fn edpf_pipeline_select(conns: &[SrtlaConnection], _config: &ConfigSnapshot) -> Option<usize> {
     const SRT_PKT_SIZE: usize = 1316;
 
@@ -122,34 +141,99 @@ fn edpf_pipeline_select(conns: &[SrtlaConnection], _config: &ConfigSnapshot) -> 
 
     BLEST.with(|blest_cell| {
         IODS.with(|iods_cell| {
-            let mut blest_filter = blest_cell.borrow_mut();
-            let mut iods_filter = iods_cell.borrow_mut();
+            SBD.with(|sbd_cell| {
+                let mut blest_filter = blest_cell.borrow_mut();
+                let mut iods_filter = iods_cell.borrow_mut();
+                let sbd_detector = sbd_cell.borrow();
 
-            blest_filter.tick();
+                blest_filter.tick();
 
-            // 1. BLEST filters out HoL-blocking links
-            let candidates = blest_filter.filter(conns);
+                // 1. BLEST filters out HoL-blocking links
+                let candidates = blest_filter.filter(conns);
 
-            // 2. IoDS filters for monotonic ordering
-            let ordered = iods_filter.filter_valid(&candidates, |idx| {
-                edpf::arrival_time(&conns[idx], SRT_PKT_SIZE)
-            });
+                // 2 & 3. IoDS + EDPF with SBD-aware arrival times.
+                // When a link is part of a correlated group, its effective
+                // capacity is reduced, increasing predicted arrival time.
+                let sbd_factor = sbd_detector.capacity_reduction_factor();
+                let arrival_fn = |idx: usize| {
+                    let base = edpf::arrival_time(&conns[idx], SRT_PKT_SIZE)?;
+                    if sbd_detector.is_correlated(idx) {
+                        // Reduce effective capacity → increase arrival time.
+                        // arrival ≈ (in_flight + pkt) / capacity + propagation
+                        // Dividing the capacity portion by the factor is equivalent
+                        // to multiplying the total arrival by 1/factor, but we
+                        // use a simpler inflate: arrival / factor.
+                        Some(base / sbd_factor)
+                    } else {
+                        Some(base)
+                    }
+                };
 
-            // 3. EDPF selects argmin from remaining, with fallbacks
-            let selected = edpf::select_from_indices(conns, &ordered, SRT_PKT_SIZE)
-                .or_else(|| edpf::select_from_indices(conns, &candidates, SRT_PKT_SIZE))
-                .or_else(|| edpf::select_from(conns, SRT_PKT_SIZE));
+                let ordered = iods_filter.filter_valid(&candidates, arrival_fn);
 
-            // Record the scheduled arrival for IoDS
-            if let Some(idx) = selected
-                && let Some(arrival) = edpf::arrival_time(&conns[idx], SRT_PKT_SIZE)
-            {
-                iods_filter.record_scheduled(arrival);
-            }
+                // EDPF selects argmin from SBD-adjusted arrivals, with fallbacks
+                let selected =
+                    select_sbd_adjusted(conns, &ordered, SRT_PKT_SIZE, &sbd_detector, sbd_factor)
+                        .or_else(|| {
+                            select_sbd_adjusted(
+                                conns,
+                                &candidates,
+                                SRT_PKT_SIZE,
+                                &sbd_detector,
+                                sbd_factor,
+                            )
+                        })
+                        .or_else(|| {
+                            // Final fallback: all connections, SBD-adjusted
+                            let all_indices: Vec<usize> = (0..conns.len()).collect();
+                            select_sbd_adjusted(
+                                conns,
+                                &all_indices,
+                                SRT_PKT_SIZE,
+                                &sbd_detector,
+                                sbd_factor,
+                            )
+                        });
 
-            selected
+                // Record the scheduled arrival for IoDS (use base arrival, not adjusted)
+                if let Some(idx) = selected
+                    && let Some(arrival) = edpf::arrival_time(&conns[idx], SRT_PKT_SIZE)
+                {
+                    iods_filter.record_scheduled(arrival);
+                }
+
+                selected
+            })
         })
     })
+}
+
+/// Select the connection with lowest SBD-adjusted predicted arrival from a subset.
+fn select_sbd_adjusted(
+    conns: &[SrtlaConnection],
+    indices: &[usize],
+    pkt_size: usize,
+    sbd_detector: &sbd::SharedBottleneckDetector,
+    sbd_factor: f64,
+) -> Option<usize> {
+    let mut best_idx = None;
+    let mut best_arrival = f64::MAX;
+
+    for &i in indices {
+        if i < conns.len()
+            && let Some(mut arrival) = edpf::arrival_time(&conns[i], pkt_size)
+        {
+            if sbd_detector.is_correlated(i) {
+                arrival /= sbd_factor;
+            }
+            if arrival < best_arrival {
+                best_arrival = arrival;
+                best_idx = Some(i);
+            }
+        }
+    }
+
+    best_idx
 }
 
 #[cfg(test)]
