@@ -281,7 +281,6 @@ impl SrtlaConnection {
         self.rtt.kalman_rtt.velocity()
     }
 
-
     pub fn get_rtt_min_ms(&self) -> f64 {
         self.rtt.rtt_min_ms
     }
@@ -310,8 +309,13 @@ impl SrtlaConnection {
     }
 
     pub fn perform_window_recovery(&mut self) {
-        self.congestion
-            .perform_window_recovery(&mut self.window, self.connected, &self.label);
+        let velocity = self.rtt.kalman_rtt.velocity();
+        self.congestion.perform_window_recovery(
+            &mut self.window,
+            self.connected,
+            velocity,
+            &self.label,
+        );
     }
 
     #[inline(always)]
