@@ -160,7 +160,13 @@ impl SrtlaConnection {
                     }
                 }
             } else if pt == SRTLA_TYPE_KEEPALIVE {
-                self.rtt.handle_keepalive_response(data, &self.label);
+                if self
+                    .rtt
+                    .handle_keepalive_response(data, &self.label)
+                    .is_some()
+                {
+                    self.record_rtt_probe();
+                }
             } else {
                 incoming
                     .forward_to_client

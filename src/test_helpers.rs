@@ -11,7 +11,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::time::Instant;
 
 use crate::connection::{
-    BatchSender, BatchUdpSocket, BitrateTracker, CachedQuality, CongestionControl,
+    BatchSender, BatchUdpSocket, BitrateTracker, CachedQuality, CongestionControl, LinkPhase,
     ReconnectionState, RttTracker, SrtlaConnection,
 };
 use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
@@ -63,6 +63,7 @@ fn create_connection_from_socket(
         },
         quality_cache: CachedQuality::default(),
         batch_sender: BatchSender::new(),
+        phase: LinkPhase::Live,
     }
 }
 

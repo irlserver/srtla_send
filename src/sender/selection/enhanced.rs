@@ -57,7 +57,7 @@ pub fn select_connection(
     let mut current_score: Option<f64> = None;
 
     for (i, c) in conns.iter_mut().enumerate() {
-        if c.is_timed_out() {
+        if c.is_timed_out() || !c.is_schedulable() {
             continue;
         }
         let base = c.get_score() as f64;
@@ -99,8 +99,10 @@ pub fn select_connection(
         // If proposing a different connection
         if best_idx != Some(last) {
             // Check if last connection is still valid
-            let last_still_valid =
-                last < conns.len() && !conns[last].is_timed_out() && conns[last].connected;
+            let last_still_valid = last < conns.len()
+                && !conns[last].is_timed_out()
+                && conns[last].connected
+                && conns[last].is_schedulable();
 
             // If in cooldown period and last connection is still valid, keep it
             if in_switch_cooldown && last_still_valid {

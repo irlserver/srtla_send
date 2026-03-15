@@ -100,6 +100,8 @@ pub async fn handle_housekeeping(
         }
         // Update bitrate calculation (from Android C implementation)
         conn.calculate_bitrate();
+        // Drive link lifecycle phase transitions
+        conn.update_phase();
     }
 
     // Update active connections count (matches C implementation behavior)

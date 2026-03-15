@@ -30,6 +30,51 @@ use crate::utils::now_ms;
 
 pub(crate) const STARTUP_GRACE_MS: u64 = 5_000;
 
+/// Number of RTT probes required before a link transitions from Warming to Live.
+const WARMING_RTT_PROBES: u32 = 2;
+/// Maximum time in ms a link may stay in Warming before auto-promoting to Live.
+/// Prevents links from getting stuck if RTT probes are slow or lost.
+const WARMING_TIMEOUT_MS: u64 = 5_000;
+
+/// Link lifecycle phase.
+///
+/// Drives which links the scheduler may use and prevents early NAK bursts
+/// from newly-connected links from polluting quality scores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkPhase {
+    /// Waiting for REG3 handshake to complete.
+    #[default]
+    Registering,
+    /// REG3 received, accumulating RTT probes before becoming schedulable.
+    Warming { rtt_probes: u32, entered_ms: u64 },
+    /// Fully operational — scheduler may use this link.
+    Live,
+    /// Quality has degraded (high NAK rate / low quality multiplier).
+    /// Scheduler may still use this link but at reduced priority.
+    Degraded,
+    /// Recently degraded, temporarily removed from scheduling.
+    Cooldown { entered_ms: u64 },
+}
+
+impl LinkPhase {
+    /// Whether the scheduler is allowed to send data on this link.
+    pub fn is_schedulable(&self) -> bool {
+        matches!(self, LinkPhase::Live | LinkPhase::Degraded)
+    }
+}
+
+impl std::fmt::Display for LinkPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkPhase::Registering => write!(f, "registering"),
+            LinkPhase::Warming { rtt_probes, .. } => write!(f, "warming({rtt_probes})"),
+            LinkPhase::Live => write!(f, "live"),
+            LinkPhase::Degraded => write!(f, "degraded"),
+            LinkPhase::Cooldown { .. } => write!(f, "cooldown"),
+        }
+    }
+}
+
 /// Interval in milliseconds between quality multiplier recalculations.
 /// Caching reduces expensive exp() calls from every packet to ~20 times per second.
 pub const QUALITY_CACHE_INTERVAL_MS: u64 = 50;
@@ -126,6 +171,11 @@ pub struct SrtlaConnection {
     /// Batch sender for optimized packet transmission.
     /// Buffers up to 16 packets before flushing, reducing syscall overhead.
     pub(crate) batch_sender: BatchSender,
+    /// Link lifecycle phase — determines scheduler eligibility.
+    #[cfg(feature = "test-internals")]
+    pub phase: LinkPhase,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) phase: LinkPhase,
 }
 
 impl SrtlaConnection {
@@ -161,6 +211,7 @@ impl SrtlaConnection {
             },
             quality_cache: CachedQuality::default(),
             batch_sender: BatchSender::new(),
+            phase: LinkPhase::Registering,
         })
     }
 
@@ -318,6 +369,88 @@ impl SrtlaConnection {
         );
     }
 
+    /// Record an RTT probe and advance warming → live if enough probes collected.
+    pub fn record_rtt_probe(&mut self) {
+        if let LinkPhase::Warming { rtt_probes, .. } = &mut self.phase {
+            *rtt_probes += 1;
+            if *rtt_probes >= WARMING_RTT_PROBES {
+                debug!("{}: warming complete, transitioning to Live", self.label);
+                self.phase = LinkPhase::Live;
+            }
+        }
+    }
+
+    /// Drive phase transitions based on current connection health.
+    ///
+    /// Called from housekeeping. Detects degradation (high NAK + low quality)
+    /// and manages cooldown re-entry.
+    pub fn update_phase(&mut self) {
+        const COOLDOWN_DURATION_MS: u64 = 5_000;
+        const DEGRADED_QUALITY_THRESHOLD: f64 = 0.5;
+        const DEGRADED_NAK_BURST_THRESHOLD: i32 = 5;
+
+        match self.phase {
+            LinkPhase::Warming { entered_ms, .. } => {
+                // Auto-promote to Live if warming takes too long
+                if now_ms().saturating_sub(entered_ms) >= WARMING_TIMEOUT_MS {
+                    debug!(
+                        "{}: warming timeout ({}ms), auto-promoting to Live",
+                        self.label, WARMING_TIMEOUT_MS
+                    );
+                    self.phase = LinkPhase::Live;
+                }
+            }
+            LinkPhase::Live => {
+                // Detect degradation: sustained low quality + NAK bursts
+                if self.quality_cache.multiplier < DEGRADED_QUALITY_THRESHOLD
+                    && self.congestion.nak_burst_count >= DEGRADED_NAK_BURST_THRESHOLD
+                {
+                    debug!(
+                        "{}: Live → Degraded (quality={:.2}, nak_burst={})",
+                        self.label, self.quality_cache.multiplier, self.congestion.nak_burst_count
+                    );
+                    self.phase = LinkPhase::Degraded;
+                }
+            }
+            LinkPhase::Degraded => {
+                // Recover back to Live when quality improves
+                if self.quality_cache.multiplier >= DEGRADED_QUALITY_THRESHOLD
+                    && self.congestion.nak_burst_count < DEGRADED_NAK_BURST_THRESHOLD
+                {
+                    debug!(
+                        "{}: Degraded → Live (quality={:.2})",
+                        self.label, self.quality_cache.multiplier
+                    );
+                    self.phase = LinkPhase::Live;
+                }
+                // Enter cooldown if quality is critically low
+                if self.quality_cache.multiplier < 0.35 {
+                    debug!(
+                        "{}: Degraded → Cooldown (quality={:.2})",
+                        self.label, self.quality_cache.multiplier
+                    );
+                    self.phase = LinkPhase::Cooldown {
+                        entered_ms: now_ms(),
+                    };
+                }
+            }
+            LinkPhase::Cooldown { entered_ms } => {
+                // Exit cooldown after duration elapses
+                if now_ms().saturating_sub(entered_ms) >= COOLDOWN_DURATION_MS {
+                    debug!("{}: Cooldown → Live", self.label);
+                    self.phase = LinkPhase::Live;
+                }
+            }
+            // Registering and Warming are driven by REG3 and RTT probes
+            _ => {}
+        }
+    }
+
+    /// Whether this link is eligible for packet scheduling.
+    pub fn is_schedulable(&self) -> bool {
+        self.phase.is_schedulable()
+    }
+
     #[inline(always)]
     pub fn is_timed_out(&self) -> bool {
         // During initial registration (not yet connected), allow grace period
@@ -370,6 +503,11 @@ impl SrtlaConnection {
         self.congestion.reset();
         self.batch_sender.reset();
         self.quality_cache = CachedQuality::default();
+        // REG3 received — begin warming phase
+        self.phase = LinkPhase::Warming {
+            rtt_probes: 0,
+            entered_ms: now_ms(),
+        };
     }
 
     /// Reset core connection state (window, packet tracking, batch queue).
@@ -381,6 +519,7 @@ impl SrtlaConnection {
         self.packet_log.clear();
         self.highest_acked_seq = i32::MIN;
         self.batch_sender.reset();
+        self.phase = LinkPhase::Registering;
     }
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1.

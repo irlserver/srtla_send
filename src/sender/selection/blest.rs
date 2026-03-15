@@ -56,7 +56,7 @@ impl BlestFilter {
         // Find minimum OWD across all connected links with valid RTT
         let min_owd = conns
             .iter()
-            .filter(|c| c.connected && c.rtt.rtt_min_ms < 200.0)
+            .filter(|c| c.connected && c.is_schedulable() && c.rtt.rtt_min_ms < 200.0)
             .map(|c| c.rtt.rtt_min_ms / 2.0)
             .fold(f64::MAX, f64::min);
 
@@ -65,7 +65,7 @@ impl BlestFilter {
             return conns
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| c.connected)
+                .filter(|(_, c)| c.connected && c.is_schedulable())
                 .map(|(i, _)| i)
                 .collect();
         }
@@ -76,7 +76,7 @@ impl BlestFilter {
             .iter()
             .enumerate()
             .filter(|(_, c)| {
-                if !c.connected {
+                if !c.connected || !c.is_schedulable() {
                     return false;
                 }
                 let owd = c.rtt.rtt_min_ms / 2.0;

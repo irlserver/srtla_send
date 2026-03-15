@@ -38,7 +38,7 @@ pub fn select_connection(
     // Phase 1: Find minimum RTT among eligible links
     let mut min_rtt = f64::MAX;
     for c in conns.iter() {
-        if c.is_timed_out() || !c.connected {
+        if c.is_timed_out() || !c.connected || !c.is_schedulable() {
             continue;
         }
         let base_score = c.get_score();
@@ -64,7 +64,7 @@ pub fn select_connection(
     let mut best_score: f64 = -1.0;
 
     for (i, c) in conns.iter_mut().enumerate() {
-        if c.is_timed_out() || !c.connected {
+        if c.is_timed_out() || !c.connected || !c.is_schedulable() {
             continue;
         }
         let base_score = c.get_score();
@@ -100,7 +100,7 @@ pub fn select_connection(
             rtt_threshold
         );
         for (i, c) in conns.iter_mut().enumerate() {
-            if c.is_timed_out() || !c.connected {
+            if c.is_timed_out() || !c.connected || !c.is_schedulable() {
                 continue;
             }
             let base_score = c.get_score();
@@ -130,7 +130,10 @@ pub fn select_connection(
         && in_cooldown
     {
         // Check if last connection is still valid
-        let last_valid = last < conns.len() && !conns[last].is_timed_out() && conns[last].connected;
+        let last_valid = last < conns.len()
+            && !conns[last].is_timed_out()
+            && conns[last].connected
+            && conns[last].is_schedulable();
         if last_valid && conns[last].get_score() > 0 {
             return Some(last);
         }
