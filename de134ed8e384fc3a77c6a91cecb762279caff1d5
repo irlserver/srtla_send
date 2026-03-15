@@ -1,0 +1,23 @@
+src/sender/selection/mod.rs
+  7ca2286fc6b227db 145,147
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "de134ed8e384fc3a77c6a91cecb762279caff1d5",
+  "prompts": {
+    "7ca2286fc6b227db": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "951ca67d-827d-449f-be9b-7355c449cb0e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 1235,
+      "total_deletions": 1126,
+      "accepted_lines": 299,
+      "overriden_lines": 3
+    }
+  }
+}
