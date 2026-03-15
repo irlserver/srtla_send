@@ -1,0 +1,43 @@
+src/sender/selection/edpf.rs
+  270623ab9fb0bb80 1-155
+src/sender/selection/iods.rs
+  270623ab9fb0bb80 1-114
+src/config.rs
+  270623ab9fb0bb80 206,222-225,228
+src/kalman.rs
+  270623ab9fb0bb80 1-208
+src/main.rs
+  270623ab9fb0bb80 13
+src/connection/rtt.rs
+  270623ab9fb0bb80 6,40-41,60,82,117-119
+src/sender/status.rs
+  270623ab9fb0bb80 91-93
+src/sender/selection/mod.rs
+  270623ab9fb0bb80 27,29,32,99-102,104-123,125-155
+src/mode.rs
+  270623ab9fb0bb80 25-29,39,49,69-74,83,96,98,111,122,142,162-165,174,190-192
+src/sender/selection/blest.rs
+  270623ab9fb0bb80 1-160
+src/lib.rs
+  270623ab9fb0bb80 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "27c6c00e5d206d5b958d179a2ef273ef2e7924c0",
+  "prompts": {
+    "270623ab9fb0bb80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "778b984f-d859-47ba-b5ae-ecc886a4950f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 2272,
+      "total_deletions": 1533,
+      "accepted_lines": 1228,
+      "overriden_lines": 0
+    }
+  }
+}
