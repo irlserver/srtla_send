@@ -1,0 +1,37 @@
+src/sender/selection/blest.rs
+  7ca2286fc6b227db 59,68,79
+src/connection/packet_io.rs
+  7ca2286fc6b227db 163,166-169
+src/sender/selection/enhanced.rs
+  7ca2286fc6b227db 60
+src/sender/housekeeping.rs
+  7ca2286fc6b227db 103-104
+src/test_helpers.rs
+  7ca2286fc6b227db 14,66
+src/connection/mod.rs
+  7ca2286fc6b227db 33-77,174-178,214,372-453,506-510,522
+src/sender/selection/classic.rs
+  7ca2286fc6b227db 28
+src/sender/selection/rtt_threshold.rs
+  7ca2286fc6b227db 41,67,103,136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "ba34eb76ea9e57f16ce77ff62ebaa9485a45cba1",
+  "prompts": {
+    "7ca2286fc6b227db": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "951ca67d-827d-449f-be9b-7355c449cb0e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 157,
+      "overriden_lines": 0
+    }
+  }
+}
