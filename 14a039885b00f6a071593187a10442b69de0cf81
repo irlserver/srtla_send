@@ -1,0 +1,29 @@
+src/main.rs
+  7ca2286fc6b227db 19,62-65,110-115
+src/lib.rs
+  7ca2286fc6b227db 22
+src/toml_config.rs
+  7ca2286fc6b227db 1-147
+Cargo.toml
+  7ca2286fc6b227db 26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "14a039885b00f6a071593187a10442b69de0cf81",
+  "prompts": {
+    "7ca2286fc6b227db": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "951ca67d-827d-449f-be9b-7355c449cb0e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 160,
+      "overriden_lines": 0
+    }
+  }
+}
