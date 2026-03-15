@@ -109,10 +109,7 @@ pub fn select_connection_idx(
 /// 1. BLEST filters out HoL-blocking links
 /// 2. IoDS filters for monotonic ordering
 /// 3. EDPF selects argmin(predicted_arrival) from remaining
-fn edpf_pipeline_select(
-    conns: &[SrtlaConnection],
-    _config: &ConfigSnapshot,
-) -> Option<usize> {
+fn edpf_pipeline_select(conns: &[SrtlaConnection], _config: &ConfigSnapshot) -> Option<usize> {
     const SRT_PKT_SIZE: usize = 1316;
 
     // Use thread-local BLEST and IoDS state
@@ -144,10 +141,10 @@ fn edpf_pipeline_select(
                 .or_else(|| edpf::select_from(conns, SRT_PKT_SIZE));
 
             // Record the scheduled arrival for IoDS
-            if let Some(idx) = selected {
-                if let Some(arrival) = edpf::arrival_time(&conns[idx], SRT_PKT_SIZE) {
-                    iods_filter.record_scheduled(arrival);
-                }
+            if let Some(idx) = selected
+                && let Some(arrival) = edpf::arrival_time(&conns[idx], SRT_PKT_SIZE)
+            {
+                iods_filter.record_scheduled(arrival);
             }
 
             selected

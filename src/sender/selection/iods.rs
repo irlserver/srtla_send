@@ -102,13 +102,7 @@ mod tests {
     #[test]
     fn test_none_arrival_filtered_out() {
         let iods = IodsFilter::new();
-        let valid = iods.filter_valid(&[0, 1, 2], |i| {
-            if i == 1 {
-                None
-            } else {
-                Some(1.0)
-            }
-        });
+        let valid = iods.filter_valid(&[0, 1, 2], |i| if i == 1 { None } else { Some(1.0) });
         assert_eq!(valid, vec![0, 2]);
     }
 }

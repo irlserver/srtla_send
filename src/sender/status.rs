@@ -153,8 +153,8 @@ pub(crate) fn log_connection_status(
 
         if conn.rtt.estimated_rtt_ms > 0.0 {
             info!(
-                "        RTT: kalman={:.1}ms, velocity={:.2}ms/s, jitter={:.1}ms, stable={} (last: \
-                 {:.1}s ago)",
+                "        RTT: kalman={:.1}ms, velocity={:.2}ms/s, jitter={:.1}ms, stable={} \
+                 (last: {:.1}s ago)",
                 conn.get_smooth_rtt_ms(),
                 conn.get_rtt_velocity(),
                 conn.get_rtt_jitter_ms(),
