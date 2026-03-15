@@ -1,5 +1,6 @@
 mod connections;
 mod housekeeping;
+mod keyframe;
 mod packet_handler;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod selection;
@@ -135,6 +136,8 @@ pub async fn run_sender_with_config(
     let mut last_switch_time_ms: u64 = 0; // Track time of last connection switch
     let mut all_failed_at: Option<Instant> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
+    // Keyframe burst detector for priority scheduling
+    let mut keyframe_detector = keyframe::KeyframeDetector::new();
 
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
@@ -176,6 +179,7 @@ pub async fn run_sender_with_config(
                             &mut last_client_addr,
                             reg.has_connected,
                             &config_snap,
+                            &mut keyframe_detector,
                         )
                         .await;
                         drain_packet_queue(

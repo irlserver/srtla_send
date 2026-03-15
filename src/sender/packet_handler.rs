@@ -4,8 +4,9 @@ use anyhow::Result;
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
+use super::keyframe::{self, KeyframeDetector};
 use super::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
 use super::uplink::UplinkPacket;
@@ -220,6 +221,11 @@ fn select_pre_registration_connection(
 ///
 /// Uses a pre-cached `ConfigSnapshot` to avoid atomic loads per packet.
 /// The caller should create a snapshot once per select iteration for optimal performance.
+///
+/// When a keyframe burst is detected (runs of consecutive max-MTU 1316-byte data
+/// packets), the scheduler overrides normal selection and routes to the
+/// highest-quality link. This ensures I-frame data — which is critical for
+/// decoder recovery — travels over the most reliable path.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
@@ -231,6 +237,7 @@ pub async fn handle_srt_packet(
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
+    keyframe_detector: &mut KeyframeDetector,
 ) {
     match res {
         Ok((n, src)) => {
@@ -261,13 +268,33 @@ pub async fn handle_srt_packet(
                 return;
             }
 
-            let sel_idx = select_connection_idx(
+            // Normal scheduler selection
+            let mut sel_idx = select_connection_idx(
                 connections,
                 *last_selected_idx,
                 *last_switch_time_ms,
                 packet_time_ms,
                 config_snap,
             );
+
+            // Keyframe priority: for SRT data packets, feed the detector and
+            // override selection when we are inside a keyframe burst.
+            // Only data packets have seq != None (control packets have MSB set).
+            if seq.is_some() {
+                let is_keyframe = keyframe_detector.observe(n);
+                if is_keyframe
+                    && let Some(best_idx) = keyframe::select_best_quality_idx(connections)
+                    && sel_idx != Some(best_idx)
+                {
+                    trace!(
+                        "keyframe burst: overriding link {} -> {}",
+                        sel_idx.map_or(-1, |i| i as i64),
+                        best_idx as i64
+                    );
+                    sel_idx = Some(best_idx);
+                }
+            }
+
             if let Some(sel_idx) = sel_idx {
                 forward_via_connection(
                     sel_idx,
