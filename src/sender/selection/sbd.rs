@@ -233,7 +233,7 @@ impl SharedBottleneckDetector {
         self.capacity_reduction_factor
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn groups(&self) -> &[Vec<usize>] {
         &self.groups
     }

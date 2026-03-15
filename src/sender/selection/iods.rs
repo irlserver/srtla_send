@@ -44,7 +44,7 @@ impl IodsFilter {
     }
 
     /// Reset the ordering state (e.g., after a long gap).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn reset(&mut self) {
         self.last_arrival = 0.0;
     }

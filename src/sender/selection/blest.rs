@@ -34,7 +34,7 @@ impl BlestFilter {
     }
 
     /// Record a blocking event (when a link caused HoL blocking).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn record_blocking(&mut self) {
         self.penalty = (self.penalty + 1.0).min(10.0);
     }

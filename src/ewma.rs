@@ -62,7 +62,7 @@ impl Ewma {
 ///   current value (value is decreasing). Higher = tracks drops faster.
 /// - `alpha_up`: smoothing factor when the new measurement is *above* the
 ///   current value (value is increasing). Lower = recovers more slowly.
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct AsymmetricEwma {
     value: f64,
@@ -71,7 +71,7 @@ pub struct AsymmetricEwma {
     initialized: bool,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 impl AsymmetricEwma {
     /// Creates a new asymmetric EWMA filter.
     ///

@@ -72,14 +72,14 @@ impl KeyframeDetector {
     }
 
     /// Whether we are currently inside a keyframe burst.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[inline]
     pub fn is_in_burst(&self) -> bool {
         self.in_burst
     }
 
     /// Total number of keyframe bursts detected since creation.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn total_bursts(&self) -> u64 {
         self.total_bursts
     }

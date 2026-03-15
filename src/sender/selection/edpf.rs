@@ -78,7 +78,7 @@ fn predicted_arrival(conn: &SrtlaConnection, pkt_size: usize) -> Option<f64> {
 }
 
 /// Select the connection with lowest predicted arrival time from all connections.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn select_from(conns: &[SrtlaConnection], pkt_size: usize) -> Option<usize> {
     let mut best_idx = None;
     let mut best_arrival = f64::MAX;
@@ -98,7 +98,7 @@ pub fn select_from(conns: &[SrtlaConnection], pkt_size: usize) -> Option<usize> 
 /// Select the connection with lowest predicted arrival time from a filtered subset.
 ///
 /// `indices` contains the indices of candidate connections in `conns`.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn select_from_indices(
     conns: &[SrtlaConnection],
     indices: &[usize],
