@@ -30,6 +30,8 @@ use crate::config::DynamicConfig;
 use crate::mode::SchedulingMode;
 use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;
+use crate::subscriptions::SubscriptionHub;
+use tokio::sync::mpsc;
 
 const JSONRPC_VERSION: &str = "2.0";
 
@@ -105,12 +107,131 @@ impl Response {
     }
 }
 
-/// Dispatch one JSON-RPC request. Returns `None` for notifications (no
-/// response to send).
+/// Per-connection context needed for `subscribe` / `unsubscribe`. The
+/// sync [`dispatch`] function takes an `Option<&SubscriptionContext>`;
+/// when present, subscribe-style methods route through the hub and
+/// track active subscriptions on behalf of this connection.
+pub struct SubscriptionContext<'a> {
+    pub hub: &'a SubscriptionHub,
+    /// Push channel for *this* connection. Used by the hub to fan out
+    /// published events onto the socket.
+    pub push_tx: mpsc::Sender<String>,
+    /// Subscription ids owned by this connection, for cleanup on drop.
+    pub owned_ids: &'a mut Vec<String>,
+}
+
+/// Sync dispatch — used by the stdin/readline loops. Subscriptions are
+/// unsupported here (there's no push channel to write to) and requests
+/// for `subscribe` / `unsubscribe` will come back with method not found.
 pub fn dispatch(
     config: &DynamicConfig,
     stats: Option<&SharedStats>,
     critical_window: Option<&CriticalWindow>,
+    line: &str,
+) -> Option<Response> {
+    dispatch_inner(config, stats, critical_window, None, line)
+}
+
+/// Async dispatch — used by the Unix socket handler, which has a push
+/// channel and can support subscriptions. Any `subscribe`/`unsubscribe`
+/// request routes through the given hub.
+pub async fn dispatch_async(
+    config: &DynamicConfig,
+    stats: Option<&SharedStats>,
+    critical_window: Option<&CriticalWindow>,
+    subscription_ctx: Option<&mut SubscriptionContext<'_>>,
+    line: &str,
+) -> Option<Response> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let req: Request = match serde_json::from_str(line) {
+        Ok(r) => r,
+        Err(e) => {
+            return Some(Response::err(
+                Value::Null,
+                ErrorObject {
+                    code: PARSE_ERROR,
+                    message: "parse error".into(),
+                    data: Some(Value::String(e.to_string())),
+                },
+            ));
+        }
+    };
+    if req.jsonrpc != JSONRPC_VERSION {
+        return req.id.map(|id| {
+            Response::err(
+                id,
+                ErrorObject::new(INVALID_REQUEST, "jsonrpc version must be \"2.0\""),
+            )
+        });
+    }
+
+    let is_notification = req.id.is_none();
+    let id_for_response = req.id.clone().unwrap_or(Value::Null);
+
+    let result = match (req.method.as_str(), subscription_ctx) {
+        ("subscribe", Some(ctx)) => handle_subscribe(ctx, &req.params).await,
+        ("unsubscribe", Some(ctx)) => handle_unsubscribe(ctx, &req.params).await,
+        ("get_subscription_count", Some(ctx)) => {
+            Ok(serde_json::json!({ "count": ctx.hub.len().await }))
+        }
+        (_, _) => handle_method(config, stats, critical_window, &req.method, &req.params),
+    };
+
+    if is_notification {
+        return None;
+    }
+    Some(match result {
+        Ok(value) => Response::ok(id_for_response, value),
+        Err(err) => Response::err(id_for_response, err),
+    })
+}
+
+async fn handle_subscribe(
+    ctx: &mut SubscriptionContext<'_>,
+    params: &Value,
+) -> Result<Value, ErrorObject> {
+    let topic = params
+        .get("topic")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ErrorObject::new(INVALID_PARAMS, "expected params.topic: string"))?;
+    if !is_known_topic(topic) {
+        return Err(ErrorObject::new(
+            INVALID_PARAMS,
+            format!("unknown topic: {topic}"),
+        ));
+    }
+    let id = ctx.hub.subscribe(topic, ctx.push_tx.clone()).await;
+    ctx.owned_ids.push(id.clone());
+    Ok(serde_json::json!({ "subscription_id": id }))
+}
+
+async fn handle_unsubscribe(
+    ctx: &mut SubscriptionContext<'_>,
+    params: &Value,
+) -> Result<Value, ErrorObject> {
+    let id = params
+        .get("subscription_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ErrorObject::new(INVALID_PARAMS, "expected params.subscription_id: string")
+        })?;
+    let removed = ctx.hub.unsubscribe(id).await;
+    ctx.owned_ids.retain(|x| x != id);
+    Ok(serde_json::json!({ "removed": removed }))
+}
+
+fn is_known_topic(topic: &str) -> bool {
+    matches!(topic, "stats" | "priority.window")
+}
+
+fn dispatch_inner(
+    config: &DynamicConfig,
+    stats: Option<&SharedStats>,
+    critical_window: Option<&CriticalWindow>,
+    _subscription_ctx: Option<&SubscriptionContext>,
     line: &str,
 ) -> Option<Response> {
     let line = line.trim();

@@ -83,9 +83,43 @@ Result:
 
 Return per-link telemetry (the JSON previously returned by `stats`).
 
-## Reserved
+## Subscriptions
 
-`subscribe` and `unsubscribe` are reserved for a future push-based streaming protocol (stats deltas, hint-consumed events, link up/down). Calls currently return `-32601 method not found`.
+The Unix control socket supports server-push subscriptions. Polling `get_stats` at 1 Hz misses sub-second link-state changes (NAK bursts, quality drops, reconnects); subscriptions let clients receive push events on the same socket they already use for requests.
+
+### `subscribe`
+
+Params: `{ "topic": "stats" | "priority.window" }`. Result: `{ "subscription_id": string }`.
+
+### `unsubscribe`
+
+Params: `{ "subscription_id": string }`. Result: `{ "removed": bool }`.
+
+### Push events
+
+Server-originated notifications are sent on the same connection:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "stats.update",
+  "params": {
+    "subscription_id": "sub-0",
+    "data": { /* StatsSnapshot */ }
+  }
+}
+```
+
+Topics currently implemented:
+
+| Topic | Data | Cadence |
+| --- | --- | --- |
+| `stats` | Full `StatsSnapshot` (same shape as `get_stats`) | Once per second, aligned with housekeeping |
+| `priority.window` | `{ at_ms, window_ms, deadline_ms }` | Once per keyframe window from the priority sidecar |
+
+Subscriptions live for the life of the connection. Dropping the socket cancels every subscription it owns.
+
+Stdin is request-only — subscriptions only work on the Unix socket.
 
 ## Error codes
 

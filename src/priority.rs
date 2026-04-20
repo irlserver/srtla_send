@@ -89,10 +89,14 @@ impl CriticalWindow {
 }
 
 /// Spawn a listener task that consumes priority datagrams from `bind_addr`
-/// and pushes the derived deadlines into `state`.
+/// and pushes the derived deadlines into `state`. If `hub` is provided,
+/// also publishes a `priority.window` event to subscribers on each
+/// accepted datagram so downstream consumers can correlate priority
+/// events with video keyframes in real time.
 pub fn spawn_listener(
     bind_addr: SocketAddr,
     state: CriticalWindow,
+    hub: Option<crate::subscriptions::SubscriptionHub>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let sock = match UdpSocket::bind(bind_addr).await {
@@ -121,6 +125,17 @@ pub fn spawn_listener(
                     let now = crate::utils::now_ms();
                     state.extend_to(now + window_ms);
                     trace!(window_ms, "critical window extended");
+                    if let Some(ref hub) = hub {
+                        hub.publish(
+                            "priority.window",
+                            serde_json::json!({
+                                "at_ms": now,
+                                "window_ms": window_ms,
+                                "deadline_ms": now + window_ms,
+                            }),
+                        )
+                        .await;
+                    }
                 }
                 Err(e) => {
                     warn!(error = %e, "priority sidecar recv error");

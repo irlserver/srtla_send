@@ -4,17 +4,9 @@
 //! actual wire protocol lives in [`crate::control`] — this module exposes
 //! plain getters/setters that the control dispatcher calls into.
 
-#[cfg(unix)]
-use std::io::Write;
 use std::io::{BufRead, BufReader};
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-
-#[cfg(unix)]
-use tracing::debug;
-use tracing::{info, warn};
 
 use crate::control::dispatch;
 use crate::mode::SchedulingMode;
@@ -133,45 +125,22 @@ impl DynamicConfig {
     }
 }
 
-pub fn spawn_config_listener(
+/// Spawn the stdin command reader in a std::thread. Stdin on Linux
+/// doesn't have a clean async story — easier to stay blocking here.
+/// The Unix control socket, which actually needs subscriptions, lives
+/// in an async tokio task launched by main instead.
+pub fn spawn_stdin_listener(
     config: DynamicConfig,
-    socket_path: Option<String>,
     stats: SharedStats,
     critical_window: CriticalWindow,
-) {
-    if let Some(sock_path) = socket_path {
-        // Socket path specified: use Unix socket on Unix, fallback to stdin on other platforms
-        #[cfg(unix)]
-        {
-            let config_clone = config.clone();
-            let stats_clone = stats.clone();
-            let cw = critical_window.clone();
-            std::thread::spawn(move || {
-                unix_socket_loop(&config_clone, &sock_path, &stats_clone, &cw);
-            });
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = sock_path;
-            spawn_stdin_listener(config, Some(stats), Some(critical_window));
-        }
-    } else {
-        spawn_stdin_listener(config, Some(stats), Some(critical_window));
-    }
-}
-
-fn spawn_stdin_listener(
-    config: DynamicConfig,
-    stats: Option<SharedStats>,
-    critical_window: Option<CriticalWindow>,
 ) {
     std::thread::spawn(move || {
         let reader = BufReader::new(std::io::stdin());
         for line in reader.lines().map_while(Result::ok) {
             if let Some(resp) = dispatch(
                 &config,
-                stats.as_ref(),
-                critical_window.as_ref(),
+                Some(&stats),
+                Some(&critical_window),
                 line.trim(),
             ) {
                 // Responses on stdin just go to stdout so scripts can pipe.
@@ -179,78 +148,6 @@ fn spawn_stdin_listener(
             }
         }
     });
-}
-
-#[cfg(unix)]
-fn unix_socket_loop(
-    config: &DynamicConfig,
-    socket_path: &str,
-    stats: &SharedStats,
-    critical_window: &CriticalWindow,
-) {
-    // Remove existing socket file if it exists
-    let _ = std::fs::remove_file(socket_path);
-
-    let listener = match UnixListener::bind(socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            warn!("failed to bind unix socket {}: {}", socket_path, e);
-            return;
-        }
-    };
-
-    info!("unix socket listening at: {}", socket_path);
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let config_clone = config.clone();
-                let stats_clone = stats.clone();
-                let cw_clone = critical_window.clone();
-                std::thread::spawn(move || {
-                    handle_unix_client(config_clone, stream, stats_clone, cw_clone);
-                });
-            }
-            Err(e) => {
-                debug!("unix socket accept error: {}", e);
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn handle_unix_client(
-    config: DynamicConfig,
-    mut stream: UnixStream,
-    stats: SharedStats,
-    critical_window: CriticalWindow,
-) {
-    // Clone stream for reading (we need separate read/write handles)
-    let read_stream = match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let reader = BufReader::new(read_stream);
-
-    for line in reader.lines() {
-        match line {
-            Ok(cmd) => {
-                if let Some(resp) =
-                    dispatch(&config, Some(&stats), Some(&critical_window), cmd.trim())
-                {
-                    if let Err(e) = writeln!(stream, "{}", resp.to_json()) {
-                        debug!("failed to write response: {}", e);
-                        break;
-                    }
-                    if let Err(e) = stream.flush() {
-                        debug!("failed to flush response: {}", e);
-                        break;
-                    }
-                }
-            }
-            Err(_) => break,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -49,6 +49,7 @@ use crate::stats::SharedStats;
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
 const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_sender_with_config(
     local_srt_port: u16,
     receiver_host: &str,
@@ -57,6 +58,7 @@ pub async fn run_sender_with_config(
     config: DynamicConfig,
     shared_stats: SharedStats,
     critical_window: crate::priority::CriticalWindow,
+    subscription_hub: crate::subscriptions::SubscriptionHub,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}, mode={}",
@@ -238,6 +240,14 @@ pub async fn run_sender_with_config(
 
                         // Update shared stats for telemetry export
                         shared_stats.update(&connections, &config.snapshot());
+
+                        // Fan the fresh snapshot out to any `stats` subscribers
+                        // on the async control socket. Cheap no-op if no one
+                        // is subscribed.
+                        let snap = shared_stats.get();
+                        if let Ok(value) = serde_json::to_value(&snap) {
+                            subscription_hub.publish("stats", value).await;
+                        }
 
                         if let Some(changes) = pending_changes.take()
                             && let Some(new_ips) = changes.new_ips

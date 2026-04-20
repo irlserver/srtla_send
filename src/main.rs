@@ -10,8 +10,10 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod config;
 mod connection;
 mod control;
+mod control_socket;
 mod metrics;
 mod priority;
+mod subscriptions;
 mod ewma;
 mod kalman;
 mod mode;
@@ -138,9 +140,15 @@ async fn main() -> Result<()> {
     // Create shared stats for telemetry export
     let shared_stats = stats::SharedStats::new();
 
+    let subscription_hub = subscriptions::SubscriptionHub::new();
+
     let critical_window = priority::CriticalWindow::new();
     if let Some(bind) = args.priority_bind {
-        priority::spawn_listener(bind, critical_window.clone());
+        priority::spawn_listener(
+            bind,
+            critical_window.clone(),
+            Some(subscription_hub.clone()),
+        );
     }
 
     if let Some(bind) = args.metrics_bind {
@@ -152,13 +160,22 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Start config listener (stdin or Unix socket)
-    config::spawn_config_listener(
+    // Stdin reader stays blocking; Unix socket goes async to support
+    // subscription pushes.
+    config::spawn_stdin_listener(
         config.clone(),
-        args.control_socket,
         shared_stats.clone(),
         critical_window.clone(),
     );
+    if let Some(sock_path) = args.control_socket {
+        control_socket::spawn(
+            sock_path,
+            config.clone(),
+            shared_stats.clone(),
+            critical_window.clone(),
+            subscription_hub.clone(),
+        );
+    }
 
     sender::run_sender_with_config(
         local_srt_port,
@@ -168,6 +185,7 @@ async fn main() -> Result<()> {
         config,
         shared_stats,
         critical_window,
+        subscription_hub,
     )
     .await
     .context("srtla_send failed")
