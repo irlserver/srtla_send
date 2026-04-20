@@ -10,6 +10,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod config;
 mod connection;
 mod control;
+mod priority;
 mod ewma;
 mod kalman;
 mod mode;
@@ -76,6 +77,13 @@ struct Cli {
     /// RTT delta threshold in ms (rtt-threshold only, links within min_rtt + delta are "fast")
     #[arg(long = "rtt-delta-ms", default_value = "30")]
     rtt_delta_ms: u32,
+
+    /// UDP bind address for the keyframe priority sidecar. Upstream encoders
+    /// send 5-byte datagrams here to open a critical routing window. Omit to
+    /// disable the sidecar and rely solely on the packet-size heuristic.
+    /// Example: `127.0.0.1:7000`.
+    #[arg(long = "priority-bind")]
+    priority_bind: Option<std::net::SocketAddr>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -124,8 +132,18 @@ async fn main() -> Result<()> {
     // Create shared stats for telemetry export
     let shared_stats = stats::SharedStats::new();
 
+    let critical_window = priority::CriticalWindow::new();
+    if let Some(bind) = args.priority_bind {
+        priority::spawn_listener(bind, critical_window.clone());
+    }
+
     // Start config listener (stdin or Unix socket)
-    config::spawn_config_listener(config.clone(), args.control_socket, shared_stats.clone());
+    config::spawn_config_listener(
+        config.clone(),
+        args.control_socket,
+        shared_stats.clone(),
+        critical_window.clone(),
+    );
 
     sender::run_sender_with_config(
         local_srt_port,
@@ -134,6 +152,7 @@ async fn main() -> Result<()> {
         ips_file,
         config,
         shared_stats,
+        critical_window,
     )
     .await
     .context("srtla_send failed")

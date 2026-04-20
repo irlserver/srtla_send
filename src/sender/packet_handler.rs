@@ -237,7 +237,7 @@ pub async fn handle_srt_packet(
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
-    config: &crate::config::DynamicConfig,
+    critical_window: &crate::priority::CriticalWindow,
     keyframe_detector: &mut KeyframeDetector,
 ) {
     match res {
@@ -280,22 +280,22 @@ pub async fn handle_srt_packet(
 
             // Keyframe priority: for SRT data packets, combine two signals —
             // the packet-size heuristic (runs of 1316-byte packets) and the
-            // out-of-band hint budget supplied by an encoder that actually
-            // knows which packets are IDR / SPS / PPS. Either signal routes
+            // priority-sidecar "critical window" set by an encoder that
+            // actually knows a keyframe is in flight. Either signal routes
             // the packet to the highest-quality link. Hints catch the cases
             // the heuristic misses (small keyframes, lone parameter sets).
             //
             // Only data packets have seq != None (control packets have MSB set).
             if seq.is_some() {
                 let heuristic_keyframe = keyframe_detector.observe(n);
-                let hint_critical = config.consume_critical_hint();
-                if (heuristic_keyframe || hint_critical)
+                let window_critical = critical_window.is_critical_now(packet_time_ms);
+                if (heuristic_keyframe || window_critical)
                     && let Some(best_idx) = keyframe::select_best_quality_idx(connections)
                     && sel_idx != Some(best_idx)
                 {
                     trace!(
                         "critical override ({}): link {} -> {}",
-                        if hint_critical { "hint" } else { "heuristic" },
+                        if window_critical { "window" } else { "heuristic" },
                         sel_idx.map_or(-1, |i| i as i64),
                         best_idx as i64
                     );

@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 use crate::control::dispatch;
 use crate::mode::SchedulingMode;
+use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;
 
 /// Default RTT delta threshold in milliseconds.
@@ -59,14 +60,6 @@ pub struct DynamicConfig {
     quality_enabled: Arc<AtomicBool>,
     exploration_enabled: Arc<AtomicBool>,
     rtt_delta_ms: Arc<AtomicU32>,
-    /// Packets still to be treated as critical, supplied out-of-band by an
-    /// encoder that knows which frames are IDR/SPS/PPS. Decremented by one
-    /// per forwarded SRT data packet. Augments (does not replace) the
-    /// packet-size keyframe heuristic in [`crate::sender::keyframe`].
-    critical_hint_remaining: Arc<AtomicU32>,
-    /// Monotonic count of `mark-critical` commands received. Exposed for
-    /// telemetry so it's obvious whether the hint channel is live.
-    critical_hints_total: Arc<AtomicU32>,
 }
 
 impl Default for DynamicConfig {
@@ -82,8 +75,6 @@ impl DynamicConfig {
             quality_enabled: Arc::new(AtomicBool::new(true)),
             exploration_enabled: Arc::new(AtomicBool::new(false)),
             rtt_delta_ms: Arc::new(AtomicU32::new(DEFAULT_RTT_DELTA_MS)),
-            critical_hint_remaining: Arc::new(AtomicU32::new(0)),
-            critical_hints_total: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -99,8 +90,6 @@ impl DynamicConfig {
             quality_enabled: Arc::new(AtomicBool::new(!no_quality)),
             exploration_enabled: Arc::new(AtomicBool::new(exploration)),
             rtt_delta_ms: Arc::new(AtomicU32::new(rtt_delta_ms)),
-            critical_hint_remaining: Arc::new(AtomicU32::new(0)),
-            critical_hints_total: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -142,54 +131,13 @@ impl DynamicConfig {
     pub fn set_rtt_delta_ms(&self, delta: u32) {
         self.rtt_delta_ms.store(delta, Ordering::Relaxed);
     }
-
-    /// Add `count` packets to the critical-hint budget. Called from the
-    /// control socket when an upstream encoder signals that the next N SRT
-    /// data packets carry IDR / parameter-set / other must-land bytes.
-    pub fn add_critical_hint(&self, count: u32) {
-        if count == 0 {
-            return;
-        }
-        self.critical_hint_remaining
-            .fetch_add(count, Ordering::Relaxed);
-        self.critical_hints_total.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Consume one packet from the critical-hint budget. Returns `true` if
-    /// the packet should be scheduled as critical. Cheap enough for the
-    /// per-packet hot path (one atomic CAS on the fast path).
-    #[inline]
-    pub fn consume_critical_hint(&self) -> bool {
-        let mut cur = self.critical_hint_remaining.load(Ordering::Relaxed);
-        while cur > 0 {
-            match self.critical_hint_remaining.compare_exchange_weak(
-                cur,
-                cur - 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(observed) => cur = observed,
-            }
-        }
-        false
-    }
-
-    /// Non-consuming peek, for telemetry.
-    pub fn critical_hint_remaining(&self) -> u32 {
-        self.critical_hint_remaining.load(Ordering::Relaxed)
-    }
-
-    /// Total hints received since start, for telemetry.
-    pub fn critical_hints_total(&self) -> u32 {
-        self.critical_hints_total.load(Ordering::Relaxed)
-    }
 }
 
 pub fn spawn_config_listener(
     config: DynamicConfig,
     socket_path: Option<String>,
     stats: SharedStats,
+    critical_window: CriticalWindow,
 ) {
     if let Some(sock_path) = socket_path {
         // Socket path specified: use Unix socket on Unix, fallback to stdin on other platforms
@@ -197,25 +145,35 @@ pub fn spawn_config_listener(
         {
             let config_clone = config.clone();
             let stats_clone = stats.clone();
+            let cw = critical_window.clone();
             std::thread::spawn(move || {
-                unix_socket_loop(&config_clone, &sock_path, &stats_clone);
+                unix_socket_loop(&config_clone, &sock_path, &stats_clone, &cw);
             });
         }
         #[cfg(not(unix))]
         {
             let _ = sock_path;
-            spawn_stdin_listener(config, Some(stats));
+            spawn_stdin_listener(config, Some(stats), Some(critical_window));
         }
     } else {
-        spawn_stdin_listener(config, Some(stats));
+        spawn_stdin_listener(config, Some(stats), Some(critical_window));
     }
 }
 
-fn spawn_stdin_listener(config: DynamicConfig, stats: Option<SharedStats>) {
+fn spawn_stdin_listener(
+    config: DynamicConfig,
+    stats: Option<SharedStats>,
+    critical_window: Option<CriticalWindow>,
+) {
     std::thread::spawn(move || {
         let reader = BufReader::new(std::io::stdin());
         for line in reader.lines().map_while(Result::ok) {
-            if let Some(resp) = dispatch(&config, stats.as_ref(), line.trim()) {
+            if let Some(resp) = dispatch(
+                &config,
+                stats.as_ref(),
+                critical_window.as_ref(),
+                line.trim(),
+            ) {
                 // Responses on stdin just go to stdout so scripts can pipe.
                 println!("{}", resp.to_json());
             }
@@ -224,7 +182,12 @@ fn spawn_stdin_listener(config: DynamicConfig, stats: Option<SharedStats>) {
 }
 
 #[cfg(unix)]
-fn unix_socket_loop(config: &DynamicConfig, socket_path: &str, stats: &SharedStats) {
+fn unix_socket_loop(
+    config: &DynamicConfig,
+    socket_path: &str,
+    stats: &SharedStats,
+    critical_window: &CriticalWindow,
+) {
     // Remove existing socket file if it exists
     let _ = std::fs::remove_file(socket_path);
 
@@ -243,8 +206,9 @@ fn unix_socket_loop(config: &DynamicConfig, socket_path: &str, stats: &SharedSta
             Ok(stream) => {
                 let config_clone = config.clone();
                 let stats_clone = stats.clone();
+                let cw_clone = critical_window.clone();
                 std::thread::spawn(move || {
-                    handle_unix_client(config_clone, stream, stats_clone);
+                    handle_unix_client(config_clone, stream, stats_clone, cw_clone);
                 });
             }
             Err(e) => {
@@ -255,7 +219,12 @@ fn unix_socket_loop(config: &DynamicConfig, socket_path: &str, stats: &SharedSta
 }
 
 #[cfg(unix)]
-fn handle_unix_client(config: DynamicConfig, mut stream: UnixStream, stats: SharedStats) {
+fn handle_unix_client(
+    config: DynamicConfig,
+    mut stream: UnixStream,
+    stats: SharedStats,
+    critical_window: CriticalWindow,
+) {
     // Clone stream for reading (we need separate read/write handles)
     let read_stream = match stream.try_clone() {
         Ok(s) => s,
@@ -266,7 +235,9 @@ fn handle_unix_client(config: DynamicConfig, mut stream: UnixStream, stats: Shar
     for line in reader.lines() {
         match line {
             Ok(cmd) => {
-                if let Some(resp) = dispatch(&config, Some(&stats), cmd.trim()) {
+                if let Some(resp) =
+                    dispatch(&config, Some(&stats), Some(&critical_window), cmd.trim())
+                {
                     if let Err(e) = writeln!(stream, "{}", resp.to_json()) {
                         debug!("failed to write response: {}", e);
                         break;

@@ -56,6 +56,7 @@ pub async fn run_sender_with_config(
     ips_file: &str,
     config: DynamicConfig,
     shared_stats: SharedStats,
+    critical_window: crate::priority::CriticalWindow,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}, mode={}",
@@ -179,7 +180,7 @@ pub async fn run_sender_with_config(
                             &mut last_client_addr,
                             reg.has_connected,
                             &config_snap,
-                            &config,
+                            &critical_window,
                             &mut keyframe_detector,
                         )
                         .await;

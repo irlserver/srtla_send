@@ -10,9 +10,13 @@
 //! - `set_quality { enabled: bool }`
 //! - `set_exploration { enabled: bool }`
 //! - `set_rtt_delta { delta_ms: u32 }`
-//! - `get_status` → current `ConfigSnapshot` + hint telemetry
-//! - `get_stats` → per-link telemetry (same JSON as the old `stats` command)
-//! - `mark_critical { count: u32 }` — notification (no response required)
+//! - `get_status` → current `ConfigSnapshot`
+//! - `get_stats` → per-link telemetry
+//!
+//! Keyframe / critical-packet hints travel on a dedicated UDP sidecar
+//! (`crate::priority`) rather than over this control socket. The sidecar
+//! shares the network stack with the SRT data path so priority events
+//! are ordered tightly against the packets they describe.
 //!
 //! JSON-RPC error codes follow the spec:
 //! `-32700` parse error, `-32600` invalid request, `-32601` method not found,
@@ -24,6 +28,7 @@ use serde_json::{Value, json};
 
 use crate::config::DynamicConfig;
 use crate::mode::SchedulingMode;
+use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -105,6 +110,7 @@ impl Response {
 pub fn dispatch(
     config: &DynamicConfig,
     stats: Option<&SharedStats>,
+    critical_window: Option<&CriticalWindow>,
     line: &str,
 ) -> Option<Response> {
     let line = line.trim();
@@ -138,7 +144,7 @@ pub fn dispatch(
 
     let is_notification = req.id.is_none();
     let id_for_response = req.id.clone().unwrap_or(Value::Null);
-    let result = handle_method(config, stats, &req.method, &req.params);
+    let result = handle_method(config, stats, critical_window, &req.method, &req.params);
 
     if is_notification {
         return None;
@@ -153,6 +159,7 @@ pub fn dispatch(
 fn handle_method(
     config: &DynamicConfig,
     stats: Option<&SharedStats>,
+    critical_window: Option<&CriticalWindow>,
     method: &str,
     params: &Value,
 ) -> Result<Value, ErrorObject> {
@@ -199,13 +206,16 @@ fn handle_method(
 
         "get_status" => {
             let snap = config.snapshot();
+            let (windows_received, malformed) = critical_window
+                .map(|w| (w.windows_received(), w.malformed_datagrams()))
+                .unwrap_or((0, 0));
             Ok(json!({
                 "mode": snap.mode.to_string(),
                 "quality_enabled": snap.quality_enabled,
                 "exploration_enabled": snap.exploration_enabled,
                 "rtt_delta_ms": snap.rtt_delta_ms,
-                "critical_hints_total": config.critical_hints_total(),
-                "critical_hint_remaining": config.critical_hint_remaining(),
+                "critical_windows_received": windows_received,
+                "critical_malformed_datagrams": malformed,
             }))
         }
 
@@ -219,16 +229,6 @@ fn handle_method(
                 message: "failed to re-parse stats JSON".into(),
                 data: Some(Value::String(e.to_string())),
             })
-        }
-
-        "mark_critical" => {
-            let count = params
-                .get("count")
-                .and_then(Value::as_u64)
-                .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| ErrorObject::new(INVALID_PARAMS, "expected params.count: u32"))?;
-            config.add_critical_hint(count);
-            Ok(json!({ "remaining": config.critical_hint_remaining() }))
         }
 
         // Reserved for the future streaming API. A subscription-capable
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn parse_error_returns_jsonrpc_error() {
         let config = DynamicConfig::new();
-        let resp = dispatch(&config, None, "not valid json").unwrap();
+        let resp = dispatch(&config, None, None,"not valid json").unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], PARSE_ERROR);
         assert_eq!(v["id"], Value::Null);
@@ -279,16 +279,17 @@ mod tests {
     #[test]
     fn notification_returns_none() {
         let config = DynamicConfig::new();
-        let req = r#"{"jsonrpc":"2.0","method":"mark_critical","params":{"count":5}}"#;
-        assert!(dispatch(&config, None, req).is_none());
-        assert_eq!(config.critical_hint_remaining(), 5);
+        // set_mode happens to work as a notification; no id means no response.
+        let req = r#"{"jsonrpc":"2.0","method":"set_mode","params":{"mode":"classic"}}"#;
+        assert!(dispatch(&config, None, None,req).is_none());
+        assert_eq!(config.mode(), SchedulingMode::Classic);
     }
 
     #[test]
     fn set_mode_happy_path() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"set_mode","params":{"mode":"classic"}}"#;
-        let resp = dispatch(&config, None, req).unwrap();
+        let resp = dispatch(&config, None, None,req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["result"]["mode"], "classic");
         assert_eq!(v["id"], 1);
@@ -299,7 +300,7 @@ mod tests {
     fn unknown_method_returns_method_not_found() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"2.0","id":"abc","method":"noop"}"#;
-        let resp = dispatch(&config, None, req).unwrap();
+        let resp = dispatch(&config, None, None,req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], METHOD_NOT_FOUND);
         assert_eq!(v["id"], "abc");
@@ -309,7 +310,7 @@ mod tests {
     fn invalid_params_returns_invalid_params() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"2.0","id":7,"method":"set_rtt_delta","params":{}}"#;
-        let resp = dispatch(&config, None, req).unwrap();
+        let resp = dispatch(&config, None, None,req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], INVALID_PARAMS);
     }
@@ -318,7 +319,7 @@ mod tests {
     fn wrong_jsonrpc_version_rejects() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"1.0","id":1,"method":"get_status"}"#;
-        let resp = dispatch(&config, None, req).unwrap();
+        let resp = dispatch(&config, None, None,req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], INVALID_REQUEST);
     }
@@ -326,25 +327,13 @@ mod tests {
     #[test]
     fn get_status_returns_all_fields() {
         let config = DynamicConfig::new();
-        config.add_critical_hint(3);
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#;
-        let resp = dispatch(&config, None, req).unwrap();
+        let resp = dispatch(&config, None, None,req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         let result = &v["result"];
         assert!(result["mode"].is_string());
         assert!(result["quality_enabled"].is_boolean());
         assert!(result["exploration_enabled"].is_boolean());
         assert!(result["rtt_delta_ms"].is_number());
-        assert_eq!(result["critical_hint_remaining"], 3);
-        assert_eq!(result["critical_hints_total"], 1);
-    }
-
-    #[test]
-    fn mark_critical_returns_remaining_when_called_with_id() {
-        let config = DynamicConfig::new();
-        let req = r#"{"jsonrpc":"2.0","id":9,"method":"mark_critical","params":{"count":4}}"#;
-        let resp = dispatch(&config, None, req).unwrap();
-        let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
-        assert_eq!(v["result"]["remaining"], 4);
     }
 }
