@@ -1,0 +1,39 @@
+src/control_socket.rs
+  1aac6ebbf21e8ee1 1-158
+src/lib.rs
+  1aac6ebbf21e8ee1 16,19
+src/config.rs
+  1aac6ebbf21e8ee1 128-132,142-143
+src/sender/mod.rs
+  1aac6ebbf21e8ee1 52,61,244-251
+docs/CONTROL_PROTOCOL.md
+  1aac6ebbf21e8ee1 86,88-122
+src/main.rs
+  1aac6ebbf21e8ee1 13,16,143-144,147-151,163-165,170-178,188
+src/subscriptions.rs
+  1aac6ebbf21e8ee1 1-192
+src/control.rs
+  1aac6ebbf21e8ee1 33-34,110-125,131-234
+src/priority.rs
+  1aac6ebbf21e8ee1 92-95,99,128-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "03ed91f7028b9b072b6b1b397962ef3fde199c70",
+  "prompts": {
+    "1aac6ebbf21e8ee1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a99f9bb7-4fb6-4787-96bc-e56d187a5b09",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 572,
+      "total_deletions": 125,
+      "accepted_lines": 1337,
+      "overriden_lines": 0
+    }
+  }
+}
