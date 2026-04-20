@@ -1,0 +1,27 @@
+src/sender/mod.rs
+  1aac6ebbf21e8ee1 182
+src/config.rs
+  1aac6ebbf21e8ee1 59-66,82-83,99-100,142-183,361-365,378-391,510-544
+src/sender/packet_handler.rs
+  1aac6ebbf21e8ee1 240,281-287,290-292,297-298
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "4fc707f8784810cf4bfbc0732cfc2bdb01ad22be",
+  "prompts": {
+    "1aac6ebbf21e8ee1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a99f9bb7-4fb6-4787-96bc-e56d187a5b09",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 123,
+      "total_deletions": 6,
+      "accepted_lines": 1372,
+      "overriden_lines": 0
+    }
+  }
+}
