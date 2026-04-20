@@ -51,7 +51,7 @@ The sender supports three mutually exclusive scheduling modes:
 - **Quality-Aware Within Fast Links**: Applies NAK penalties when choosing among fast links
 - **Automatic Fallback**: Uses slow links only when fast links are saturated
 - **Enable via**: `--mode rtt-threshold`
-- **Configure delta**: `--rtt-delta-ms N` (default 30ms) or runtime `rtt-delta N`
+- **Configure delta**: `--rtt-delta-ms N` (default 30ms) or the `set_rtt_delta` JSON-RPC method
 - **Use Case**: Heterogeneous networks where some links have significantly higher latency (e.g., satellite + cellular)
 
 ### Optional Smart Exploration (Enhanced Mode Only)
@@ -59,7 +59,7 @@ The sender supports three mutually exclusive scheduling modes:
 - **Context-Aware Discovery**: Tests alternative connections when current best is degrading and alternatives have recovered
 - **Periodic Fallback**: Every 30 seconds for 300ms as a safety net
 - **Smart Switching**: Tries second-best connections instead of always sticking to current best
-- **Enable via**: `--exploration` flag or runtime command `explore on`
+- **Enable via**: `--exploration` flag or the `set_exploration` JSON-RPC method
 - **Use Case**: More aggressive connection testing in unstable network conditions
 
 ## Assumptions and Prerequisites
@@ -212,26 +212,34 @@ Type commands directly into the running process and press Enter.
 
 ### Method 2: Unix Domain Socket (Unix only)
 
-Use the `--control-socket` option to enable remote control via Unix socket:
+Use the `--control-socket` option to enable remote control via Unix socket. The wire format is JSON-RPC 2.0, one request per line. Full method reference lives at [docs/CONTROL_PROTOCOL.md](docs/CONTROL_PROTOCOL.md).
 
 ```bash
 # Start with Unix socket control
 ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 10.0.0.1 5000 /tmp/srtla_ips
 
-# Send commands remotely
-echo 'mode classic' | socat - UNIX-CONNECT:/tmp/srtla.sock
-echo 'status' | socat - UNIX-CONNECT:/tmp/srtla.sock
+# Fetch current status
+echo '{"jsonrpc":"2.0","id":1,"method":"get_status"}' \
+    | socat - UNIX-CONNECT:/tmp/srtla.sock
+
+# Switch scheduler mode
+echo '{"jsonrpc":"2.0","id":1,"method":"set_mode","params":{"mode":"classic"}}' \
+    | socat - UNIX-CONNECT:/tmp/srtla.sock
+
+# Keyframe hint (notification, no response)
+echo '{"jsonrpc":"2.0","method":"mark_critical","params":{"count":23}}' \
+    | socat - UNIX-CONNECT:/tmp/srtla.sock
 ```
 
-### Available Commands
+### Available Methods
 
-- `mode classic` - Switch to classic mode
-- `mode enhanced` - Switch to enhanced mode (default)
-- `mode rtt-threshold` - Switch to RTT-threshold mode
-- `quality on|off` - Enable/disable quality scoring
-- `explore on|off` - Enable/disable connection exploration
-- `rtt-delta <ms>` - Set RTT delta threshold in milliseconds
-- `status` - Display current configuration
+- `set_mode { "mode": "classic"|"enhanced"|"rtt-threshold"|"edpf" }`
+- `set_quality { "enabled": bool }`
+- `set_exploration { "enabled": bool }`
+- `set_rtt_delta { "delta_ms": u32 }`
+- `get_status` — returns the full config snapshot and keyframe-hint telemetry
+- `get_stats` — returns per-link telemetry JSON
+- `mark_critical { "count": u32 }` — encoder hint that the next N SRT data packets are critical (IDR / SPS / PPS). Best called as a JSON-RPC notification (no `id`).
 
 ### Connection Selection Algorithm Details
 
@@ -331,8 +339,8 @@ With properly configured connections, you should observe:
 **If only some connections are used**:
 
 1. Check for NAKs in logs - degraded connections naturally get less traffic in enhanced mode
-2. Try classic mode: `mode classic` - disables quality awareness for pure capacity-based distribution
-3. Temporarily disable quality scoring: `quality off`
+2. Try classic mode via `set_mode { "mode": "classic" }` - disables quality awareness for pure capacity-based distribution
+3. Temporarily disable quality scoring via `set_quality { "enabled": false }`
 4. Verify all uplinks can reach the receiver (check for timeout messages)
 5. Check RTT differences - high-RTT connections get slightly less traffic in enhanced mode (3% max difference)
 

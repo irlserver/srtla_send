@@ -1,6 +1,8 @@
 //! Runtime configuration for SRTLA sender.
 //!
-//! Manages dynamic settings that can be changed at runtime via stdin or Unix socket.
+//! `DynamicConfig` holds atomic state that can be flipped at runtime. The
+//! actual wire protocol lives in [`crate::control`] — this module exposes
+//! plain getters/setters that the control dispatcher calls into.
 
 #[cfg(unix)]
 use std::io::Write;
@@ -14,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use tracing::debug;
 use tracing::{info, warn};
 
+use crate::control::dispatch;
 use crate::mode::SchedulingMode;
 use crate::stats::SharedStats;
 
@@ -200,201 +203,24 @@ pub fn spawn_config_listener(
         }
         #[cfg(not(unix))]
         {
-            // Unix sockets not available; fall back to stdin listener
-            let _ = sock_path; // suppress unused warning
-            let _ = stats; // suppress unused warning
-            let config_clone = config.clone();
-            std::thread::spawn(move || {
-                let stdin = std::io::stdin();
-                let reader = BufReader::new(stdin);
-                for cmd in reader.lines().map_while(Result::ok) {
-                    apply_cmd(&config_clone, cmd.trim(), None);
-                }
-            });
+            let _ = sock_path;
+            spawn_stdin_listener(config, Some(stats));
         }
     } else {
-        // No socket path: use stdin listener (backward compatibility)
-        let config_clone = config.clone();
-        std::thread::spawn(move || {
-            let stdin = std::io::stdin();
-            let reader = BufReader::new(stdin);
-            for cmd in reader.lines().map_while(Result::ok) {
-                apply_cmd(&config_clone, cmd.trim(), None);
-            }
-        });
+        spawn_stdin_listener(config, Some(stats));
     }
 }
 
-/// Response from apply_cmd that can be sent back to the client.
-#[allow(dead_code)] // Json variant's inner value is read in #[cfg(unix)] code
-pub enum CmdResponse {
-    /// No response needed (command logged via tracing)
-    None,
-    /// JSON response to send back
-    Json(String),
-}
-
-/// Apply a runtime command to the configuration.
-///
-/// Commands:
-/// - `mode classic|enhanced|rtt-threshold` - switch scheduling mode
-/// - `quality on|off` - toggle quality scoring
-/// - `explore on|off` - toggle exploration
-/// - `rtt-delta <ms>` - set RTT delta threshold
-/// - `status` - show current configuration
-/// - `stats` - get per-link telemetry as JSON
-pub fn apply_cmd(config: &DynamicConfig, cmd: &str, stats: Option<&SharedStats>) -> CmdResponse {
-    let cmd = cmd.trim();
-    if cmd.is_empty() {
-        return CmdResponse::None;
-    }
-
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.is_empty() {
-        return CmdResponse::None;
-    }
-
-    match parts[0] {
-        "mode" => {
-            if parts.len() != 2 {
-                warn!("usage: mode classic|enhanced|rtt-threshold|edpf");
-                return CmdResponse::None;
-            }
-            match parts[1] {
-                "classic" => {
-                    config.set_mode(SchedulingMode::Classic);
-                    info!("mode: classic");
-                }
-                "enhanced" => {
-                    config.set_mode(SchedulingMode::Enhanced);
-                    info!("mode: enhanced");
-                }
-                "rtt-threshold" => {
-                    config.set_mode(SchedulingMode::RttThreshold);
-                    info!("mode: rtt-threshold");
-                }
-                "edpf" => {
-                    config.set_mode(SchedulingMode::Edpf);
-                    info!("mode: edpf");
-                }
-                other => {
-                    warn!(
-                        "unknown mode '{}': use classic, enhanced, rtt-threshold, or edpf",
-                        other
-                    );
-                }
+fn spawn_stdin_listener(config: DynamicConfig, stats: Option<SharedStats>) {
+    std::thread::spawn(move || {
+        let reader = BufReader::new(std::io::stdin());
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(resp) = dispatch(&config, stats.as_ref(), line.trim()) {
+                // Responses on stdin just go to stdout so scripts can pipe.
+                println!("{}", resp.to_json());
             }
         }
-
-        "quality" => {
-            if parts.len() != 2 {
-                warn!("usage: quality on|off");
-                return CmdResponse::None;
-            }
-            match parts[1] {
-                "on" => {
-                    config.set_quality_enabled(true);
-                    info!("quality: on");
-                }
-                "off" => {
-                    config.set_quality_enabled(false);
-                    info!("quality: off");
-                }
-                other => {
-                    warn!("invalid value '{}': use on or off", other);
-                }
-            }
-        }
-
-        "explore" => {
-            if parts.len() != 2 {
-                warn!("usage: explore on|off");
-                return CmdResponse::None;
-            }
-            match parts[1] {
-                "on" => {
-                    config.set_exploration_enabled(true);
-                    info!("explore: on");
-                }
-                "off" => {
-                    config.set_exploration_enabled(false);
-                    info!("explore: off");
-                }
-                other => {
-                    warn!("invalid value '{}': use on or off", other);
-                }
-            }
-        }
-
-        "rtt-delta" => {
-            if parts.len() != 2 {
-                warn!("usage: rtt-delta <ms>");
-                return CmdResponse::None;
-            }
-            match parts[1].parse::<u32>() {
-                Ok(delta) => {
-                    config.set_rtt_delta_ms(delta);
-                    info!("rtt-delta: {}ms", delta);
-                }
-                Err(_) => {
-                    warn!("invalid rtt-delta value: {}", parts[1]);
-                }
-            }
-        }
-
-        "status" => {
-            let snap = config.snapshot();
-            info!("mode: {}", snap.mode);
-            info!(
-                "  quality: {}",
-                if snap.quality_enabled { "on" } else { "off" }
-            );
-            info!(
-                "  explore: {}",
-                if snap.exploration_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            );
-            info!("  rtt-delta: {}ms", snap.rtt_delta_ms);
-            info!(
-                "  critical hints: {} total, {} remaining",
-                config.critical_hints_total(),
-                config.critical_hint_remaining()
-            );
-        }
-
-        "stats" => {
-            if let Some(stats) = stats {
-                let json = stats.to_json();
-                info!("stats requested, returning {} bytes", json.len());
-                return CmdResponse::Json(json);
-            } else {
-                warn!("stats not available (no stats provider)");
-            }
-        }
-
-        "mark-critical" => {
-            if parts.len() != 2 {
-                warn!("usage: mark-critical <packet-count>");
-                return CmdResponse::None;
-            }
-            match parts[1].parse::<u32>() {
-                Ok(n) => {
-                    config.add_critical_hint(n);
-                    tracing::debug!("mark-critical: +{n} packets");
-                }
-                Err(_) => warn!("invalid mark-critical count: {}", parts[1]),
-            }
-        }
-
-        other => {
-            warn!("unknown command: {}", other);
-        }
-    }
-
-    CmdResponse::None
+    });
 }
 
 #[cfg(unix)]
@@ -440,10 +266,8 @@ fn handle_unix_client(config: DynamicConfig, mut stream: UnixStream, stats: Shar
     for line in reader.lines() {
         match line {
             Ok(cmd) => {
-                let response = apply_cmd(&config, cmd.trim(), Some(&stats));
-                if let CmdResponse::Json(json) = response {
-                    // Write JSON response followed by newline
-                    if let Err(e) = writeln!(stream, "{}", json) {
+                if let Some(resp) = dispatch(&config, Some(&stats), cmd.trim()) {
+                    if let Err(e) = writeln!(stream, "{}", resp.to_json()) {
                         debug!("failed to write response: {}", e);
                         break;
                     }
@@ -480,88 +304,6 @@ mod tests {
         assert!(!snap.quality_enabled); // no_quality=true means disabled
         assert!(snap.exploration_enabled);
         assert_eq!(snap.rtt_delta_ms, 50);
-    }
-
-    #[test]
-    fn test_mode_commands() {
-        let config = DynamicConfig::new();
-
-        apply_cmd(&config, "mode classic", None);
-        assert_eq!(config.mode(), SchedulingMode::Classic);
-
-        apply_cmd(&config, "mode enhanced", None);
-        assert_eq!(config.mode(), SchedulingMode::Enhanced);
-
-        apply_cmd(&config, "mode rtt-threshold", None);
-        assert_eq!(config.mode(), SchedulingMode::RttThreshold);
-    }
-
-    #[test]
-    fn test_quality_commands() {
-        let config = DynamicConfig::new();
-
-        apply_cmd(&config, "quality off", None);
-        assert!(!config.snapshot().quality_enabled);
-
-        apply_cmd(&config, "quality on", None);
-        assert!(config.snapshot().quality_enabled);
-    }
-
-    #[test]
-    fn test_mark_critical_budget() {
-        let config = DynamicConfig::new();
-        assert_eq!(config.critical_hint_remaining(), 0);
-        assert!(!config.consume_critical_hint());
-
-        apply_cmd(&config, "mark-critical 3", None);
-        assert_eq!(config.critical_hint_remaining(), 3);
-        assert_eq!(config.critical_hints_total(), 1);
-
-        assert!(config.consume_critical_hint());
-        assert!(config.consume_critical_hint());
-        assert!(config.consume_critical_hint());
-        // Budget exhausted.
-        assert!(!config.consume_critical_hint());
-        assert_eq!(config.critical_hint_remaining(), 0);
-
-        // Multiple hints accumulate.
-        apply_cmd(&config, "mark-critical 2", None);
-        apply_cmd(&config, "mark-critical 5", None);
-        assert_eq!(config.critical_hint_remaining(), 7);
-        assert_eq!(config.critical_hints_total(), 3);
-    }
-
-    #[test]
-    fn test_mark_critical_invalid_input() {
-        let config = DynamicConfig::new();
-        apply_cmd(&config, "mark-critical", None);
-        apply_cmd(&config, "mark-critical notanumber", None);
-        apply_cmd(&config, "mark-critical 0", None);
-        // None of those should have registered.
-        assert_eq!(config.critical_hint_remaining(), 0);
-        assert_eq!(config.critical_hints_total(), 0);
-    }
-
-    #[test]
-    fn test_exploration_commands() {
-        let config = DynamicConfig::new();
-
-        apply_cmd(&config, "explore on", None);
-        assert!(config.snapshot().exploration_enabled);
-
-        apply_cmd(&config, "explore off", None);
-        assert!(!config.snapshot().exploration_enabled);
-    }
-
-    #[test]
-    fn test_rtt_delta_commands() {
-        let config = DynamicConfig::new();
-
-        apply_cmd(&config, "rtt-delta 50", None);
-        assert_eq!(config.snapshot().rtt_delta_ms, 50);
-
-        apply_cmd(&config, "rtt-delta 100", None);
-        assert_eq!(config.snapshot().rtt_delta_ms, 100);
     }
 
     #[test]
