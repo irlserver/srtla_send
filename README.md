@@ -237,9 +237,27 @@ echo '{"jsonrpc":"2.0","method":"mark_critical","params":{"count":23}}' \
 - `set_quality { "enabled": bool }`
 - `set_exploration { "enabled": bool }`
 - `set_rtt_delta { "delta_ms": u32 }`
-- `get_status` — returns the full config snapshot and keyframe-hint telemetry
+- `get_status` — returns the full config snapshot and priority-sidecar counters
 - `get_stats` — returns per-link telemetry JSON
-- `mark_critical { "count": u32 }` — encoder hint that the next N SRT data packets are critical (IDR / SPS / PPS). Best called as a JSON-RPC notification (no `id`).
+
+Keyframe priority hints travel on a dedicated UDP sidecar, not the control socket. See [docs/KEYFRAME_PRIORITY.md](docs/KEYFRAME_PRIORITY.md).
+
+## Prometheus `/metrics`
+
+Pass `--metrics-bind ADDR:PORT` to expose a Prometheus scrape endpoint at `/metrics`. No additional deps — hand-rolled over `tokio::net::TcpListener`. Serves `GET /metrics` and `GET /` with text format (version 0.0.4); anything else returns 404. Example:
+
+```
+srtla_send --metrics-bind 127.0.0.1:9099 \
+           --priority-bind 127.0.0.1:7000 \
+           --control-socket /tmp/srtla.sock \
+           6000 rec.example.com 5000 /tmp/uplinks
+```
+
+```
+curl -s 127.0.0.1:9099/metrics
+```
+
+Exposed series include `srtla_send_link_up`, `srtla_send_link_rtt_ms`, `srtla_send_link_window`, `srtla_send_link_in_flight`, `srtla_send_link_nak_total`, `srtla_send_link_bitrate_bps`, `srtla_send_link_quality_multiplier`, plus aggregate `srtla_send_active_links`, `srtla_send_total_window`, `srtla_send_critical_windows_total`, and the current `srtla_send_mode` as a numeric gauge.
 
 ### Connection Selection Algorithm Details
 

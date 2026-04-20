@@ -10,6 +10,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod config;
 mod connection;
 mod control;
+mod metrics;
 mod priority;
 mod ewma;
 mod kalman;
@@ -84,6 +85,11 @@ struct Cli {
     /// Example: `127.0.0.1:7000`.
     #[arg(long = "priority-bind")]
     priority_bind: Option<std::net::SocketAddr>,
+
+    /// TCP bind address for the Prometheus `/metrics` scrape endpoint.
+    /// Omit to disable. Example: `127.0.0.1:9099`.
+    #[arg(long = "metrics-bind")]
+    metrics_bind: Option<std::net::SocketAddr>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -135,6 +141,15 @@ async fn main() -> Result<()> {
     let critical_window = priority::CriticalWindow::new();
     if let Some(bind) = args.priority_bind {
         priority::spawn_listener(bind, critical_window.clone());
+    }
+
+    if let Some(bind) = args.metrics_bind {
+        metrics::spawn_server(
+            bind,
+            shared_stats.clone(),
+            config.clone(),
+            critical_window.clone(),
+        );
     }
 
     // Start config listener (stdin or Unix socket)

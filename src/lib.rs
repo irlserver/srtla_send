@@ -13,6 +13,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub mod config;
 pub mod connection;
 pub mod control;
+pub mod metrics;
 pub mod priority;
 pub mod ewma;
 pub mod kalman;
