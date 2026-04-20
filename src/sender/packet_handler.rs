@@ -237,6 +237,7 @@ pub async fn handle_srt_packet(
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
+    config: &crate::config::DynamicConfig,
     keyframe_detector: &mut KeyframeDetector,
 ) {
     match res {
@@ -277,17 +278,24 @@ pub async fn handle_srt_packet(
                 config_snap,
             );
 
-            // Keyframe priority: for SRT data packets, feed the detector and
-            // override selection when we are inside a keyframe burst.
+            // Keyframe priority: for SRT data packets, combine two signals —
+            // the packet-size heuristic (runs of 1316-byte packets) and the
+            // out-of-band hint budget supplied by an encoder that actually
+            // knows which packets are IDR / SPS / PPS. Either signal routes
+            // the packet to the highest-quality link. Hints catch the cases
+            // the heuristic misses (small keyframes, lone parameter sets).
+            //
             // Only data packets have seq != None (control packets have MSB set).
             if seq.is_some() {
-                let is_keyframe = keyframe_detector.observe(n);
-                if is_keyframe
+                let heuristic_keyframe = keyframe_detector.observe(n);
+                let hint_critical = config.consume_critical_hint();
+                if (heuristic_keyframe || hint_critical)
                     && let Some(best_idx) = keyframe::select_best_quality_idx(connections)
                     && sel_idx != Some(best_idx)
                 {
                     trace!(
-                        "keyframe burst: overriding link {} -> {}",
+                        "critical override ({}): link {} -> {}",
+                        if hint_critical { "hint" } else { "heuristic" },
                         sel_idx.map_or(-1, |i| i as i64),
                         best_idx as i64
                     );

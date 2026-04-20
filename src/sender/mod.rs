@@ -179,6 +179,7 @@ pub async fn run_sender_with_config(
                             &mut last_client_addr,
                             reg.has_connected,
                             &config_snap,
+                            &config,
                             &mut keyframe_detector,
                         )
                         .await;

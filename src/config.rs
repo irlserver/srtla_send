@@ -56,6 +56,14 @@ pub struct DynamicConfig {
     quality_enabled: Arc<AtomicBool>,
     exploration_enabled: Arc<AtomicBool>,
     rtt_delta_ms: Arc<AtomicU32>,
+    /// Packets still to be treated as critical, supplied out-of-band by an
+    /// encoder that knows which frames are IDR/SPS/PPS. Decremented by one
+    /// per forwarded SRT data packet. Augments (does not replace) the
+    /// packet-size keyframe heuristic in [`crate::sender::keyframe`].
+    critical_hint_remaining: Arc<AtomicU32>,
+    /// Monotonic count of `mark-critical` commands received. Exposed for
+    /// telemetry so it's obvious whether the hint channel is live.
+    critical_hints_total: Arc<AtomicU32>,
 }
 
 impl Default for DynamicConfig {
@@ -71,6 +79,8 @@ impl DynamicConfig {
             quality_enabled: Arc::new(AtomicBool::new(true)),
             exploration_enabled: Arc::new(AtomicBool::new(false)),
             rtt_delta_ms: Arc::new(AtomicU32::new(DEFAULT_RTT_DELTA_MS)),
+            critical_hint_remaining: Arc::new(AtomicU32::new(0)),
+            critical_hints_total: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -86,6 +96,8 @@ impl DynamicConfig {
             quality_enabled: Arc::new(AtomicBool::new(!no_quality)),
             exploration_enabled: Arc::new(AtomicBool::new(exploration)),
             rtt_delta_ms: Arc::new(AtomicU32::new(rtt_delta_ms)),
+            critical_hint_remaining: Arc::new(AtomicU32::new(0)),
+            critical_hints_total: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -126,6 +138,48 @@ impl DynamicConfig {
     /// Set the RTT delta threshold in milliseconds.
     pub fn set_rtt_delta_ms(&self, delta: u32) {
         self.rtt_delta_ms.store(delta, Ordering::Relaxed);
+    }
+
+    /// Add `count` packets to the critical-hint budget. Called from the
+    /// control socket when an upstream encoder signals that the next N SRT
+    /// data packets carry IDR / parameter-set / other must-land bytes.
+    pub fn add_critical_hint(&self, count: u32) {
+        if count == 0 {
+            return;
+        }
+        self.critical_hint_remaining
+            .fetch_add(count, Ordering::Relaxed);
+        self.critical_hints_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Consume one packet from the critical-hint budget. Returns `true` if
+    /// the packet should be scheduled as critical. Cheap enough for the
+    /// per-packet hot path (one atomic CAS on the fast path).
+    #[inline]
+    pub fn consume_critical_hint(&self) -> bool {
+        let mut cur = self.critical_hint_remaining.load(Ordering::Relaxed);
+        while cur > 0 {
+            match self.critical_hint_remaining.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => cur = observed,
+            }
+        }
+        false
+    }
+
+    /// Non-consuming peek, for telemetry.
+    pub fn critical_hint_remaining(&self) -> u32 {
+        self.critical_hint_remaining.load(Ordering::Relaxed)
+    }
+
+    /// Total hints received since start, for telemetry.
+    pub fn critical_hints_total(&self) -> u32 {
+        self.critical_hints_total.load(Ordering::Relaxed)
     }
 }
 
@@ -304,6 +358,11 @@ pub fn apply_cmd(config: &DynamicConfig, cmd: &str, stats: Option<&SharedStats>)
                 }
             );
             info!("  rtt-delta: {}ms", snap.rtt_delta_ms);
+            info!(
+                "  critical hints: {} total, {} remaining",
+                config.critical_hints_total(),
+                config.critical_hint_remaining()
+            );
         }
 
         "stats" => {
@@ -313,6 +372,20 @@ pub fn apply_cmd(config: &DynamicConfig, cmd: &str, stats: Option<&SharedStats>)
                 return CmdResponse::Json(json);
             } else {
                 warn!("stats not available (no stats provider)");
+            }
+        }
+
+        "mark-critical" => {
+            if parts.len() != 2 {
+                warn!("usage: mark-critical <packet-count>");
+                return CmdResponse::None;
+            }
+            match parts[1].parse::<u32>() {
+                Ok(n) => {
+                    config.add_critical_hint(n);
+                    tracing::debug!("mark-critical: +{n} packets");
+                }
+                Err(_) => warn!("invalid mark-critical count: {}", parts[1]),
             }
         }
 
@@ -432,6 +505,41 @@ mod tests {
 
         apply_cmd(&config, "quality on", None);
         assert!(config.snapshot().quality_enabled);
+    }
+
+    #[test]
+    fn test_mark_critical_budget() {
+        let config = DynamicConfig::new();
+        assert_eq!(config.critical_hint_remaining(), 0);
+        assert!(!config.consume_critical_hint());
+
+        apply_cmd(&config, "mark-critical 3", None);
+        assert_eq!(config.critical_hint_remaining(), 3);
+        assert_eq!(config.critical_hints_total(), 1);
+
+        assert!(config.consume_critical_hint());
+        assert!(config.consume_critical_hint());
+        assert!(config.consume_critical_hint());
+        // Budget exhausted.
+        assert!(!config.consume_critical_hint());
+        assert_eq!(config.critical_hint_remaining(), 0);
+
+        // Multiple hints accumulate.
+        apply_cmd(&config, "mark-critical 2", None);
+        apply_cmd(&config, "mark-critical 5", None);
+        assert_eq!(config.critical_hint_remaining(), 7);
+        assert_eq!(config.critical_hints_total(), 3);
+    }
+
+    #[test]
+    fn test_mark_critical_invalid_input() {
+        let config = DynamicConfig::new();
+        apply_cmd(&config, "mark-critical", None);
+        apply_cmd(&config, "mark-critical notanumber", None);
+        apply_cmd(&config, "mark-critical 0", None);
+        // None of those should have registered.
+        assert_eq!(config.critical_hint_remaining(), 0);
+        assert_eq!(config.critical_hints_total(), 0);
     }
 
     #[test]
