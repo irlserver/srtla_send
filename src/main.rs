@@ -68,18 +68,15 @@ struct Cli {
     #[arg(long = "config")]
     config_file: Option<String>,
 
-    /// Scheduling mode: classic, enhanced (default), rtt-threshold
+    /// Scheduling mode: classic, enhanced (default)
     #[arg(long = "mode", value_enum, default_value = "enhanced")]
     mode: SchedulingMode,
-    /// Disable quality scoring (enhanced/rtt-threshold only)
+    /// Disable quality scoring (enhanced only)
     #[arg(long = "no-quality")]
     no_quality: bool,
     /// Enable connection exploration (enhanced only)
     #[arg(long = "exploration")]
     exploration: bool,
-    /// RTT delta threshold in ms (rtt-threshold only, links within min_rtt + delta are "fast")
-    #[arg(long = "rtt-delta-ms", default_value = "30")]
-    rtt_delta_ms: u32,
 
     /// UDP bind address for the keyframe priority sidecar. Upstream encoders
     /// send 5-byte datagrams here to open a critical routing window. Omit to
@@ -130,12 +127,7 @@ async fn main() -> Result<()> {
         tracing::debug!("TOML config loaded: {:?}", toml_cfg);
     }
 
-    let config = config::DynamicConfig::from_cli(
-        args.mode,
-        args.no_quality,
-        args.exploration,
-        args.rtt_delta_ms,
-    );
+    let config = config::DynamicConfig::from_cli(args.mode, args.no_quality, args.exploration);
 
     // Create shared stats for telemetry export
     let shared_stats = stats::SharedStats::new();

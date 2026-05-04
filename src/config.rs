@@ -6,16 +6,12 @@
 
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::control::dispatch;
 use crate::mode::SchedulingMode;
 use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;
-
-/// Default RTT delta threshold in milliseconds.
-/// Links within min_rtt + delta are considered "fast" and preferred.
-pub const DEFAULT_RTT_DELTA_MS: u32 = 30;
 
 /// Snapshot of configuration for efficient hot-path access.
 /// Call `DynamicConfig::snapshot()` once per select iteration to avoid
@@ -25,12 +21,11 @@ pub struct ConfigSnapshot {
     pub mode: SchedulingMode,
     pub quality_enabled: bool,
     pub exploration_enabled: bool,
-    pub rtt_delta_ms: u32,
 }
 
 impl ConfigSnapshot {
     /// Check if quality scoring is effective for the current mode.
-    /// Quality scoring only applies to enhanced and rtt-threshold modes.
+    /// Quality scoring only applies to enhanced mode.
     #[inline]
     pub fn effective_quality_enabled(&self) -> bool {
         self.quality_enabled && !self.mode.is_classic()
@@ -51,7 +46,6 @@ pub struct DynamicConfig {
     mode: Arc<AtomicU8>,
     quality_enabled: Arc<AtomicBool>,
     exploration_enabled: Arc<AtomicBool>,
-    rtt_delta_ms: Arc<AtomicU32>,
 }
 
 impl Default for DynamicConfig {
@@ -66,22 +60,15 @@ impl DynamicConfig {
             mode: Arc::new(AtomicU8::new(SchedulingMode::Enhanced.as_u8())),
             quality_enabled: Arc::new(AtomicBool::new(true)),
             exploration_enabled: Arc::new(AtomicBool::new(false)),
-            rtt_delta_ms: Arc::new(AtomicU32::new(DEFAULT_RTT_DELTA_MS)),
         }
     }
 
     /// Create config from CLI arguments.
-    pub fn from_cli(
-        mode: SchedulingMode,
-        no_quality: bool,
-        exploration: bool,
-        rtt_delta_ms: u32,
-    ) -> Self {
+    pub fn from_cli(mode: SchedulingMode, no_quality: bool, exploration: bool) -> Self {
         Self {
             mode: Arc::new(AtomicU8::new(mode.as_u8())),
             quality_enabled: Arc::new(AtomicBool::new(!no_quality)),
             exploration_enabled: Arc::new(AtomicBool::new(exploration)),
-            rtt_delta_ms: Arc::new(AtomicU32::new(rtt_delta_ms)),
         }
     }
 
@@ -94,7 +81,6 @@ impl DynamicConfig {
             mode: SchedulingMode::from_u8(self.mode.load(Ordering::Relaxed)),
             quality_enabled: self.quality_enabled.load(Ordering::Relaxed),
             exploration_enabled: self.exploration_enabled.load(Ordering::Relaxed),
-            rtt_delta_ms: self.rtt_delta_ms.load(Ordering::Relaxed),
         }
     }
 
@@ -117,11 +103,6 @@ impl DynamicConfig {
     /// Set whether exploration is enabled.
     pub fn set_exploration_enabled(&self, enabled: bool) {
         self.exploration_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    /// Set the RTT delta threshold in milliseconds.
-    pub fn set_rtt_delta_ms(&self, delta: u32) {
-        self.rtt_delta_ms.store(delta, Ordering::Relaxed);
     }
 }
 
@@ -161,27 +142,24 @@ mod tests {
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
         assert!(!snap.exploration_enabled);
-        assert_eq!(snap.rtt_delta_ms, DEFAULT_RTT_DELTA_MS);
     }
 
     #[test]
     fn test_config_from_cli() {
-        let config = DynamicConfig::from_cli(SchedulingMode::Classic, true, true, 50);
+        let config = DynamicConfig::from_cli(SchedulingMode::Classic, true, true);
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);
         assert!(!snap.quality_enabled); // no_quality=true means disabled
         assert!(snap.exploration_enabled);
-        assert_eq!(snap.rtt_delta_ms, 50);
     }
 
     #[test]
     fn test_effective_quality() {
-        // Classic mode - quality never effective
+        // Classic mode - quality never effective, exploration never effective
         let snap = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: true,
             exploration_enabled: true,
-            rtt_delta_ms: 30,
         };
         assert!(!snap.effective_quality_enabled());
         assert!(!snap.effective_exploration_enabled());
@@ -191,20 +169,9 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: true,
-            rtt_delta_ms: 30,
         };
         assert!(snap.effective_quality_enabled());
         assert!(snap.effective_exploration_enabled());
-
-        // RTT-threshold mode - quality effective, exploration not
-        let snap = ConfigSnapshot {
-            mode: SchedulingMode::RttThreshold,
-            quality_enabled: true,
-            exploration_enabled: true,
-            rtt_delta_ms: 30,
-        };
-        assert!(snap.effective_quality_enabled());
-        assert!(!snap.effective_exploration_enabled());
     }
 
     #[test]
@@ -218,7 +185,6 @@ mod tests {
             for _ in 0..100 {
                 config_clone.set_mode(SchedulingMode::Classic);
                 config_clone.set_mode(SchedulingMode::Enhanced);
-                config_clone.set_mode(SchedulingMode::RttThreshold);
             }
         });
 

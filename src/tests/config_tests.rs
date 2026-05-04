@@ -11,23 +11,21 @@ mod tests {
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
         assert!(!snap.exploration_enabled);
-        assert_eq!(snap.rtt_delta_ms, 30);
     }
 
     #[test]
     fn test_config_from_cli() {
-        let config = DynamicConfig::from_cli(SchedulingMode::Enhanced, false, false, 30);
+        let config = DynamicConfig::from_cli(SchedulingMode::Enhanced, false, false);
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
         assert!(!snap.exploration_enabled);
 
-        let config = DynamicConfig::from_cli(SchedulingMode::Classic, true, true, 50);
+        let config = DynamicConfig::from_cli(SchedulingMode::Classic, true, true);
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);
         assert!(!snap.quality_enabled);
         assert!(snap.exploration_enabled);
-        assert_eq!(snap.rtt_delta_ms, 50);
     }
 
     #[test]
@@ -57,12 +55,11 @@ mod tests {
     fn test_effective_quality_enabled() {
         use crate::config::ConfigSnapshot;
 
-        // classic mode - quality never effective
+        // classic mode - quality never effective, exploration never effective
         let snap = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: true,
             exploration_enabled: true,
-            rtt_delta_ms: 30,
         };
         assert!(!snap.effective_quality_enabled());
         assert!(!snap.effective_exploration_enabled());
@@ -72,19 +69,8 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: true,
-            rtt_delta_ms: 30,
         };
         assert!(snap.effective_quality_enabled());
         assert!(snap.effective_exploration_enabled());
-
-        // rtt-threshold mode - quality effective, exploration not
-        let snap = ConfigSnapshot {
-            mode: SchedulingMode::RttThreshold,
-            quality_enabled: true,
-            exploration_enabled: true,
-            rtt_delta_ms: 30,
-        };
-        assert!(snap.effective_quality_enabled());
-        assert!(!snap.effective_exploration_enabled());
     }
 }

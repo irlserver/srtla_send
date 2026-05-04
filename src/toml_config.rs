@@ -12,24 +12,16 @@ use tracing::{info, warn};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct TomlConfig {
-    /// Scheduling mode: classic, enhanced, rtt-threshold, edpf.
+    /// Scheduling mode: classic, enhanced.
     pub mode: String,
     /// Disable quality scoring.
     pub no_quality: bool,
     /// Enable connection exploration (enhanced only).
     pub exploration: bool,
-    /// RTT delta threshold in ms (rtt-threshold mode).
-    pub rtt_delta_ms: u32,
 
     // --- Congestion control ---
     /// RTT velocity threshold (ms/sample) above which window recovery is halved.
     pub rtt_velocity_gate: f64,
-
-    // --- EDPF scheduler ---
-    /// Velocity penalty factor for EDPF predicted arrival.
-    pub edpf_velocity_penalty: f64,
-    /// BDP overrun multiplier (links with in-flight > BDP * this are excluded).
-    pub edpf_bdp_overrun_mult: f64,
 
     // --- Link lifecycle ---
     /// RTT probes required during warming phase before going Live.
@@ -56,10 +48,7 @@ impl Default for TomlConfig {
             mode: "enhanced".to_string(),
             no_quality: false,
             exploration: false,
-            rtt_delta_ms: 30,
             rtt_velocity_gate: 2.0,
-            edpf_velocity_penalty: 0.005,
-            edpf_bdp_overrun_mult: 1.5,
             warming_rtt_probes: 2,
             warming_timeout_ms: 5_000,
             degraded_quality_threshold: 0.5,
@@ -103,21 +92,19 @@ mod tests {
         let cfg = TomlConfig::default();
         assert_eq!(cfg.mode, "enhanced");
         assert!(!cfg.no_quality);
-        assert_eq!(cfg.rtt_delta_ms, 30);
         assert!((cfg.rtt_velocity_gate - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_partial_toml() {
         let toml_str = r#"
-            mode = "edpf"
+            mode = "classic"
             rtt_velocity_gate = 3.5
         "#;
         let cfg: TomlConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.mode, "edpf");
+        assert_eq!(cfg.mode, "classic");
         assert!((cfg.rtt_velocity_gate - 3.5).abs() < f64::EPSILON);
         // Defaults for unspecified fields
-        assert_eq!(cfg.rtt_delta_ms, 30);
         assert!(!cfg.no_quality);
     }
 
@@ -127,10 +114,7 @@ mod tests {
             mode = "classic"
             no_quality = true
             exploration = true
-            rtt_delta_ms = 50
             rtt_velocity_gate = 1.0
-            edpf_velocity_penalty = 0.01
-            edpf_bdp_overrun_mult = 2.0
             warming_rtt_probes = 3
             warming_timeout_ms = 10000
             degraded_quality_threshold = 0.3

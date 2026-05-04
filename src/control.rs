@@ -6,10 +6,9 @@
 //! hint-per-keyframe and never wants to block waiting for an ACK.
 //!
 //! Methods:
-//! - `set_mode { mode: "classic"|"enhanced"|"rtt-threshold"|"edpf" }`
+//! - `set_mode { mode: "classic"|"enhanced" }`
 //! - `set_quality { enabled: bool }`
 //! - `set_exploration { enabled: bool }`
-//! - `set_rtt_delta { delta_ms: u32 }`
 //! - `get_status` → current `ConfigSnapshot`
 //! - `get_stats` → per-link telemetry
 //!
@@ -313,18 +312,6 @@ fn handle_method(
             Ok(json!({ "enabled": enabled }))
         }
 
-        "set_rtt_delta" => {
-            let delta = params
-                .get("delta_ms")
-                .and_then(Value::as_u64)
-                .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| {
-                    ErrorObject::new(INVALID_PARAMS, "expected params.delta_ms: u32")
-                })?;
-            config.set_rtt_delta_ms(delta);
-            Ok(json!({ "delta_ms": delta }))
-        }
-
         "get_status" => {
             let snap = config.snapshot();
             let (windows_received, malformed) = critical_window
@@ -334,7 +321,6 @@ fn handle_method(
                 "mode": snap.mode.to_string(),
                 "quality_enabled": snap.quality_enabled,
                 "exploration_enabled": snap.exploration_enabled,
-                "rtt_delta_ms": snap.rtt_delta_ms,
                 "critical_windows_received": windows_received,
                 "critical_malformed_datagrams": malformed,
             }))
@@ -373,13 +359,9 @@ fn parse_mode(s: &str) -> Result<SchedulingMode, ErrorObject> {
     match s {
         "classic" => Ok(SchedulingMode::Classic),
         "enhanced" => Ok(SchedulingMode::Enhanced),
-        "rtt-threshold" => Ok(SchedulingMode::RttThreshold),
-        "edpf" => Ok(SchedulingMode::Edpf),
         other => Err(ErrorObject::new(
             INVALID_PARAMS,
-            format!(
-                "unknown mode '{other}': use classic, enhanced, rtt-threshold, or edpf"
-            ),
+            format!("unknown mode '{other}': use classic or enhanced"),
         )),
     }
 }
@@ -430,7 +412,7 @@ mod tests {
     #[test]
     fn invalid_params_returns_invalid_params() {
         let config = DynamicConfig::new();
-        let req = r#"{"jsonrpc":"2.0","id":7,"method":"set_rtt_delta","params":{}}"#;
+        let req = r#"{"jsonrpc":"2.0","id":7,"method":"set_quality","params":{}}"#;
         let resp = dispatch(&config, None, None,req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], INVALID_PARAMS);
@@ -455,6 +437,5 @@ mod tests {
         assert!(result["mode"].is_string());
         assert!(result["quality_enabled"].is_boolean());
         assert!(result["exploration_enabled"].is_boolean());
-        assert!(result["rtt_delta_ms"].is_number());
     }
 }

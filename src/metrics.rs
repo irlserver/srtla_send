@@ -150,13 +150,11 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
     writeln!(out, "srtla_send_total_in_flight {}", snap.total_in_flight).ok();
 
     // Scheduler config surfaced as a gauge so Grafana can pivot on it.
-    writeln!(out, "# HELP srtla_send_mode scheduling mode (0=classic,1=enhanced,2=rtt-threshold,3=edpf)").ok();
+    writeln!(out, "# HELP srtla_send_mode scheduling mode (0=classic,1=enhanced)").ok();
     writeln!(out, "# TYPE srtla_send_mode gauge").ok();
     let mode = match config.mode() {
         SchedulingMode::Classic => 0,
         SchedulingMode::Enhanced => 1,
-        SchedulingMode::RttThreshold => 2,
-        SchedulingMode::Edpf => 3,
     };
     writeln!(out, "srtla_send_mode {mode}").ok();
 

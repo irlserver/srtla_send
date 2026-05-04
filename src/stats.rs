@@ -65,7 +65,7 @@ pub struct LinkStats {
     /// Base score: window / (in_flight + 1). Used by classic mode.
     /// Higher score = more available capacity on this link.
     pub base_score: i32,
-    /// Quality multiplier (0.35 to 1.1) used by enhanced/rtt-threshold modes.
+    /// Quality multiplier (0.35 to 1.1) used by enhanced mode.
     /// - 1.1 = perfect (no NAKs ever)
     /// - 1.0 = normal
     /// - <1.0 = degraded due to recent NAKs
@@ -79,12 +79,10 @@ pub struct LinkStats {
 /// Aggregate statistics snapshot.
 #[derive(Clone, Debug, Serialize)]
 pub struct StatsSnapshot {
-    /// Current scheduling mode: "classic", "enhanced", or "rtt-threshold"
+    /// Current scheduling mode: "classic" or "enhanced"
     pub mode: String,
     /// Whether quality scoring is enabled (always false for classic mode)
     pub quality_enabled: bool,
-    /// RTT delta threshold in ms (only relevant for rtt-threshold mode)
-    pub rtt_delta_ms: u32,
 
     /// Number of links that are connected AND not timed out
     pub active_links: usize,
@@ -105,7 +103,6 @@ impl Default for StatsSnapshot {
         Self {
             mode: "enhanced".to_string(),
             quality_enabled: true,
-            rtt_delta_ms: 30,
             active_links: 0,
             total_links: 0,
             total_window: 0,
@@ -139,7 +136,6 @@ impl SharedStats {
         let mut snapshot = StatsSnapshot {
             mode: format!("{}", config.mode),
             quality_enabled,
-            rtt_delta_ms: config.rtt_delta_ms,
             total_links: connections.len(),
             ..Default::default()
         };
@@ -220,7 +216,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
         };
         stats.update(&[], &config);
         let snapshot = stats.get();

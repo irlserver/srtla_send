@@ -68,7 +68,7 @@ pub(crate) fn log_connection_status(
     info!("  Mode: {}", snap.mode);
     match snap.mode {
         crate::mode::SchedulingMode::Classic => {
-            info!("    (quality/exploration/rtt-delta not applicable)");
+            info!("    (quality/exploration not applicable)");
         }
         crate::mode::SchedulingMode::Enhanced => {
             info!(
@@ -80,16 +80,6 @@ pub(crate) fn log_connection_status(
                     "OFF"
                 }
             );
-        }
-        crate::mode::SchedulingMode::RttThreshold => {
-            info!(
-                "    Quality: {}, RTT delta: {}ms",
-                if snap.quality_enabled { "ON" } else { "OFF" },
-                snap.rtt_delta_ms
-            );
-        }
-        crate::mode::SchedulingMode::Edpf => {
-            info!("    EDPF pipeline: BLEST + IoDS + EDPF");
         }
     }
 

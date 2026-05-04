@@ -27,7 +27,7 @@ mod tests {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
+
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
@@ -55,7 +55,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
+
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
@@ -84,7 +84,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
+
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
@@ -110,7 +110,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
+
         };
 
         // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
@@ -146,7 +146,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
+
         };
 
         // After cooldown: per-packet selection can now choose the better connection
@@ -186,7 +186,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
+
         };
 
         // Cooldown is bypassed when current connection is invalid/timed out
@@ -223,7 +223,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: true, // exploration enabled
-            rtt_delta_ms: 30,
+
         };
 
         // Enable exploration, but should be blocked by cooldown
@@ -261,7 +261,7 @@ mod tests {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
+
         };
 
         // Classic mode: per-packet selection ALWAYS picks highest score connection
@@ -474,7 +474,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
-            rtt_delta_ms: 30,
+
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
@@ -492,7 +492,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: true,
-            rtt_delta_ms: 30,
+
         };
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
@@ -510,7 +510,6 @@ mod tests {
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
         assert!(!snap.exploration_enabled);
-        assert_eq!(snap.rtt_delta_ms, 30);
     }
 
     #[test]

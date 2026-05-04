@@ -18,6 +18,3 @@ pub mod integration_tests;
 
 #[cfg(test)]
 pub mod end_to_end_tests;
-
-#[cfg(test)]
-pub mod rtt_threshold_tests;
