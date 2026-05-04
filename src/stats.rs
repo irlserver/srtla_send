@@ -24,7 +24,11 @@ use serde::Serialize;
 
 use crate::config::ConfigSnapshot;
 use crate::connection::SrtlaConnection;
-use crate::sender::{ClassificationResult, WeakReason, calculate_quality_multiplier};
+use std::collections::HashMap;
+
+use crate::sender::{
+    CcState, ClassificationResult, LinkCcSnapshot, WeakReason, calculate_quality_multiplier,
+};
 use crate::utils::now_ms;
 
 /// Per-link statistics.
@@ -91,6 +95,24 @@ pub struct LinkStats {
     /// Threshold the share was checked against (permille). Reflects
     /// entering vs leaving for hysteresis.
     pub weak_threshold_permille: u32,
+
+    // --- Per-link CC soft cap (shadow mode) ---
+    //
+    // Output of `LinkCcController::tick_all`. Currently informational
+    // only — selection does not yet treat `cc_target_bps` as a soft
+    // cap. After a soak window the cap wires into the Enhanced score.
+    /// Current state: `bootstrap` / `climbing` / `holding` / `backing_off`.
+    pub cc_state: String,
+    /// Target sendable rate this link's CC believes is sustainable (bps).
+    pub cc_target_bps: u64,
+    /// Age-bucketed RTT EWMA (ms) — input to the CC state machine.
+    pub cc_rtt_ewma_ms: f64,
+    /// 1:3 weighted moving deviation around `cc_rtt_ewma_ms` (ms).
+    pub cc_rtt_var_ms: f64,
+    /// Lowest RTT ever observed on this link (ms).
+    pub cc_rtt_min_ms: f64,
+    /// Loss permille over the 1s rolling window.
+    pub cc_loss_permille: u32,
 }
 
 /// Aggregate statistics snapshot.
@@ -164,6 +186,7 @@ impl SharedStats {
         connections: &[SrtlaConnection],
         config: &ConfigSnapshot,
         classification: Option<&ClassificationResult>,
+        link_cc: Option<&HashMap<u64, LinkCcSnapshot>>,
     ) {
         let current_time_ms = now_ms();
         let quality_enabled = config.quality_enabled && !config.mode.is_classic();
@@ -203,6 +226,20 @@ impl SharedStats {
                 None => (false, "unknown".to_string(), 0, 0),
             };
 
+            let cc_entry = link_cc.and_then(|m| m.get(&conn.conn_id).copied());
+            let (cc_state, cc_target_bps, cc_rtt_ewma, cc_rtt_var, cc_rtt_min, cc_loss_pm) =
+                match cc_entry {
+                    Some(s) => (
+                        cc_state_str(s.state).to_string(),
+                        s.target_bps,
+                        s.rtt_ewma_ms,
+                        s.rtt_var_ms,
+                        s.rtt_min_ms,
+                        s.loss_permille,
+                    ),
+                    None => ("unknown".to_string(), 0, 0.0, 0.0, 0.0, 0),
+                };
+
             let link = LinkStats {
                 ip: conn.local_ip,
                 label: conn.label.clone(),
@@ -221,6 +258,12 @@ impl SharedStats {
                 weak_reason,
                 weak_share_permille: weak_share,
                 weak_threshold_permille: weak_threshold,
+                cc_state,
+                cc_target_bps,
+                cc_rtt_ewma_ms: cc_rtt_ewma,
+                cc_rtt_var_ms: cc_rtt_var,
+                cc_rtt_min_ms: cc_rtt_min,
+                cc_loss_permille: cc_loss_pm,
             };
 
             if is_active {
@@ -261,6 +304,10 @@ fn weak_reason_str(reason: WeakReason) -> &'static str {
     }
 }
 
+fn cc_state_str(state: CcState) -> &'static str {
+    state.as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,7 +329,7 @@ mod tests {
             quality_enabled: true,
             exploration_enabled: false,
         };
-        stats.update(&[], &config, None);
+        stats.update(&[], &config, None, None);
         let snapshot = stats.get();
         assert_eq!(snapshot.mode, "enhanced");
         assert!(snapshot.quality_enabled);

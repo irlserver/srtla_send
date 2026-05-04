@@ -20,6 +20,7 @@ mod classic;
 pub mod classifier;
 mod enhanced;
 mod exploration;
+pub mod link_cc;
 mod quality;
 
 // Re-export for backward compatibility

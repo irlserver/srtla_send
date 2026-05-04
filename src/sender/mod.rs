@@ -32,6 +32,7 @@ use packet_handler::{
 #[allow(unused_imports)]
 pub use selection::calculate_quality_multiplier;
 pub use selection::classifier::{ClassificationResult, WeakReason};
+pub use selection::link_cc::{CcState, LinkCcSnapshot};
 // `select_connection_idx` is consumed by `packet_handler` via its own
 // `super::selection::select_connection_idx` path. The re-export is here
 // for tests that import the sender public surface with a glob.
@@ -149,6 +150,8 @@ pub async fn run_sender_with_config(
     let mut keyframe_detector = keyframe::KeyframeDetector::new();
     // Weak-link classifier (shadow mode — telemetry only, not consumed by selection yet).
     let mut weak_link_filter = selection::classifier::WeakLinkFilter::new();
+    // Per-link CC soft-cap controller (shadow mode — same caveat).
+    let mut link_cc_controller = selection::link_cc::LinkCcController::new();
 
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
@@ -246,14 +249,18 @@ pub async fn run_sender_with_config(
                             warn!("housekeeping failed: {err}");
                         }
 
-                        // Run the weak-link classifier in shadow mode and feed
-                        // the result into stats. Selection does not consume
-                        // these flags yet — soak window first.
+                        // Run the weak-link classifier and per-link CC
+                        // controller in shadow mode and feed the result
+                        // into stats. Selection does not consume these
+                        // signals yet — soak window first.
                         let classification = weak_link_filter.classify(&connections);
+                        let link_cc_snapshots = link_cc_controller
+                            .tick_all(&connections, crate::utils::now_ms());
                         shared_stats.update(
                             &connections,
                             &config.snapshot(),
                             Some(&classification),
+                            Some(&link_cc_snapshots),
                         );
 
                         // Fan the fresh snapshot out to any `stats` subscribers
