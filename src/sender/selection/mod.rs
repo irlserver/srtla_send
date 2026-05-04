@@ -17,6 +17,7 @@
 //! - Time-based switch dampening to prevent rapid thrashing
 
 mod classic;
+pub mod classifier;
 mod enhanced;
 mod exploration;
 mod quality;

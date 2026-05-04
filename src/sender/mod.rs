@@ -30,7 +30,13 @@ use packet_handler::{
     drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
 };
 #[allow(unused_imports)]
-pub use selection::{calculate_quality_multiplier, select_connection_idx};
+pub use selection::calculate_quality_multiplier;
+pub use selection::classifier::{ClassificationResult, WeakReason};
+// `select_connection_idx` is consumed by `packet_handler` via its own
+// `super::selection::select_connection_idx` path. The re-export is here
+// for tests that import the sender public surface with a glob.
+#[allow(unused_imports)]
+pub use selection::select_connection_idx;
 #[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
@@ -141,6 +147,8 @@ pub async fn run_sender_with_config(
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Keyframe burst detector for priority scheduling
     let mut keyframe_detector = keyframe::KeyframeDetector::new();
+    // Weak-link classifier (shadow mode — telemetry only, not consumed by selection yet).
+    let mut weak_link_filter = selection::classifier::WeakLinkFilter::new();
 
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
@@ -238,8 +246,15 @@ pub async fn run_sender_with_config(
                             warn!("housekeeping failed: {err}");
                         }
 
-                        // Update shared stats for telemetry export
-                        shared_stats.update(&connections, &config.snapshot());
+                        // Run the weak-link classifier in shadow mode and feed
+                        // the result into stats. Selection does not consume
+                        // these flags yet — soak window first.
+                        let classification = weak_link_filter.classify(&connections);
+                        shared_stats.update(
+                            &connections,
+                            &config.snapshot(),
+                            Some(&classification),
+                        );
 
                         // Fan the fresh snapshot out to any `stats` subscribers
                         // on the async control socket. Cheap no-op if no one

@@ -24,7 +24,7 @@ use serde::Serialize;
 
 use crate::config::ConfigSnapshot;
 use crate::connection::SrtlaConnection;
-use crate::sender::calculate_quality_multiplier;
+use crate::sender::{ClassificationResult, WeakReason, calculate_quality_multiplier};
 use crate::utils::now_ms;
 
 /// Per-link statistics.
@@ -74,6 +74,23 @@ pub struct LinkStats {
     /// This is the EXACT multiplier used in `select_connection_idx()`.
     /// In classic mode, this is always 1.0 (quality scoring disabled).
     pub quality_multiplier: f64,
+
+    // --- Weak-link classifier (shadow mode) ---
+    //
+    // Output of `WeakLinkFilter::classify`. Currently informational only —
+    // not consumed by selection. Once we soak the classifier behaviour
+    // against real-world IRL traffic, the `weak` flag becomes an admission
+    // gate in Enhanced selection.
+    /// Whether the classifier flagged this link as weak this tick.
+    pub weak: bool,
+    /// Why the link was (or was not) flagged. One of: `healthy`, `high_rtt`,
+    /// `no_traffic`, `low_share`, `bypassed`.
+    pub weak_reason: String,
+    /// This link's share of total throughput in permille (0..=1000).
+    pub weak_share_permille: u32,
+    /// Threshold the share was checked against (permille). Reflects
+    /// entering vs leaving for hysteresis.
+    pub weak_threshold_permille: u32,
 }
 
 /// Aggregate statistics snapshot.
@@ -94,6 +111,13 @@ pub struct StatsSnapshot {
     /// Sum of in_flight across active links
     pub total_in_flight: i32,
 
+    // --- Weak-link classifier output (shadow mode) ---
+    /// Estimated max delay budget the classifier derived this tick (ms).
+    /// Zero when classification was bypassed (e.g. under the throughput floor).
+    pub weak_link_estimated_max_delay_ms: u32,
+    /// Delay tier the cascade chose this tick (ms).
+    pub weak_link_selected_delay_ms: u32,
+
     /// Per-link details
     pub links: Vec<LinkStats>,
 }
@@ -107,6 +131,8 @@ impl Default for StatsSnapshot {
             total_links: 0,
             total_window: 0,
             total_in_flight: 0,
+            weak_link_estimated_max_delay_ms: 0,
+            weak_link_selected_delay_ms: 0,
             links: Vec::new(),
         }
     }
@@ -129,7 +155,16 @@ impl SharedStats {
     }
 
     /// Update stats from current connection state.
-    pub fn update(&self, connections: &[SrtlaConnection], config: &ConfigSnapshot) {
+    ///
+    /// `classification` carries the weak-link classifier's per-tick output.
+    /// Pass `None` when the classifier is disabled or unavailable; the weak
+    /// fields are populated with neutral defaults in that case.
+    pub fn update(
+        &self,
+        connections: &[SrtlaConnection],
+        config: &ConfigSnapshot,
+        classification: Option<&ClassificationResult>,
+    ) {
         let current_time_ms = now_ms();
         let quality_enabled = config.quality_enabled && !config.mode.is_classic();
 
@@ -137,6 +172,10 @@ impl SharedStats {
             mode: format!("{}", config.mode),
             quality_enabled,
             total_links: connections.len(),
+            weak_link_estimated_max_delay_ms: classification
+                .map(|c| c.estimated_max_delay_ms)
+                .unwrap_or(0),
+            weak_link_selected_delay_ms: classification.map(|c| c.selected_delay_ms).unwrap_or(0),
             ..Default::default()
         };
 
@@ -150,6 +189,18 @@ impl SharedStats {
                 calculate_quality_multiplier(conn, current_time_ms)
             } else {
                 1.0
+            };
+
+            let weak_entry = classification
+                .and_then(|c| c.per_link.iter().find(|e| e.conn_id == conn.conn_id));
+            let (weak, weak_reason, weak_share, weak_threshold) = match weak_entry {
+                Some(e) => (
+                    e.weak,
+                    weak_reason_str(e.reason).to_string(),
+                    e.share_permille,
+                    e.threshold_permille,
+                ),
+                None => (false, "unknown".to_string(), 0, 0),
             };
 
             let link = LinkStats {
@@ -166,6 +217,10 @@ impl SharedStats {
                 rtt_velocity: conn.get_rtt_velocity(),
                 base_score: conn.get_score(),
                 quality_multiplier,
+                weak,
+                weak_reason,
+                weak_share_permille: weak_share,
+                weak_threshold_permille: weak_threshold,
             };
 
             if is_active {
@@ -196,6 +251,16 @@ impl SharedStats {
     }
 }
 
+fn weak_reason_str(reason: WeakReason) -> &'static str {
+    match reason {
+        WeakReason::Healthy => "healthy",
+        WeakReason::HighRtt => "high_rtt",
+        WeakReason::NoTraffic => "no_traffic",
+        WeakReason::LowShare => "low_share",
+        WeakReason::Bypassed => "bypassed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,7 +282,7 @@ mod tests {
             quality_enabled: true,
             exploration_enabled: false,
         };
-        stats.update(&[], &config);
+        stats.update(&[], &config, None);
         let snapshot = stats.get();
         assert_eq!(snapshot.mode, "enhanced");
         assert!(snapshot.quality_enabled);
