@@ -1,0 +1,27 @@
+src/sender/housekeeping.rs
+  f379083ed86ed7bf 105-107
+src/connection/batch_send.rs
+  f379083ed86ed7bf 4,11-27,37-53,58-105,120-123,136-138,140,153-167,296-345
+src/connection/mod.rs
+  f379083ed86ed7bf 603-613
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "1def164bd04cdcbfcb677542baec18e802154f3e",
+  "prompts": {
+    "f379083ed86ed7bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "65fe9da4-647b-4fd3-8b39-60033758c550",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 170,
+      "total_deletions": 7,
+      "accepted_lines": 507,
+      "overriden_lines": 0
+    }
+  }
+}
