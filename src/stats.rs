@@ -101,8 +101,13 @@ pub struct LinkStats {
     // Output of `LinkCcController::tick_all`. Currently informational
     // only — selection does not yet treat `cc_target_bps` as a soft
     // cap. After a soak window the cap wires into the Enhanced score.
-    /// Current state: `bootstrap` / `climbing` / `holding` / `backing_off`.
+    /// Current state: `bootstrap` / `climbing` / `holding` /
+    /// `backing_off` / `drain`.
     pub cc_state: String,
+    /// Active climb sub-mode when `cc_state == climbing`. One of
+    /// `normal` / `hai` / `fast_recovery`. `normal` for any other
+    /// state (informational only).
+    pub cc_climb_mode: String,
     /// Target sendable rate this link's CC believes is sustainable (bps).
     pub cc_target_bps: u64,
     /// Age-bucketed RTT EWMA (ms) — input to the CC state machine.
@@ -227,18 +232,34 @@ impl SharedStats {
             };
 
             let cc_entry = link_cc.and_then(|m| m.get(&conn.conn_id).copied());
-            let (cc_state, cc_target_bps, cc_rtt_ewma, cc_rtt_var, cc_rtt_min, cc_loss_pm) =
-                match cc_entry {
-                    Some(s) => (
-                        cc_state_str(s.state).to_string(),
-                        s.target_bps,
-                        s.rtt_ewma_ms,
-                        s.rtt_var_ms,
-                        s.rtt_min_ms,
-                        s.loss_permille,
-                    ),
-                    None => ("unknown".to_string(), 0, 0.0, 0.0, 0.0, 0),
-                };
+            let (
+                cc_state,
+                cc_climb_mode,
+                cc_target_bps,
+                cc_rtt_ewma,
+                cc_rtt_var,
+                cc_rtt_min,
+                cc_loss_pm,
+            ) = match cc_entry {
+                Some(s) => (
+                    cc_state_str(s.state).to_string(),
+                    s.climb_mode.as_str().to_string(),
+                    s.target_bps,
+                    s.rtt_ewma_ms,
+                    s.rtt_var_ms,
+                    s.rtt_min_ms,
+                    s.loss_permille,
+                ),
+                None => (
+                    "unknown".to_string(),
+                    "normal".to_string(),
+                    0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                ),
+            };
 
             let link = LinkStats {
                 ip: conn.local_ip,
@@ -259,6 +280,7 @@ impl SharedStats {
                 weak_share_permille: weak_share,
                 weak_threshold_permille: weak_threshold,
                 cc_state,
+                cc_climb_mode,
                 cc_target_bps,
                 cc_rtt_ewma_ms: cc_rtt_ewma,
                 cc_rtt_var_ms: cc_rtt_var,

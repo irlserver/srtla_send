@@ -32,7 +32,8 @@ use packet_handler::{
 #[allow(unused_imports)]
 pub use selection::calculate_quality_multiplier;
 pub use selection::classifier::{ClassificationResult, WeakReason};
-pub use selection::link_cc::{CcState, LinkCcSnapshot};
+#[allow(unused_imports)]
+pub use selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
 // `select_connection_idx` is consumed by `packet_handler` via its own
 // `super::selection::select_connection_idx` path. The re-export is here
 // for tests that import the sender public surface with a glob.
