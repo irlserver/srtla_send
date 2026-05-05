@@ -600,6 +600,17 @@ impl SrtlaConnection {
         self.bitrate.mbps()
     }
 
+    /// Pick the batch regime for this connection from its observed
+    /// bitrate. Called from housekeeping each tick; the underlying
+    /// `BatchSender::set_regime` is a cheap field write — no-op cost
+    /// when the regime is unchanged.
+    pub fn recompute_batch_regime(&mut self) {
+        let regime = crate::connection::batch_send::BatchRegime::from_bps(
+            self.bitrate.current_bitrate_bps,
+        );
+        self.batch_sender.set_regime(regime);
+    }
+
     /// Reset connection state after socket replacement.
     /// Full reset: clears all state including congestion/bitrate stats.
     fn reset_state(&mut self) {
