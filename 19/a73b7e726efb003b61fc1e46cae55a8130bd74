@@ -1,0 +1,29 @@
+src/sender/selection/mod.rs
+  f379083ed86ed7bf 23
+src/stats.rs
+  f379083ed86ed7bf 27-31,98-115,189,229-242,261-266,307-310,332
+src/sender/selection/link_cc.rs
+  f379083ed86ed7bf 1-440
+src/sender/mod.rs
+  f379083ed86ed7bf 35,153-154,252-255,257-258,263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "19a73b7e726efb003b61fc1e46cae55a8130bd74",
+  "prompts": {
+    "f379083ed86ed7bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "65fe9da4-647b-4fd3-8b39-60033758c550",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 540,
+      "total_deletions": 45,
+      "accepted_lines": 585,
+      "overriden_lines": 0
+    }
+  }
+}
