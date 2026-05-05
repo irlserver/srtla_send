@@ -250,12 +250,23 @@ pub async fn run_sender_with_config(
                         }
 
                         // Run the weak-link classifier and per-link CC
-                        // controller in shadow mode and feed the result
-                        // into stats. Selection does not consume these
-                        // signals yet — soak window first.
+                        // controller, stamp results onto each connection
+                        // for selection to consume, and surface via stats.
                         let classification = weak_link_filter.classify(&connections);
                         let link_cc_snapshots = link_cc_controller
                             .tick_all(&connections, crate::utils::now_ms());
+                        for conn in connections.iter_mut() {
+                            conn.weak = classification
+                                .per_link
+                                .iter()
+                                .find(|e| e.conn_id == conn.conn_id)
+                                .map(|e| e.weak)
+                                .unwrap_or(false);
+                            conn.cc_backing_off = link_cc_snapshots
+                                .get(&conn.conn_id)
+                                .map(|s| s.state == selection::link_cc::CcState::BackingOff)
+                                .unwrap_or(false);
+                        }
                         shared_stats.update(
                             &connections,
                             &config.snapshot(),

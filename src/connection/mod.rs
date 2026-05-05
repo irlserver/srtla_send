@@ -176,6 +176,14 @@ pub struct SrtlaConnection {
     pub phase: LinkPhase,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) phase: LinkPhase,
+    /// Latest weak-link classifier verdict. Updated each housekeeping
+    /// tick from `WeakLinkFilter::classify`. Consumed by Enhanced
+    /// selection as an admission gate.
+    pub(crate) weak: bool,
+    /// Latest CC state from `LinkCcController::tick_all`. Consumed by
+    /// Enhanced selection: `BackingOff` is treated as an additional
+    /// weak signal.
+    pub(crate) cc_backing_off: bool,
 }
 
 impl SrtlaConnection {
@@ -212,6 +220,8 @@ impl SrtlaConnection {
             quality_cache: CachedQuality::default(),
             batch_sender: BatchSender::new(),
             phase: LinkPhase::Registering,
+            weak: false,
+            cc_backing_off: false,
         })
     }
 

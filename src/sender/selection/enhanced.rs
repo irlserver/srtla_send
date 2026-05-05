@@ -49,6 +49,18 @@ pub fn select_connection(
     enable_quality: bool,
     enable_explore: bool,
 ) -> Option<usize> {
+    // First pass: discover whether at least one non-weak connection
+    // can carry the packet. The classifier marks links weak when their
+    // RTT busts the chosen delay tier, when they fall below the
+    // entering throughput-share threshold, or (in shadow-mode-promoted
+    // form) when their CC is backing off on observed loss. If any
+    // non-weak link is schedulable, the weak ones are excluded from
+    // ranking. Otherwise we fall back to the full pool — better to
+    // send on a weak link than to drop the packet.
+    let any_non_weak_schedulable = conns.iter().enumerate().any(|(_, c)| {
+        !c.is_timed_out() && c.is_schedulable() && !c.weak && !c.cc_backing_off
+    });
+
     // Score connections by base score; apply quality multiplier if enabled
     let mut best_idx: Option<usize> = None;
     let mut second_idx: Option<usize> = None;
@@ -58,6 +70,9 @@ pub fn select_connection(
 
     for (i, c) in conns.iter_mut().enumerate() {
         if c.is_timed_out() || !c.is_schedulable() {
+            continue;
+        }
+        if any_non_weak_schedulable && (c.weak || c.cc_backing_off) {
             continue;
         }
         let base = c.get_score() as f64;

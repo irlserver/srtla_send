@@ -35,6 +35,84 @@ mod tests {
     }
 
     #[test]
+    fn test_enhanced_skips_weak_when_alternative_exists() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        // Connection 1 has the highest base score but is flagged weak.
+        // Connection 0 is healthy. Selection should pick 0, not 1.
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 0;
+        connections[1].weak = true;
+        connections[2].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: false,
+        };
+        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(0),
+            "weak connection 1 must be skipped when a non-weak alternative exists"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_falls_back_when_all_weak() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        // Every link is weak. Selection must still pick the best — better
+        // a weak link than a dropped packet.
+        connections[0].weak = true;
+        connections[0].in_flight_packets = 5;
+        connections[1].weak = true;
+        connections[1].in_flight_packets = 0; // best score among the weak
+        connections[2].weak = true;
+        connections[2].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+        };
+        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "with no non-weak alternatives, selection must fall back to the best available link"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_treats_backing_off_as_weak() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 0;
+        connections[1].cc_backing_off = true; // CC says this link is loss-driven
+        connections[2].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+        };
+        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(0),
+            "CC-backing-off link must be skipped when a healthy alternative exists"
+        );
+    }
+
+    #[test]
     fn test_select_connection_idx_quality_scoring() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
