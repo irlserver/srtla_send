@@ -398,9 +398,7 @@ impl LinkCongestionState {
         if self.fast_recovery_ticks > 0 {
             return ClimbMode::FastRecovery;
         }
-        if self.rtt_ewma_ms > 0.0
-            && self.rtt_var_ms <= self.rtt_ewma_ms * HAI_VARIANCE_FRACTION
-        {
+        if self.rtt_ewma_ms > 0.0 && self.rtt_var_ms <= self.rtt_ewma_ms * HAI_VARIANCE_FRACTION {
             return ClimbMode::Hai;
         }
         ClimbMode::Normal
@@ -464,10 +462,7 @@ impl LinkCcController {
     ) -> HashMap<u64, LinkCcSnapshot> {
         let mut alive: HashMap<u64, LinkCcSnapshot> = HashMap::with_capacity(connections.len());
         for conn in connections {
-            let entry = self
-                .per_conn
-                .entry(conn.conn_id)
-                .or_default();
+            let entry = self.per_conn.entry(conn.conn_id).or_default();
             let rtt_ms = conn.get_smooth_rtt_ms();
             if rtt_ms > 0.0 {
                 entry.record_rtt(rtt_ms, now_ms);
@@ -614,10 +609,7 @@ mod tests {
             cc.tick(2_000_000, 1_200 + i);
         }
         assert_eq!(cc.state, CcState::Climbing);
-        assert!(matches!(
-            cc.climb_mode,
-            ClimbMode::Normal | ClimbMode::Hai
-        ));
+        assert!(matches!(cc.climb_mode, ClimbMode::Normal | ClimbMode::Hai));
     }
 
     #[test]

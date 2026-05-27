@@ -295,7 +295,11 @@ pub async fn handle_srt_packet(
                 {
                     trace!(
                         "critical override ({}): link {} -> {}",
-                        if window_critical { "window" } else { "heuristic" },
+                        if window_critical {
+                            "window"
+                        } else {
+                            "heuristic"
+                        },
                         sel_idx.map_or(-1, |i| i as i64),
                         best_idx as i64
                     );

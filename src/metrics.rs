@@ -29,10 +29,18 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
     let mut out = String::with_capacity(2048);
 
     // Link-level gauges. One series per link, labeled by local IP.
-    writeln!(out, "# HELP srtla_send_link_up 1 if the link is connected and not timed out").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_link_up 1 if the link is connected and not timed out"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_link_up gauge").ok();
     for link in &snap.links {
-        let up = if link.connected && !link.timed_out { 1 } else { 0 };
+        let up = if link.connected && !link.timed_out {
+            1
+        } else {
+            0
+        };
         writeln!(out, r#"srtla_send_link_up{{ip="{}"}} {up}"#, link.ip).ok();
     }
 
@@ -47,7 +55,11 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
         .ok();
     }
 
-    writeln!(out, "# HELP srtla_send_link_rtt_min_ms dual-window minimum RTT baseline").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_link_rtt_min_ms dual-window minimum RTT baseline"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_link_rtt_min_ms gauge").ok();
     for link in &snap.links {
         writeln!(
@@ -73,7 +85,11 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
         .ok();
     }
 
-    writeln!(out, "# HELP srtla_send_link_window congestion window size (packets)").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_link_window congestion window size (packets)"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_link_window gauge").ok();
     for link in &snap.links {
         writeln!(
@@ -84,7 +100,11 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
         .ok();
     }
 
-    writeln!(out, "# HELP srtla_send_link_in_flight packets sent but not yet ACKed").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_link_in_flight packets sent but not yet ACKed"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_link_in_flight gauge").ok();
     for link in &snap.links {
         writeln!(
@@ -106,7 +126,11 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
         .ok();
     }
 
-    writeln!(out, "# HELP srtla_send_link_bitrate_bps measured send bitrate, bytes/sec").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_link_bitrate_bps measured send bitrate, bytes/sec"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_link_bitrate_bps gauge").ok();
     for link in &snap.links {
         writeln!(
@@ -133,7 +157,11 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
     }
 
     // Aggregate gauges.
-    writeln!(out, "# HELP srtla_send_active_links links currently connected and live").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_active_links links currently connected and live"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_active_links gauge").ok();
     writeln!(out, "srtla_send_active_links {}", snap.active_links).ok();
 
@@ -141,16 +169,28 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
     writeln!(out, "# TYPE srtla_send_total_links gauge").ok();
     writeln!(out, "srtla_send_total_links {}", snap.total_links).ok();
 
-    writeln!(out, "# HELP srtla_send_total_window summed window across active links").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_total_window summed window across active links"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_total_window gauge").ok();
     writeln!(out, "srtla_send_total_window {}", snap.total_window).ok();
 
-    writeln!(out, "# HELP srtla_send_total_in_flight summed in-flight across active links").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_total_in_flight summed in-flight across active links"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_total_in_flight gauge").ok();
     writeln!(out, "srtla_send_total_in_flight {}", snap.total_in_flight).ok();
 
     // Scheduler config surfaced as a gauge so Grafana can pivot on it.
-    writeln!(out, "# HELP srtla_send_mode scheduling mode (0=classic,1=enhanced)").ok();
+    writeln!(
+        out,
+        "# HELP srtla_send_mode scheduling mode (0=classic,1=enhanced)"
+    )
+    .ok();
     writeln!(out, "# TYPE srtla_send_mode gauge").ok();
     let mode = match config.mode() {
         SchedulingMode::Classic => 0,
@@ -269,11 +309,8 @@ async fn serve_one(
     };
 
     let header = format!(
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: text/plain; version=0.0.4\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: \
+         {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes()).await?;
@@ -339,5 +376,4 @@ mod tests {
         assert_eq!(request_path(b""), None);
         assert_eq!(request_path(b"not http"), None);
     }
-
 }

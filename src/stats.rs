@@ -17,6 +17,7 @@
 //! 4. **Simple aggregates**: Only sums and counts, no derived calculations like
 //!    "capacity estimation" that would require assumptions about packet sizes.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 
@@ -24,8 +25,6 @@ use serde::Serialize;
 
 use crate::config::ConfigSnapshot;
 use crate::connection::SrtlaConnection;
-use std::collections::HashMap;
-
 use crate::sender::{
     CcState, ClassificationResult, LinkCcSnapshot, WeakReason, calculate_quality_multiplier,
 };
@@ -219,8 +218,8 @@ impl SharedStats {
                 1.0
             };
 
-            let weak_entry = classification
-                .and_then(|c| c.per_link.iter().find(|e| e.conn_id == conn.conn_id));
+            let weak_entry =
+                classification.and_then(|c| c.per_link.iter().find(|e| e.conn_id == conn.conn_id));
             let (weak, weak_reason, weak_share, weak_threshold) = match weak_entry {
                 Some(e) => (
                     e.weak,

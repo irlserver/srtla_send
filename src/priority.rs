@@ -37,7 +37,7 @@ use tracing::{info, trace, warn};
 
 /// Magic byte identifying a priority-sidecar v1 datagram. Rejecting any
 /// other leading byte lets us re-use the port for future framing later.
-pub const PROTO_MAGIC: u8 = 0xC1;
+pub const PROTO_MAGIC: u8 = 0xc1;
 
 /// Datagram length in bytes: `[magic u8][window_ms u32 big-endian]`.
 pub const DATAGRAM_LEN: usize = 5;
@@ -114,14 +114,11 @@ pub fn spawn_listener(
             match sock.recv_from(&mut buf).await {
                 Ok((n, src)) => {
                     if n != DATAGRAM_LEN || buf[0] != PROTO_MAGIC {
-                        state
-                            .malformed_datagrams
-                            .fetch_add(1, Ordering::Relaxed);
+                        state.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
                         trace!(?src, n, "dropped malformed priority datagram");
                         continue;
                     }
-                    let window_ms =
-                        u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as u64;
+                    let window_ms = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as u64;
                     let now = crate::utils::now_ms();
                     state.extend_to(now + window_ms);
                     trace!(window_ms, "critical window extended");

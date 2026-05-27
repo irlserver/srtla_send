@@ -24,13 +24,13 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 
 use crate::config::DynamicConfig;
 use crate::mode::SchedulingMode;
 use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;
 use crate::subscriptions::SubscriptionHub;
-use tokio::sync::mpsc;
 
 const JSONRPC_VERSION: &str = "2.0";
 
@@ -327,9 +327,8 @@ fn handle_method(
         }
 
         "get_stats" => {
-            let stats = stats.ok_or_else(|| {
-                ErrorObject::new(INTERNAL_ERROR, "stats provider not registered")
-            })?;
+            let stats = stats
+                .ok_or_else(|| ErrorObject::new(INTERNAL_ERROR, "stats provider not registered"))?;
             let json_str = stats.to_json();
             serde_json::from_str(&json_str).map_err(|e| ErrorObject {
                 code: INTERNAL_ERROR,
@@ -373,7 +372,7 @@ mod tests {
     #[test]
     fn parse_error_returns_jsonrpc_error() {
         let config = DynamicConfig::new();
-        let resp = dispatch(&config, None, None,"not valid json").unwrap();
+        let resp = dispatch(&config, None, None, "not valid json").unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], PARSE_ERROR);
         assert_eq!(v["id"], Value::Null);
@@ -384,7 +383,7 @@ mod tests {
         let config = DynamicConfig::new();
         // set_mode happens to work as a notification; no id means no response.
         let req = r#"{"jsonrpc":"2.0","method":"set_mode","params":{"mode":"classic"}}"#;
-        assert!(dispatch(&config, None, None,req).is_none());
+        assert!(dispatch(&config, None, None, req).is_none());
         assert_eq!(config.mode(), SchedulingMode::Classic);
     }
 
@@ -392,7 +391,7 @@ mod tests {
     fn set_mode_happy_path() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"set_mode","params":{"mode":"classic"}}"#;
-        let resp = dispatch(&config, None, None,req).unwrap();
+        let resp = dispatch(&config, None, None, req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["result"]["mode"], "classic");
         assert_eq!(v["id"], 1);
@@ -403,7 +402,7 @@ mod tests {
     fn unknown_method_returns_method_not_found() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"2.0","id":"abc","method":"noop"}"#;
-        let resp = dispatch(&config, None, None,req).unwrap();
+        let resp = dispatch(&config, None, None, req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], METHOD_NOT_FOUND);
         assert_eq!(v["id"], "abc");
@@ -413,7 +412,7 @@ mod tests {
     fn invalid_params_returns_invalid_params() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"2.0","id":7,"method":"set_quality","params":{}}"#;
-        let resp = dispatch(&config, None, None,req).unwrap();
+        let resp = dispatch(&config, None, None, req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], INVALID_PARAMS);
     }
@@ -422,7 +421,7 @@ mod tests {
     fn wrong_jsonrpc_version_rejects() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"1.0","id":1,"method":"get_status"}"#;
-        let resp = dispatch(&config, None, None,req).unwrap();
+        let resp = dispatch(&config, None, None, req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         assert_eq!(v["error"]["code"], INVALID_REQUEST);
     }
@@ -431,7 +430,7 @@ mod tests {
     fn get_status_returns_all_fields() {
         let config = DynamicConfig::new();
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#;
-        let resp = dispatch(&config, None, None,req).unwrap();
+        let resp = dispatch(&config, None, None, req).unwrap();
         let v: Value = serde_json::from_str(&resp.to_json()).unwrap();
         let result = &v["result"];
         assert!(result["mode"].is_string());

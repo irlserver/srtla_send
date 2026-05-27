@@ -118,12 +118,8 @@ pub fn spawn_stdin_listener(
     std::thread::spawn(move || {
         let reader = BufReader::new(std::io::stdin());
         for line in reader.lines().map_while(Result::ok) {
-            if let Some(resp) = dispatch(
-                &config,
-                Some(&stats),
-                Some(&critical_window),
-                line.trim(),
-            ) {
+            if let Some(resp) = dispatch(&config, Some(&stats), Some(&critical_window), line.trim())
+            {
                 // Responses on stdin just go to stdout so scripts can pipe.
                 println!("{}", resp.to_json());
             }

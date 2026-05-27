@@ -63,10 +63,7 @@ impl std::str::FromStr for SchedulingMode {
         match s {
             "classic" => Ok(SchedulingMode::Classic),
             "enhanced" => Ok(SchedulingMode::Enhanced),
-            _ => Err(format!(
-                "invalid mode '{}': use classic or enhanced",
-                s
-            )),
+            _ => Err(format!("invalid mode '{}': use classic or enhanced", s)),
         }
     }
 }
