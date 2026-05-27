@@ -57,9 +57,9 @@ pub fn select_connection(
     // non-weak link is schedulable, the weak ones are excluded from
     // ranking. Otherwise we fall back to the full pool — better to
     // send on a weak link than to drop the packet.
-    let any_non_weak_schedulable = conns.iter().enumerate().any(|(_, c)| {
-        !c.is_timed_out() && c.is_schedulable() && !c.weak && !c.cc_backing_off
-    });
+    let any_non_weak_schedulable = conns
+        .iter()
+        .any(|c| !c.is_timed_out() && c.is_schedulable() && !c.weak && !c.cc_backing_off);
 
     // Score connections by base score; apply quality multiplier if enabled
     let mut best_idx: Option<usize> = None;

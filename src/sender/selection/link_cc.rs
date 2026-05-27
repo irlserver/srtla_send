@@ -211,10 +211,6 @@ impl Default for LinkCongestionState {
 }
 
 impl LinkCongestionState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Feed an RTT sample. Updates the age-bucketed EWMA, variance
     /// proxy, and minimum.
     pub fn record_rtt(&mut self, rtt_ms: f64, now_ms: u64) {
@@ -329,11 +325,9 @@ impl LinkCongestionState {
         // Fast-recovery accounting: arm the timer when leaving
         // BackingOff or Drain into Climbing. While the timer is
         // running and we're climbing, use the fast step.
-        match (prev_state, next_state) {
-            (CcState::BackingOff | CcState::Drain, CcState::Climbing) => {
-                self.fast_recovery_ticks = FAST_RECOVERY_TICKS;
-            }
-            _ => {}
+        if let (CcState::BackingOff | CcState::Drain, CcState::Climbing) = (prev_state, next_state)
+        {
+            self.fast_recovery_ticks = FAST_RECOVERY_TICKS;
         }
         if next_state == CcState::Climbing && self.fast_recovery_ticks > 0 {
             self.fast_recovery_ticks = self.fast_recovery_ticks.saturating_sub(1);
@@ -473,7 +467,7 @@ impl LinkCcController {
             let entry = self
                 .per_conn
                 .entry(conn.conn_id)
-                .or_insert_with(LinkCongestionState::new);
+                .or_default();
             let rtt_ms = conn.get_smooth_rtt_ms();
             if rtt_ms > 0.0 {
                 entry.record_rtt(rtt_ms, now_ms);
@@ -494,7 +488,7 @@ mod tests {
 
     #[test]
     fn bootstrap_holds_floor() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         cc.tick(0, 0);
         assert_eq!(cc.state, CcState::Bootstrap);
         assert_eq!(cc.target_bps, MIN_TARGET_BPS);
@@ -502,7 +496,7 @@ mod tests {
 
     #[test]
     fn climbing_grows_target() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         cc.record_rtt(50.0, 1_000);
         cc.tick(2_000_000, 1_000);
         assert_eq!(cc.state, CcState::Climbing);
@@ -513,7 +507,7 @@ mod tests {
 
     #[test]
     fn holding_when_rtt_inflates() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         // Establish low baseline.
         cc.record_rtt(20.0, 0);
         cc.tick(2_000_000, 0);
@@ -532,7 +526,7 @@ mod tests {
 
     #[test]
     fn backing_off_on_loss() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         cc.record_rtt(50.0, 0);
         cc.tick(2_000_000, 0);
         let before = cc.target_bps;
@@ -546,7 +540,7 @@ mod tests {
 
     #[test]
     fn loss_window_evicts() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         cc.record_loss(1_000, 100, 0);
         assert_eq!(cc.loss_permille(), 100);
         // Beyond window — should evict.
@@ -556,7 +550,7 @@ mod tests {
 
     #[test]
     fn rtt_ewma_resets_after_2s_gap() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         cc.record_rtt(50.0, 0);
         // 2.5s later — should snap to the new sample.
         cc.record_rtt(200.0, 2_500);
@@ -565,7 +559,7 @@ mod tests {
 
     #[test]
     fn rtt_ewma_weights_by_age() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         cc.record_rtt(100.0, 0);
         // Within 250ms — heavy weight on old (1:16).
         cc.record_rtt(200.0, 100);
@@ -574,7 +568,7 @@ mod tests {
 
     #[test]
     fn hai_kicks_in_when_rtt_is_stable() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         // Feed identical RTT samples → variance stays at 0.
         for i in 0..10 {
             cc.record_rtt(50.0, i * 100);
@@ -586,7 +580,7 @@ mod tests {
 
     #[test]
     fn hai_yields_to_normal_when_rtt_is_jittery() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         // Alternate between 30 and 80 ms — variance grows past the
         // HAI threshold.
         for i in 0..10 {
@@ -600,7 +594,7 @@ mod tests {
 
     #[test]
     fn fast_recovery_engages_after_backoff() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         cc.record_rtt(50.0, 0);
         cc.tick(2_000_000, 0);
 
@@ -628,7 +622,7 @@ mod tests {
 
     #[test]
     fn drain_triggers_on_high_rtt_inflation_no_loss() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         // Establish low rtt_min.
         cc.record_rtt(20.0, 0);
         cc.tick(2_000_000, 0);
@@ -649,7 +643,7 @@ mod tests {
 
     #[test]
     fn drain_then_recovery_path() {
-        let mut cc = LinkCongestionState::new();
+        let mut cc = LinkCongestionState::default();
         cc.record_rtt(20.0, 0);
         cc.tick(2_000_000, 0);
         // Force into Drain.

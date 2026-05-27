@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::assertions_on_constants)]
 
     use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};

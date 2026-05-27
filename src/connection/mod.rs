@@ -459,12 +459,12 @@ impl SrtlaConnection {
                     };
                 }
             }
-            LinkPhase::Cooldown { entered_ms } => {
-                // Exit cooldown after duration elapses
-                if now_ms().saturating_sub(entered_ms) >= COOLDOWN_DURATION_MS {
-                    debug!("{}: Cooldown → Live", self.label);
-                    self.phase = LinkPhase::Live;
-                }
+            // Exit cooldown after duration elapses
+            LinkPhase::Cooldown { entered_ms }
+                if now_ms().saturating_sub(entered_ms) >= COOLDOWN_DURATION_MS =>
+            {
+                debug!("{}: Cooldown → Live", self.label);
+                self.phase = LinkPhase::Live;
             }
             // Registering and Warming are driven by REG3 and RTT probes
             _ => {}

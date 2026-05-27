@@ -261,7 +261,7 @@ impl WeakLinkFilter {
 
 fn derive_max_delay_budget(longest_rtt_ms: u32) -> u32 {
     let raw = (longest_rtt_ms as f64 * RTT_TO_DELAY_BUDGET_MULT) as u32;
-    raw.max(MIN_BUDGET_MS).min(MAX_BUDGET_MS)
+    raw.clamp(MIN_BUDGET_MS, MAX_BUDGET_MS)
 }
 
 fn target_best_delay_ms(est_ms: u32) -> u32 {

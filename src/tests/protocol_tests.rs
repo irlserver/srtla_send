@@ -1,5 +1,9 @@
 #[cfg(test)]
 mod tests {
+    // Protocol invariant assertions over compile-time constants document the
+    // contract rather than test runtime values.
+    #![allow(clippy::assertions_on_constants)]
+
     use crate::protocol::*;
 
     #[test]
