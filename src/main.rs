@@ -11,16 +11,16 @@ mod config;
 mod connection;
 mod control;
 mod control_socket;
-mod metrics;
-mod priority;
-mod subscriptions;
 mod ewma;
 mod kalman;
+mod metrics;
 mod mode;
+mod priority;
 mod protocol;
 mod registration;
 mod sender;
 mod stats;
+mod subscriptions;
 mod toml_config;
 mod utils;
 
@@ -169,6 +169,11 @@ async fn main() -> Result<()> {
         );
     }
 
+    // The CLI binds each uplink by its source IP, which on a multi-homed host
+    // selects the egress via source-based routing.
+    let binder: std::sync::Arc<dyn connection::UplinkBinder> =
+        std::sync::Arc::new(connection::SourceIpBinder);
+
     sender::run_sender_with_config(
         local_srt_port,
         receiver_host,
@@ -178,6 +183,7 @@ async fn main() -> Result<()> {
         shared_stats,
         critical_window,
         subscription_hub,
+        binder,
     )
     .await
     .context("srtla_send failed")

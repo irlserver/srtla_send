@@ -21,7 +21,11 @@ pub use incoming::SrtlaIncoming;
 pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
-pub use socket::{bind_from_ip, resolve_remote};
+// Host-side binder for platforms that steer egress by network handle (Android).
+// Exported for library consumers; the CLI binary does not construct it.
+#[allow(unused_imports)]
+pub use socket::CallbackBinder;
+pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};
 use tokio::time::Instant;
 use tracing::debug;
 
@@ -184,14 +188,24 @@ pub struct SrtlaConnection {
     /// Enhanced selection: `BackingOff` is treated as an additional
     /// weak signal.
     pub(crate) cc_backing_off: bool,
+    /// Strategy for steering this uplink's socket onto its egress path.
+    /// Retained so reconnects re-apply the same binding (source IP on Linux,
+    /// host `Network.bindSocket` callback on Android).
+    pub(crate) binder: Arc<dyn UplinkBinder>,
 }
 
 impl SrtlaConnection {
-    pub async fn connect_from_ip(ip: IpAddr, host: &str, port: u16) -> Result<Self> {
+    pub async fn connect_from_ip(
+        ip: IpAddr,
+        host: &str,
+        port: u16,
+        binder: Arc<dyn UplinkBinder>,
+    ) -> Result<Self> {
         use rand::RngCore;
 
         let remote = resolve_remote(host, port).await?;
-        let sock = bind_from_ip(ip, 0)?;
+        let sock = create_uplink_socket(ip)?;
+        binder.bind(&sock, ip)?;
         sock.connect(&remote.into())?;
         sock.set_nonblocking(true)?;
         let socket = Arc::new(BatchUdpSocket::new(sock)?);
@@ -222,6 +236,7 @@ impl SrtlaConnection {
             phase: LinkPhase::Registering,
             weak: false,
             cc_backing_off: false,
+            binder,
         })
     }
 
@@ -605,9 +620,8 @@ impl SrtlaConnection {
     /// `BatchSender::set_regime` is a cheap field write — no-op cost
     /// when the regime is unchanged.
     pub fn recompute_batch_regime(&mut self) {
-        let regime = crate::connection::batch_send::BatchRegime::from_bps(
-            self.bitrate.current_bitrate_bps,
-        );
+        let regime =
+            crate::connection::batch_send::BatchRegime::from_bps(self.bitrate.current_bitrate_bps);
         self.batch_sender.set_regime(regime);
     }
 
@@ -628,7 +642,8 @@ impl SrtlaConnection {
     }
 
     pub async fn reconnect(&mut self) -> Result<()> {
-        let sock = bind_from_ip(self.local_ip, 0)?;
+        let sock = create_uplink_socket(self.local_ip)?;
+        self.binder.bind(&sock, self.local_ip)?;
         sock.connect(&self.remote.into())?;
         sock.set_nonblocking(true)?;
         let socket = BatchUdpSocket::new(sock)?;

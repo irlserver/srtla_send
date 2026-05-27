@@ -67,6 +67,7 @@ pub async fn run_sender_with_config(
     shared_stats: SharedStats,
     critical_window: crate::priority::CriticalWindow,
     subscription_hub: crate::subscriptions::SubscriptionHub,
+    binder: std::sync::Arc<dyn crate::connection::UplinkBinder>,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}, mode={}",
@@ -88,7 +89,8 @@ pub async fn run_sender_with_config(
         return Err(anyhow!("no IPs in list: {}", ips_file));
     }
 
-    let mut connections = create_connections_from_ips(&ips, receiver_host, receiver_port).await;
+    let mut connections =
+        create_connections_from_ips(&ips, receiver_host, receiver_port, &binder).await;
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
@@ -294,6 +296,7 @@ pub async fn run_sender_with_config(
                                 changes.receiver_port,
                                 &mut last_selected_idx,
                                 &mut seq_tracker,
+                                &binder,
                             ).await;
                             info!("connection changes applied successfully");
                             sync_readers(&connections, &mut reader_handles, &packet_tx);

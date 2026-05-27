@@ -27,7 +27,6 @@ mod tests {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
             exploration_enabled: false,
-
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
@@ -133,7 +132,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
@@ -162,7 +160,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
@@ -188,7 +185,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-
         };
 
         // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
@@ -224,7 +220,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-
         };
 
         // After cooldown: per-packet selection can now choose the better connection
@@ -264,7 +259,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
-
         };
 
         // Cooldown is bypassed when current connection is invalid/timed out
@@ -301,7 +295,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: true, // exploration enabled
-
         };
 
         // Enable exploration, but should be blocked by cooldown
@@ -339,7 +332,6 @@ mod tests {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
             exploration_enabled: false,
-
         };
 
         // Classic mode: per-packet selection ALWAYS picks highest score connection
@@ -454,6 +446,8 @@ mod tests {
         seq_tracker.insert(100, connections[1].conn_id, now);
         seq_tracker.insert(200, connections[2].conn_id, now);
 
+        let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
+            std::sync::Arc::new(crate::connection::SourceIpBinder);
         rt.block_on(apply_connection_changes(
             &mut connections,
             &new_ips,
@@ -461,6 +455,7 @@ mod tests {
             8080,
             &mut last_selected_idx,
             &mut seq_tracker,
+            &binder,
         ));
 
         // Should have removed some connections
@@ -509,7 +504,9 @@ mod tests {
         ];
 
         // This will likely fail to connect but should not panic
-        let connections = create_connections_from_ips(&ips, "127.0.0.1", 9999).await;
+        let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
+            std::sync::Arc::new(crate::connection::SourceIpBinder);
+        let connections = create_connections_from_ips(&ips, "127.0.0.1", 9999, &binder).await;
 
         // Connections may be empty due to connection failures, which is OK for testing
         assert!(connections.len() <= ips.len());
@@ -552,7 +549,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
-
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
@@ -570,7 +566,6 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: true,
-
         };
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
