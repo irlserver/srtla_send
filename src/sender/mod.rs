@@ -265,10 +265,11 @@ pub async fn run_sender_with_config(
                                 .find(|e| e.conn_id == conn.conn_id)
                                 .map(|e| e.weak)
                                 .unwrap_or(false);
-                            conn.cc_backing_off = link_cc_snapshots
-                                .get(&conn.conn_id)
+                            let cc_snap = link_cc_snapshots.get(&conn.conn_id);
+                            conn.cc_backing_off = cc_snap
                                 .map(|s| s.state == selection::link_cc::CcState::BackingOff)
                                 .unwrap_or(false);
+                            conn.cc_target_bps = cc_snap.map(|s| s.target_bps).unwrap_or(0);
                         }
                         shared_stats.update(
                             &connections,

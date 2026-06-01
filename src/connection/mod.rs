@@ -188,6 +188,13 @@ pub struct SrtlaConnection {
     /// Enhanced selection: `BackingOff` is treated as an additional
     /// weak signal.
     pub(crate) cc_backing_off: bool,
+    /// Latest `target_bps` from `LinkCcController::tick_all`. Consumed
+    /// by Enhanced selection as a soft cap: when the link's measured
+    /// throughput approaches this value the link's score is scaled
+    /// down so the scheduler routes less traffic through it before
+    /// loss actually fires. `0` means "no signal" — selection skips
+    /// the cap.
+    pub(crate) cc_target_bps: u64,
     /// Strategy for steering this uplink's socket onto its egress path.
     /// Retained so reconnects re-apply the same binding (source IP on Linux,
     /// host `Network.bindSocket` callback on Android).
@@ -236,6 +243,7 @@ impl SrtlaConnection {
             phase: LinkPhase::Registering,
             weak: false,
             cc_backing_off: false,
+            cc_target_bps: 0,
             binder,
         })
     }

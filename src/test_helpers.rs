@@ -66,6 +66,7 @@ fn create_connection_from_socket(
         phase: LinkPhase::Live,
         weak: false,
         cc_backing_off: false,
+        cc_target_bps: 0,
         binder: Arc::new(crate::connection::SourceIpBinder),
     }
 }

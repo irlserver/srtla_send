@@ -21,6 +21,35 @@ use crate::connection::SrtlaConnection;
 /// degrades (e.g., higher in_flight due to congestion or packet loss).
 const SWITCH_THRESHOLD: f64 = 1.10; // New connection must be 10% better
 
+/// Floor on the per-link CC soft-cap multiplier. A link whose measured
+/// throughput has saturated its `cc_target_bps` gets its score scaled
+/// down to this fraction rather than zero — keeps a little keepalive
+/// traffic flowing so the CC controller can still observe RTT and
+/// loss for the recovery decision.
+const CC_SOFT_CAP_FLOOR: f64 = 0.10;
+
+/// Compute the CC soft-cap multiplier for a connection. Reads
+/// `cc_target_bps` (set by `LinkCcController::tick_all`) and the
+/// connection's measured bitrate; returns a value in `[CC_SOFT_CAP_FLOOR, 1.0]`
+/// that the caller folds into the link's score.
+///
+/// Returns `1.0` (no cap) when:
+/// - the CC controller hasn't published a target yet (`cc_target_bps == 0`),
+/// - or measured throughput on this link is zero (idle link, plenty of headroom).
+fn cc_soft_cap_multiplier(conn: &SrtlaConnection) -> f64 {
+    let cap = conn.cc_target_bps;
+    if cap == 0 {
+        return 1.0;
+    }
+    let measured = conn.bitrate.current_bitrate_bps;
+    if measured <= 0.0 {
+        return 1.0;
+    }
+    let cap_f = cap as f64;
+    let headroom = (cap_f - measured).max(0.0);
+    (headroom / cap_f).clamp(CC_SOFT_CAP_FLOOR, 1.0)
+}
+
 /// Select best connection using enhanced algorithm with quality awareness
 ///
 /// Returns the index of the connection with the best quality-adjusted score.
@@ -76,12 +105,13 @@ pub fn select_connection(
             continue;
         }
         let base = c.get_score() as f64;
+        let cap_mult = cc_soft_cap_multiplier(c);
         let score = if !enable_quality {
-            base
+            base * cap_mult
         } else {
             // Use cached quality multiplier (recalculates every 50ms)
             let quality_mult = c.get_cached_quality_multiplier(current_time_ms);
-            let final_score = base * quality_mult;
+            let final_score = base * quality_mult * cap_mult;
 
             // Log quality issues and recoveries for debugging (cold path)
             log_quality_state(c, quality_mult, base, final_score);
@@ -195,4 +225,52 @@ fn log_quality_state(c: &SrtlaConnection, quality_mult: f64, base: f64, final_sc
     }
 }
 
-// Tests are in src/tests/sender_tests.rs
+// Most enhanced-mode integration tests live in src/tests/sender_tests.rs;
+// the pure cap-helper unit tests sit here so they don't drag in the
+// async runtime needed to spin up test connections.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::SrtlaConnection;
+    use crate::test_helpers::create_test_connections;
+
+    fn one_conn() -> SrtlaConnection {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(create_test_connections(1)).pop().unwrap()
+    }
+
+    #[test]
+    fn cap_no_signal_returns_unity() {
+        let c = one_conn();
+        // cc_target_bps default 0 → no cap.
+        assert!((cc_soft_cap_multiplier(&c) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cap_idle_link_returns_unity() {
+        let mut c = one_conn();
+        c.cc_target_bps = 1_000_000;
+        c.bitrate.current_bitrate_bps = 0.0;
+        // Plenty of headroom on an idle link.
+        assert!((cc_soft_cap_multiplier(&c) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cap_at_target_falls_to_floor() {
+        let mut c = one_conn();
+        c.cc_target_bps = 1_000_000;
+        c.bitrate.current_bitrate_bps = 1_000_000.0;
+        // Saturated → floor multiplier (10%).
+        let m = cc_soft_cap_multiplier(&c);
+        assert!((m - CC_SOFT_CAP_FLOOR).abs() < f64::EPSILON, "got {m}");
+    }
+
+    #[test]
+    fn cap_half_target_returns_half() {
+        let mut c = one_conn();
+        c.cc_target_bps = 1_000_000;
+        c.bitrate.current_bitrate_bps = 500_000.0;
+        let m = cc_soft_cap_multiplier(&c);
+        assert!((m - 0.5).abs() < 0.01, "got {m}");
+    }
+}

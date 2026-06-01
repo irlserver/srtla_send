@@ -95,11 +95,13 @@ pub struct LinkStats {
     /// entering vs leaving for hysteresis.
     pub weak_threshold_permille: u32,
 
-    // --- Per-link CC soft cap (shadow mode) ---
+    // --- Per-link CC soft cap ---
     //
-    // Output of `LinkCcController::tick_all`. Currently informational
-    // only — selection does not yet treat `cc_target_bps` as a soft
-    // cap. After a soak window the cap wires into the Enhanced score.
+    // Output of `LinkCcController::tick_all`. Consumed by Enhanced
+    // selection: `cc_backing_off` is a binary admission gate;
+    // `cc_target_bps` scales the score multiplicatively via
+    // `enhanced::cc_soft_cap_multiplier` so the scheduler steers
+    // traffic away from a link before it hits its CC-predicted ceiling.
     /// Current state: `bootstrap` / `climbing` / `holding` /
     /// `backing_off` / `drain`.
     pub cc_state: String,
