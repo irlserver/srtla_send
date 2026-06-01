@@ -1,0 +1,29 @@
+docs/CONTROL_PROTOCOL.md
+  s_c592d091ef5177::t_047d507e3e7e26 43
+  s_c592d091ef5177::t_dbae9b1e0d132c 49
+README.md
+  s_c592d091ef5177::t_f6d2271d8ba50c 31
+  s_c592d091ef5177::t_6e9d11518d1617 218,221-223
+  s_c592d091ef5177::t_809bdc778a7cd5 129-130,132,134-135
+  s_c592d091ef5177::t_b212ee171d4df1 248
+CHANGELOG.md
+  s_c592d091ef5177::t_9e50baaf75fe97 59
+  s_c592d091ef5177::t_f0dbaa195245c6 1-2,4,6,8,10,14,16,20,22,25,27,30,32,38,40,45,47-49
+  s_c592d091ef5177::t_c004572c70a843 3,5,7,9,11-13,15,17-19,21,23-24,26,28-29,31,33-37,39,41-44,46,50-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "a229f8f9d7f334824631cc03ea9c7c7829e0523f",
+  "prompts": {},
+  "sessions": {
+    "s_c592d091ef5177": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2dcb5d8b-f9f5-4e88-8394-1963a3eef775",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
