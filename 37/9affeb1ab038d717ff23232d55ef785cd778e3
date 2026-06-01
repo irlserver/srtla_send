@@ -1,0 +1,38 @@
+src/stats.rs
+  s_f379083ed86ed7::t_6941563085d64a 130-145
+  s_f379083ed86ed7::t_b92237fda6ef7c 30
+  s_f379083ed86ed7::t_f0ea9ebd6c7961 289-294,321-322
+src/sender/selection/mod.rs
+  s_f379083ed86ed7::t_b29bad70ed0891 21
+src/sender/mod.rs
+  s_f379083ed86ed7::t_f37d67fd88e215 36-37
+  s_f379083ed86ed7::t_d0ad527e89a222 38
+src/sender/selection/enhanced.rs
+  s_f379083ed86ed7::t_76da9833cbd80b 39-47,49-62,64-68
+  s_f379083ed86ed7::t_2885ec1ae0e668 48
+  s_f379083ed86ed7::t_1202f00195437a 16,19-24
+  s_f379083ed86ed7::t_3228eea8740fec 63
+  s_f379083ed86ed7::t_c6be5264e47bf9 119,123-136
+  s_f379083ed86ed7::t_022c33525bda71 149
+  s_f379083ed86ed7::t_084735aaa69bc1 314-350
+src/tests/sender_tests.rs
+  s_f379083ed86ed7::t_86caaac9410ddc 92-144
+src/sender/selection/link_cc.rs
+  s_f379083ed86ed7::t_640b09cb6ee808 89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "379affeb1ab038d717ff23232d55ef785cd778e3",
+  "prompts": {},
+  "sessions": {
+    "s_f379083ed86ed7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "65fe9da4-647b-4fd3-8b39-60033758c550",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
