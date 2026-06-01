@@ -13,7 +13,15 @@ use tracing::debug;
 
 use super::MIN_SWITCH_INTERVAL_MS;
 use super::exploration::should_explore_now;
+use super::link_cc::ASSUMED_SRT_PAYLOAD_BYTES;
 use crate::connection::SrtlaConnection;
+
+/// Divisor turning the link's predicted sustainable rate (bps → pps) into
+/// a per-link in-flight cap. `pps / 40` ≈ 25 ms worth of packets — the
+/// budget we're willing to let queue before steering elsewhere. Picked
+/// to align with the per-link CC's RTT-inflation reaction window so the
+/// cap engages before the controller has to back off.
+const IN_FLIGHT_CAP_DIVISOR: u64 = 40;
 
 /// Switching hysteresis: require new connection to be meaningfully better.
 /// At 10%, this prevents noise-driven flip-flopping between connections with
@@ -27,6 +35,36 @@ const SWITCH_THRESHOLD: f64 = 1.10; // New connection must be 10% better
 /// traffic flowing so the CC controller can still observe RTT and
 /// loss for the recovery decision.
 const CC_SOFT_CAP_FLOOR: f64 = 0.10;
+
+/// In-flight cap (packets) derived from the per-link CC target rate.
+/// Returns `None` when there's no signal (`cc_target_bps == 0`, i.e.
+/// the CC controller hasn't published a target yet) — selection treats
+/// the cap as inactive in that case.
+///
+/// `cap = max(1, (cc_target_bps / packet_bits) / 40)`. Floored at 1 so
+/// even on very slow links a single packet can still be in flight; the
+/// cap is meant to bound queueing delay, not to gate the link entirely.
+#[inline]
+pub fn in_flight_cap_packets(cc_target_bps: u64) -> Option<i32> {
+    if cc_target_bps == 0 {
+        return None;
+    }
+    let bits_per_packet = ASSUMED_SRT_PAYLOAD_BYTES.saturating_mul(8);
+    let pps = (cc_target_bps / bits_per_packet).max(1);
+    let cap = (pps / IN_FLIGHT_CAP_DIVISOR).max(1);
+    Some(cap.min(i32::MAX as u64) as i32)
+}
+
+/// Whether the link is currently exceeding its in-flight cap. Used by
+/// the admission gate alongside `weak` and `cc_backing_off`. A capped
+/// link is excluded from candidate ranking when at least one
+/// non-capped, non-weak, non-backing-off link is schedulable.
+#[inline(always)]
+pub fn in_flight_cap_exceeded(c: &SrtlaConnection) -> bool {
+    in_flight_cap_packets(c.cc_target_bps)
+        .map(|cap| c.in_flight_packets > cap)
+        .unwrap_or(false)
+}
 
 /// Compute the CC soft-cap multiplier for a connection. Reads
 /// `cc_target_bps` (set by `LinkCcController::tick_all`) and the
@@ -78,17 +116,24 @@ pub fn select_connection(
     enable_quality: bool,
     enable_explore: bool,
 ) -> Option<usize> {
-    // First pass: discover whether at least one non-weak connection
+    // First pass: discover whether at least one un-gated connection
     // can carry the packet. The classifier marks links weak when their
     // RTT busts the chosen delay tier, when they fall below the
     // entering throughput-share threshold, or (in shadow-mode-promoted
-    // form) when their CC is backing off on observed loss. If any
-    // non-weak link is schedulable, the weak ones are excluded from
-    // ranking. Otherwise we fall back to the full pool — better to
-    // send on a weak link than to drop the packet.
-    let any_non_weak_schedulable = conns
-        .iter()
-        .any(|c| !c.is_timed_out() && c.is_schedulable() && !c.weak && !c.cc_backing_off);
+    // form) when their CC is backing off on observed loss. The
+    // in-flight cap gates a link whose queued packets already exceed
+    // ~25ms of its own predicted sustainable rate, so the scheduler
+    // doesn't pile more on while the link drains. If any un-gated link
+    // is schedulable, the gated ones are excluded from ranking.
+    // Otherwise we fall back to the full pool — better to send on a
+    // gated link than to drop the packet.
+    let any_unconstrained = conns.iter().any(|c| {
+        !c.is_timed_out()
+            && c.is_schedulable()
+            && !c.weak
+            && !c.cc_backing_off
+            && !in_flight_cap_exceeded(c)
+    });
 
     // Score connections by base score; apply quality multiplier if enabled
     let mut best_idx: Option<usize> = None;
@@ -101,7 +146,7 @@ pub fn select_connection(
         if c.is_timed_out() || !c.is_schedulable() {
             continue;
         }
-        if any_non_weak_schedulable && (c.weak || c.cc_backing_off) {
+        if any_unconstrained && (c.weak || c.cc_backing_off || in_flight_cap_exceeded(c)) {
             continue;
         }
         let base = c.get_score() as f64;
@@ -263,6 +308,44 @@ mod tests {
         // Saturated → floor multiplier (10%).
         let m = cc_soft_cap_multiplier(&c);
         assert!((m - CC_SOFT_CAP_FLOOR).abs() < f64::EPSILON, "got {m}");
+    }
+
+    #[test]
+    fn in_flight_cap_no_signal() {
+        // cc_target_bps == 0 → cap inactive regardless of in_flight.
+        assert_eq!(in_flight_cap_packets(0), None);
+        let mut c = one_conn();
+        c.cc_target_bps = 0;
+        c.in_flight_packets = 10_000;
+        assert!(!in_flight_cap_exceeded(&c));
+    }
+
+    #[test]
+    fn in_flight_cap_floors_at_one() {
+        // 100 kbps ≈ 9.5 packet/s; cap = 9/40 → 0, floored to 1.
+        let cap = in_flight_cap_packets(100_000).unwrap();
+        assert_eq!(cap, 1);
+    }
+
+    #[test]
+    fn in_flight_cap_scales_with_rate() {
+        // 10 Mbps: pps ≈ 10_000_000 / (1316*8) = 950; cap = 950/40 = 23.
+        let cap = in_flight_cap_packets(10_000_000).unwrap();
+        assert!((22..=24).contains(&cap), "got {cap}");
+    }
+
+    #[test]
+    fn in_flight_cap_engaged_when_exceeded() {
+        let mut c = one_conn();
+        c.cc_target_bps = 10_000_000;
+        let cap = in_flight_cap_packets(c.cc_target_bps).unwrap();
+        c.in_flight_packets = cap;
+        assert!(
+            !in_flight_cap_exceeded(&c),
+            "at cap is allowed, only above triggers"
+        );
+        c.in_flight_packets = cap + 1;
+        assert!(in_flight_cap_exceeded(&c));
     }
 
     #[test]

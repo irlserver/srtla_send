@@ -89,6 +89,60 @@ mod tests {
     }
 
     #[test]
+    fn test_enhanced_skips_in_flight_cap_when_alternative_exists() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        // Connection 1 has the best base score but is over its in-flight cap:
+        // cc_target_bps = 1 Mbps → pps ≈ 95 → cap ≈ 2 packets. With
+        // in_flight = 10 the cap is engaged. Connection 0 is unconstrained.
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 10;
+        connections[1].cc_target_bps = 1_000_000;
+        connections[2].in_flight_packets = 20;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+        };
+        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(0),
+            "in-flight-capped link must be skipped when an un-gated alternative exists"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_falls_back_when_all_in_flight_capped() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        // Every link is over its in-flight cap. Fallback rule: pick best
+        // base score rather than drop the packet.
+        for c in connections.iter_mut() {
+            c.cc_target_bps = 1_000_000;
+            c.in_flight_packets = 10;
+        }
+        connections[1].in_flight_packets = 5; // best score among the capped
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+        };
+        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "with no un-gated alternatives, selection falls back to the best capped link"
+        );
+    }
+
+    #[test]
     fn test_enhanced_treats_backing_off_as_weak() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));

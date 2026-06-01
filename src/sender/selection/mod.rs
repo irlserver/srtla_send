@@ -18,7 +18,7 @@
 
 mod classic;
 pub mod classifier;
-mod enhanced;
+pub mod enhanced;
 mod exploration;
 pub mod link_cc;
 mod quality;

@@ -27,6 +27,7 @@ use crate::config::ConfigSnapshot;
 use crate::connection::SrtlaConnection;
 use crate::sender::{
     CcState, ClassificationResult, LinkCcSnapshot, WeakReason, calculate_quality_multiplier,
+    in_flight_cap_packets,
 };
 use crate::utils::now_ms;
 
@@ -126,6 +127,22 @@ pub struct LinkStats {
     /// bitrate in housekeeping; dashboards can use it to explain why
     /// one link is batching more aggressively than another.
     pub batch_regime: String,
+
+    // --- In-flight cap soft admission gate ---
+    //
+    // Derived from `cc_target_bps`: cap = (pps / 40) packets ≈ 25 ms of
+    // sustainable in-flight. When `in_flight > in_flight_cap_packets`
+    // the link is excluded from Enhanced selection while at least one
+    // un-gated alternative is schedulable, bounding per-link queueing
+    // delay before the CC controller has to back off on loss.
+    /// In-flight cap in packets. `0` means "no signal" — the per-link
+    /// CC hasn't published a `cc_target_bps` yet, so the cap is
+    /// inactive.
+    pub in_flight_cap_packets: u32,
+    /// Whether the cap was active this tick (i.e. `in_flight` exceeded
+    /// `in_flight_cap_packets`). When true and at least one other link
+    /// is un-gated, this link is being skipped by Enhanced selection.
+    pub in_flight_cap_active: bool,
 }
 
 /// Aggregate statistics snapshot.
@@ -269,6 +286,12 @@ impl SharedStats {
                 ),
             };
 
+            let cap = in_flight_cap_packets(cc_target_bps);
+            let in_flight_cap_pkts = cap.unwrap_or(0).max(0) as u32;
+            let in_flight_cap_active = cap
+                .map(|c| conn.in_flight_packets > c)
+                .unwrap_or(false);
+
             let link = LinkStats {
                 ip: conn.local_ip,
                 label: conn.label.clone(),
@@ -295,6 +318,8 @@ impl SharedStats {
                 cc_rtt_min_ms: cc_rtt_min,
                 cc_loss_permille: cc_loss_pm,
                 batch_regime: conn.batch_sender.regime().as_str().to_string(),
+                in_flight_cap_packets: in_flight_cap_pkts,
+                in_flight_cap_active,
             };
 
             if is_active {

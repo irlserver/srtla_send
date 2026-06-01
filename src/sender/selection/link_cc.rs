@@ -86,7 +86,7 @@ const HAI_VARIANCE_FRACTION: f64 = 0.10;
 /// deployments run with the libsrt 1316-byte default; off-by-a-factor
 /// only matters for the loss-permille ratio, which is invariant under
 /// uniform packet-size assumptions.
-const ASSUMED_SRT_PAYLOAD_BYTES: u64 = 1316;
+pub(crate) const ASSUMED_SRT_PAYLOAD_BYTES: u64 = 1316;
 
 /// Above this RTT-inflation factor (relative to the link's minimum
 /// observed RTT) we declare a hold regime even when no loss has hit.
