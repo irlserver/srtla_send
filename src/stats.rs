@@ -119,6 +119,13 @@ pub struct LinkStats {
     pub cc_rtt_min_ms: f64,
     /// Loss permille over the 1s rolling window.
     pub cc_loss_permille: u32,
+
+    // --- Adaptive batch-send regime ---
+    /// Current per-connection batch-send regime. One of
+    /// `low_activity` / `normal` / `high_load`. Driven from observed
+    /// bitrate in housekeeping; dashboards can use it to explain why
+    /// one link is batching more aggressively than another.
+    pub batch_regime: String,
 }
 
 /// Aggregate statistics snapshot.
@@ -287,6 +294,7 @@ impl SharedStats {
                 cc_rtt_var_ms: cc_rtt_var,
                 cc_rtt_min_ms: cc_rtt_min,
                 cc_loss_permille: cc_loss_pm,
+                batch_regime: conn.batch_sender.regime().as_str().to_string(),
             };
 
             if is_active {

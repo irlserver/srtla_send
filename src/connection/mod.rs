@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 pub use batch_recv::BatchUdpSocket;
-pub use batch_send::BatchSender;
+pub use batch_send::{BatchRegime, BatchSender};
 pub use bitrate::BitrateTracker;
 pub use congestion::CongestionControl;
 pub use incoming::SrtlaIncoming;
