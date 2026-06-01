@@ -28,7 +28,7 @@ This Rust implementation builds upon several open source projects and ideas:
 
 ### Scheduling Modes
 
-The sender supports three mutually exclusive scheduling modes:
+The sender supports two mutually exclusive scheduling modes:
 
 #### Enhanced Mode (Default)
 
@@ -43,16 +43,6 @@ The sender supports three mutually exclusive scheduling modes:
 - Exact match to original `srtla_send.c` implementation
 - Pure capacity-based selection without quality awareness
 - Enable via `--mode classic`
-
-#### RTT-Threshold Mode
-
-- **Reduces Packet Reordering**: Groups links by RTT and strongly prefers low-RTT ("fast") links
-- **Threshold-Based Selection**: Links within `min_rtt + delta` are considered "fast"
-- **Quality-Aware Within Fast Links**: Applies NAK penalties when choosing among fast links
-- **Automatic Fallback**: Uses slow links only when fast links are saturated
-- **Enable via**: `--mode rtt-threshold`
-- **Configure delta**: `--rtt-delta-ms N` (default 30ms) or the `set_rtt_delta` JSON-RPC method
-- **Use Case**: Heterogeneous networks where some links have significantly higher latency (e.g., satellite + cellular)
 
 ### Optional Smart Exploration (Enhanced Mode Only)
 
@@ -136,11 +126,13 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 
 ### Options
 
-- `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default), `rtt-threshold`
-- `--no-quality`: Disable quality scoring (enhanced/rtt-threshold only)
+- `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default)
+- `--no-quality`: Disable quality scoring (enhanced only)
 - `--exploration`: Enable connection exploration (enhanced only)
-- `--rtt-delta-ms <N>`: RTT delta threshold in ms (default: 30, rtt-threshold only)
+- `--config <PATH>`: Path to a TOML config file (reloaded on SIGHUP)
 - `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `/tmp/srtla.sock`)
+- `--priority-bind <ADDR:PORT>`: UDP sidecar address for encoder keyframe priority hints
+- `--metrics-bind <ADDR:PORT>`: Expose a Prometheus scrape endpoint at `/metrics`
 - `-v, --version`: Print version and exit
 
 ## Example Usage
@@ -169,12 +161,6 @@ RUST_LOG=info ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 
 
 ```bash
 ./target/release/srtla_send --mode classic 6000 rec.example.com 5000 ./uplinks.txt
-```
-
-**With RTT-threshold mode:**
-
-```bash
-./target/release/srtla_send --mode rtt-threshold --rtt-delta-ms 50 6000 rec.example.com 5000 ./uplinks.txt
 ```
 
 **With quality scoring disabled:**
@@ -225,20 +211,16 @@ echo '{"jsonrpc":"2.0","id":1,"method":"get_status"}' \
 # Switch scheduler mode
 echo '{"jsonrpc":"2.0","id":1,"method":"set_mode","params":{"mode":"classic"}}' \
     | socat - UNIX-CONNECT:/tmp/srtla.sock
-
-# Keyframe hint (notification, no response)
-echo '{"jsonrpc":"2.0","method":"mark_critical","params":{"count":23}}' \
-    | socat - UNIX-CONNECT:/tmp/srtla.sock
 ```
 
 ### Available Methods
 
-- `set_mode { "mode": "classic"|"enhanced"|"rtt-threshold"|"edpf" }`
+- `set_mode { "mode": "classic"|"enhanced" }`
 - `set_quality { "enabled": bool }`
 - `set_exploration { "enabled": bool }`
-- `set_rtt_delta { "delta_ms": u32 }`
-- `get_status` — returns the full config snapshot and priority-sidecar counters
-- `get_stats` — returns per-link telemetry JSON
+- `get_status` returns the full config snapshot and priority-sidecar counters
+- `get_stats` returns per-link telemetry JSON
+- `subscribe` / `unsubscribe` to a topic (`stats` or `priority.window`) for streamed updates
 
 Keyframe priority hints travel on a dedicated UDP sidecar, not the control socket. See [docs/KEYFRAME_PRIORITY.md](docs/KEYFRAME_PRIORITY.md).
 
@@ -263,9 +245,7 @@ Exposed series include `srtla_send_link_up`, `srtla_send_link_rtt_ms`, `srtla_se
 
 **Classic Mode**: Matches the original srtla_send logic without any enhancements.
 
-**Enhanced Mode** (default): Quality-based scoring that punishes connections with recent NAKs. More recent NAKs = more punishment. Additional 30% penalty (0.7x multiplier) for NAK bursts (≥5 NAKs in short time). Optional connection exploration for testing alternative connections.
-
-**RTT-Threshold Mode**: Groups links into "fast" and "slow" based on RTT measurements. Links within `min_rtt + delta` (default 30ms) are "fast" and strongly preferred. When quality scoring is also enabled, NAK penalties are applied within the fast link group. Falls back to slow links only when all fast links are saturated. Useful for reducing packet reordering in networks with heterogeneous latencies.
+**Enhanced Mode** (default): Quality-based scoring that punishes connections with recent NAKs. More recent NAKs mean more punishment. Additional 30% penalty (0.7x multiplier) for NAK bursts (≥5 NAKs in short time). Optional connection exploration for testing alternative connections.
 
 ## IP List Reload (Unix only)
 

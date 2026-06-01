@@ -40,13 +40,13 @@ Switch the link scheduler.
 
 | param | type | values |
 | --- | --- | --- |
-| `mode` | string | `"classic"`, `"enhanced"`, `"rtt-threshold"`, `"edpf"` |
+| `mode` | string | `"classic"`, `"enhanced"` |
 
 Result: `{ "mode": "<current>" }`.
 
 ### `set_quality`
 
-Toggle quality scoring (enhanced / rtt-threshold modes).
+Toggle quality scoring (enhanced mode).
 
 Params: `{ "enabled": bool }`. Result: `{ "enabled": bool }`.
 
@@ -55,12 +55,6 @@ Params: `{ "enabled": bool }`. Result: `{ "enabled": bool }`.
 Toggle scheduler exploration (enhanced mode only).
 
 Params: `{ "enabled": bool }`. Result: `{ "enabled": bool }`.
-
-### `set_rtt_delta`
-
-Set the RTT delta threshold in milliseconds. Links within `min_rtt + delta` are "fast".
-
-Params: `{ "delta_ms": u32 }`. Result: `{ "delta_ms": u32 }`.
 
 ### `get_status`
 
@@ -73,7 +67,6 @@ Result:
   "mode": "enhanced",
   "quality_enabled": true,
   "exploration_enabled": false,
-  "rtt_delta_ms": 30,
   "critical_windows_received": 142,
   "critical_malformed_datagrams": 0
 }
