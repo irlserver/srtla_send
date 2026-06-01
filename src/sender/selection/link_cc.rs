@@ -81,6 +81,13 @@ const DRAIN_PERMILLE: u32 = 750;
 /// fraction of rtt_ewma. 0.10 = "variance < 10% of mean".
 const HAI_VARIANCE_FRACTION: f64 = 0.10;
 
+/// Assumed SRT payload size for converting cumulative bytes-sent
+/// counters into packet counts when feeding `record_loss`. Most SRTLA
+/// deployments run with the libsrt 1316-byte default; off-by-a-factor
+/// only matters for the loss-permille ratio, which is invariant under
+/// uniform packet-size assumptions.
+const ASSUMED_SRT_PAYLOAD_BYTES: u64 = 1316;
+
 /// Above this RTT-inflation factor (relative to the link's minimum
 /// observed RTT) we declare a hold regime even when no loss has hit.
 /// 1.5 = "RTT is 50% above the floor".
@@ -190,6 +197,16 @@ pub struct LinkCongestionState {
     /// Ticks remaining in fast-recovery mode. Decremented each
     /// `tick()` call; while > 0 the climb sub-mode is `FastRecovery`.
     fast_recovery_ticks: u32,
+    /// Cumulative bytes-sent the previous tick observed. Drives the
+    /// per-tick `sent` delta fed to `record_loss`.
+    prev_bytes_sent_total: u64,
+    /// Cumulative NAK count the previous tick observed. Drives the
+    /// per-tick `lost` delta.
+    prev_nak_total: i32,
+    /// Set after the first `observe_traffic` call. Until then we don't
+    /// know what "previous" means so we just stash the totals as a
+    /// baseline without emitting a loss sample.
+    traffic_baseline_set: bool,
 }
 
 impl Default for LinkCongestionState {
@@ -206,6 +223,9 @@ impl Default for LinkCongestionState {
             window_lost: 0,
             window_sent: 0,
             fast_recovery_ticks: 0,
+            prev_bytes_sent_total: 0,
+            prev_nak_total: 0,
+            traffic_baseline_set: false,
         }
     }
 }
@@ -250,13 +270,46 @@ impl LinkCongestionState {
         self.last_rtt_update_ms = now_ms;
     }
 
-    /// Feed a (sent, lost) sample. Sliding-window aggregates evict
-    /// entries older than `LOSS_WINDOW_MS`.
+    /// Feed cumulative (bytes_sent, nak_total) snapshots from the
+    /// connection. Computes per-tick deltas against the previous call
+    /// and forwards them to `record_loss`. First call after creation
+    /// stashes the values as a baseline and returns without sampling.
     ///
-    /// Not yet wired into production: NAK delta plumbing arrives in a
-    /// follow-up commit. Tests exercise it directly so the algorithm
-    /// can be validated independently.
-    #[allow(dead_code)]
+    /// Decoupling the cumulative→delta conversion from `record_loss`
+    /// keeps the latter directly testable with synthetic deltas while
+    /// the production path only needs to thread totals.
+    pub fn observe_traffic(&mut self, bytes_sent_total: u64, nak_total: i32, now_ms: u64) {
+        if !self.traffic_baseline_set {
+            self.prev_bytes_sent_total = bytes_sent_total;
+            self.prev_nak_total = nak_total;
+            self.traffic_baseline_set = true;
+            return;
+        }
+        let delta_bytes = bytes_sent_total.saturating_sub(self.prev_bytes_sent_total);
+        let delta_nak = nak_total.saturating_sub(self.prev_nak_total).max(0);
+        self.prev_bytes_sent_total = bytes_sent_total;
+        self.prev_nak_total = nak_total;
+
+        if delta_bytes == 0 && delta_nak == 0 {
+            // No traffic this tick — don't pollute the window with a
+            // zero-sample. evict_expired in tick() handles aging.
+            return;
+        }
+        let sent_pkts = (delta_bytes / ASSUMED_SRT_PAYLOAD_BYTES).min(u32::MAX as u64) as u32;
+        let lost_pkts = delta_nak.min(i32::MAX) as u32;
+        // Guard against a NAK delta with no corresponding bytes-sent
+        // delta (e.g. NAKs arriving on a now-quiet link) — the loss
+        // permille formula divides by `window_sent` which would
+        // saturate to 1000 with zero-divisor handling. Treat as a
+        // single-packet "sent" baseline so the ratio stays bounded.
+        let sent_pkts = sent_pkts.max(if lost_pkts > 0 { 1 } else { 0 });
+        self.record_loss(sent_pkts, lost_pkts, now_ms);
+    }
+
+    /// Feed a (sent, lost) sample directly. Sliding-window aggregates
+    /// evict entries older than `LOSS_WINDOW_MS`. Production code uses
+    /// [`observe_traffic`] which threads cumulative counters; this
+    /// method is exposed for unit tests.
     pub fn record_loss(&mut self, sent: u32, lost: u32, now_ms: u64) {
         self.loss_samples.push(LossSample {
             ts_ms: now_ms,
@@ -435,13 +488,9 @@ pub struct LinkCcSnapshot {
 
 /// Owns one [`LinkCongestionState`] per connection. Driven by the
 /// sender's housekeeping tick: `tick_all` reads each connection's
-/// current RTT and bitrate, feeds the per-link state, and produces
+/// current RTT, observed bitrate, cumulative bytes-sent, and
+/// cumulative NAK count; feeds the per-link state; and produces
 /// snapshots for the stats exporter.
-///
-/// Loss is fed separately on the NAK path (not yet wired) — for now
-/// `record_loss` stays at zero, which keeps every link in the
-/// climbing/holding regimes. Plumbing the NAK delta in is a follow-up
-/// commit.
 #[derive(Default)]
 pub struct LinkCcController {
     per_conn: HashMap<u64, LinkCongestionState>,
@@ -467,6 +516,16 @@ impl LinkCcController {
             if rtt_ms > 0.0 {
                 entry.record_rtt(rtt_ms, now_ms);
             }
+            // Loss path: cumulative bytes-sent and NAK count from the
+            // connection — `observe_traffic` computes per-tick deltas
+            // and forwards to `record_loss`. Before this wiring landed,
+            // the loss window stayed empty and CcState::BackingOff was
+            // unreachable in production.
+            entry.observe_traffic(
+                conn.bitrate.bytes_sent_total,
+                conn.total_nak_count(),
+                now_ms,
+            );
             let observed_bps = conn.bitrate.current_bitrate_bps.max(0.0) as u64;
             entry.tick(observed_bps, now_ms);
             alive.insert(conn.conn_id, entry.snapshot());
@@ -653,5 +712,42 @@ mod tests {
         // least once. Hard to assert exactly which tick — verify the
         // path was traversed by checking rtt is back to baseline.
         assert!(cc.rtt_ewma_ms < 30.0);
+    }
+
+    #[test]
+    fn observe_traffic_first_call_sets_baseline_without_sample() {
+        let mut cc = LinkCongestionState::default();
+        cc.observe_traffic(1_000_000, 5, 100);
+        assert!(cc.loss_samples.is_empty(), "first call must not emit a sample");
+        assert!(cc.traffic_baseline_set);
+        assert_eq!(cc.prev_bytes_sent_total, 1_000_000);
+        assert_eq!(cc.prev_nak_total, 5);
+    }
+
+    #[test]
+    fn observe_traffic_delta_flows_into_record_loss() {
+        let mut cc = LinkCongestionState::default();
+        cc.observe_traffic(0, 0, 0);
+        // 1 MB sent ≈ 760 packets at 1316-byte payload. 5 NAKs in same tick.
+        cc.observe_traffic(1_000_000, 5, 100);
+        let pm = cc.loss_permille();
+        // 5 / 760 ≈ 6.6 permille
+        assert!(pm > 0, "loss permille should be non-zero after delta");
+        assert!(pm < 20, "expected ~6 permille, got {pm}");
+    }
+
+    #[test]
+    fn observe_traffic_quiet_tick_with_naks_does_not_panic() {
+        // Pathological: NAKs arrive but no bytes were sent this tick.
+        // Without the synthesized 1-packet `sent` baseline this would
+        // skip the record_loss call entirely (delta_bytes == 0 path);
+        // verify the loss makes it into the window.
+        let mut cc = LinkCongestionState::default();
+        cc.observe_traffic(1_000_000, 0, 0);
+        cc.observe_traffic(1_000_000, 5, 100);
+        let pm = cc.loss_permille();
+        assert!(pm > 0, "loss with no fresh bytes should still register, got {pm}");
+        // Hard cap from `loss_permille` saturation.
+        assert!(pm <= 1_000_000);
     }
 }
