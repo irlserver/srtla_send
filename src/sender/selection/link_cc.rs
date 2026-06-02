@@ -296,7 +296,7 @@ impl LinkCongestionState {
             return;
         }
         let sent_pkts = (delta_bytes / ASSUMED_SRT_PAYLOAD_BYTES).min(u32::MAX as u64) as u32;
-        let lost_pkts = delta_nak.min(i32::MAX) as u32;
+        let lost_pkts = delta_nak as u32;
         // Guard against a NAK delta with no corresponding bytes-sent
         // delta (e.g. NAKs arriving on a now-quiet link) — the loss
         // permille formula divides by `window_sent` which would

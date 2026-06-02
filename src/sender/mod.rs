@@ -33,7 +33,6 @@ use packet_handler::{
 pub use selection::calculate_quality_multiplier;
 pub use selection::classifier::{ClassificationResult, WeakReason};
 #[allow(unused_imports)]
-#[allow(unused_imports)]
 pub use selection::enhanced::{in_flight_cap_exceeded, in_flight_cap_packets};
 #[allow(unused_imports)]
 pub use selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
