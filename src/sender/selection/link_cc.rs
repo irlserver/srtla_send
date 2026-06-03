@@ -125,6 +125,14 @@ const LOSS_DEGRADE_CLEAR: f64 = 0.25;
 /// the degraded flag latches.
 const LOSS_DEGRADE_SUSTAIN_MS: u64 = 4_000;
 
+/// Window (ms) over which the CC's minimum RTT is tracked. A lifetime
+/// minimum pins `rtt_inflation` high forever after one early low sample,
+/// so a cellular handover that raises the true floor reads as permanent
+/// congestion and traps the controller in Drain/Hold. Expiring the min
+/// over ~30s lets the baseline follow the path. Matches the connection
+/// RTT tracker's slow-window timescale.
+const CC_RTT_MIN_WINDOW_MS: u64 = 30_000;
+
 /// Reject a single throughput sample that exceeds this factor times the
 /// current target estimate. A stall-release ACK flush (a carrier NAT
 /// rebind dumping thousands of queued ACKs in one window) or a
@@ -215,9 +223,13 @@ pub struct LinkCongestionState {
     rtt_ewma_ms: f64,
     /// Variance proxy: EWMA of `|sample - rtt_ewma|` with weight 1:3.
     rtt_var_ms: f64,
-    /// Lowest RTT we've ever seen on this link. Used to detect
-    /// inflation.
+    /// Lowest RTT in the recent window (see `CC_RTT_MIN_WINDOW_MS`).
+    /// Used to detect inflation. Windowed, not lifetime, so a handover
+    /// that raises the floor doesn't pin inflation high forever.
     rtt_min_ms: f64,
+    /// Wall-clock the current `rtt_min_ms` was set. When it ages past
+    /// the window the min resets to the next sample.
+    rtt_min_stamp_ms: u64,
     /// Wall-clock of the last RTT update.
     last_rtt_update_ms: u64,
     /// Sliding-window loss samples.
@@ -260,6 +272,7 @@ impl Default for LinkCongestionState {
             rtt_ewma_ms: 0.0,
             rtt_var_ms: 0.0,
             rtt_min_ms: f64::INFINITY,
+            rtt_min_stamp_ms: 0,
             last_rtt_update_ms: 0,
             loss_samples: Vec::new(),
             window_lost: 0,
@@ -294,7 +307,7 @@ impl LinkCongestionState {
             self.rtt_ewma_ms = rtt_ms;
             self.rtt_var_ms = 0.0;
             self.last_rtt_update_ms = now_ms;
-            self.rtt_min_ms = self.rtt_min_ms.min(rtt_ms);
+            self.update_rtt_min(rtt_ms, now_ms);
             return;
         } else if age_ms >= 1_000 {
             (1.0, 1.0)
@@ -312,8 +325,21 @@ impl LinkCongestionState {
         // Variance proxy: 1:3 weighted moving average of |dev|.
         let dev = (rtt_ms - prev).abs();
         self.rtt_var_ms = (dev * 1.0 + self.rtt_var_ms * 3.0) / 4.0;
-        self.rtt_min_ms = self.rtt_min_ms.min(rtt_ms);
+        self.update_rtt_min(rtt_ms, now_ms);
         self.last_rtt_update_ms = now_ms;
+    }
+
+    /// Windowed minimum RTT: adopt any lower sample, and when the held
+    /// minimum ages past `CC_RTT_MIN_WINDOW_MS` reset it to the current
+    /// sample so the baseline follows a changed propagation floor (e.g.
+    /// after a cellular handover) instead of staying pinned to a stale
+    /// low sample.
+    fn update_rtt_min(&mut self, rtt_ms: f64, now_ms: u64) {
+        let stale = now_ms.saturating_sub(self.rtt_min_stamp_ms) > CC_RTT_MIN_WINDOW_MS;
+        if !self.rtt_min_ms.is_finite() || rtt_ms < self.rtt_min_ms || stale {
+            self.rtt_min_ms = rtt_ms;
+            self.rtt_min_stamp_ms = now_ms;
+        }
     }
 
     /// Feed cumulative (bytes_sent, nak_total) snapshots from the
@@ -696,6 +722,40 @@ mod tests {
         // Beyond window — should evict.
         cc.record_loss(0, 0, LOSS_WINDOW_MS + 10);
         assert_eq!(cc.loss_permille(), 0);
+    }
+
+    #[test]
+    fn rtt_min_is_windowed_not_lifetime() {
+        let mut cc = LinkCongestionState::default();
+        // Establish a low baseline, then a sustained higher floor (e.g.
+        // a cellular handover raised propagation delay to ~80ms).
+        cc.record_rtt(20.0, 0);
+        for t in (1_000..=40_000).step_by(1_000) {
+            cc.record_rtt(80.0, t);
+        }
+        // Past the 30s window the pinned 20ms minimum has expired and the
+        // baseline now follows the ~80ms floor, so inflation is ~1x and
+        // the controller won't sit in a spurious Drain.
+        assert!(
+            cc.rtt_min_ms >= 70.0,
+            "windowed rtt_min should follow the raised floor, got {}",
+            cc.rtt_min_ms
+        );
+    }
+
+    #[test]
+    fn rtt_min_holds_within_window() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(20.0, 0);
+        // Within the window the low floor is retained even as RTT rises.
+        for t in (1_000..=10_000).step_by(1_000) {
+            cc.record_rtt(80.0, t);
+        }
+        assert!(
+            (cc.rtt_min_ms - 20.0).abs() < 1.0,
+            "rtt_min should hold the true floor within the window, got {}",
+            cc.rtt_min_ms
+        );
     }
 
     #[test]
