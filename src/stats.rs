@@ -120,6 +120,12 @@ pub struct LinkStats {
     pub cc_rtt_min_ms: f64,
     /// Loss permille over the 1s rolling window.
     pub cc_loss_permille: u32,
+    /// Time-decayed loss fraction (0..1) driving continuous phase
+    /// demotion. Latches `cc_loss_degraded` once sustained high.
+    pub cc_loss_ewma: f64,
+    /// Whether the sustained-loss verdict has latched. A degraded link
+    /// is demoted in score but kept schedulable, never removed.
+    pub cc_loss_degraded: bool,
 
     // --- Adaptive batch-send regime ---
     /// Current per-connection batch-send regime. One of
@@ -265,6 +271,8 @@ impl SharedStats {
                 cc_rtt_var,
                 cc_rtt_min,
                 cc_loss_pm,
+                cc_loss_ewma,
+                cc_loss_degraded,
             ) = match cc_entry {
                 Some(s) => (
                     cc_state_str(s.state).to_string(),
@@ -274,6 +282,8 @@ impl SharedStats {
                     s.rtt_var_ms,
                     s.rtt_min_ms,
                     s.loss_permille,
+                    s.loss_ewma,
+                    s.loss_degraded,
                 ),
                 None => (
                     "unknown".to_string(),
@@ -283,14 +293,14 @@ impl SharedStats {
                     0.0,
                     0.0,
                     0,
+                    0.0,
+                    false,
                 ),
             };
 
             let cap = in_flight_cap_packets(cc_target_bps);
             let in_flight_cap_pkts = cap.unwrap_or(0).max(0) as u32;
-            let in_flight_cap_active = cap
-                .map(|c| conn.in_flight_packets > c)
-                .unwrap_or(false);
+            let in_flight_cap_active = cap.map(|c| conn.in_flight_packets > c).unwrap_or(false);
 
             let link = LinkStats {
                 ip: conn.local_ip,
@@ -317,6 +327,8 @@ impl SharedStats {
                 cc_rtt_var_ms: cc_rtt_var,
                 cc_rtt_min_ms: cc_rtt_min,
                 cc_loss_permille: cc_loss_pm,
+                cc_loss_ewma,
+                cc_loss_degraded,
                 batch_regime: conn.batch_sender.regime().as_str().to_string(),
                 in_flight_cap_packets: in_flight_cap_pkts,
                 in_flight_cap_active,

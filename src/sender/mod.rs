@@ -272,6 +272,8 @@ pub async fn run_sender_with_config(
                                 .map(|s| s.state == selection::link_cc::CcState::BackingOff)
                                 .unwrap_or(false);
                             conn.cc_target_bps = cc_snap.map(|s| s.target_bps).unwrap_or(0);
+                            conn.loss_degraded =
+                                cc_snap.map(|s| s.loss_degraded).unwrap_or(false);
                         }
                         shared_stats.update(
                             &connections,

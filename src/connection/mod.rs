@@ -53,11 +53,13 @@ pub enum LinkPhase {
     Warming { rtt_probes: u32, entered_ms: u64 },
     /// Fully operational — scheduler may use this link.
     Live,
-    /// Quality has degraded (high NAK rate / low quality multiplier).
-    /// Scheduler may still use this link but at reduced priority.
+    /// Quality has degraded (high NAK rate / low quality multiplier, or
+    /// a sustained loss EWMA). Scheduler still uses this link but its
+    /// score is reduced. There is no removed/cooldown phase: a link is
+    /// never excluded for quality, only de-prioritised, so it keeps the
+    /// ACK traffic that proves its recovery. Truly dead links are pruned
+    /// by `is_timed_out`/`CONN_TIMEOUT`.
     Degraded,
-    /// Recently degraded, temporarily removed from scheduling.
-    Cooldown { entered_ms: u64 },
 }
 
 impl LinkPhase {
@@ -74,7 +76,6 @@ impl std::fmt::Display for LinkPhase {
             LinkPhase::Warming { rtt_probes, .. } => write!(f, "warming({rtt_probes})"),
             LinkPhase::Live => write!(f, "live"),
             LinkPhase::Degraded => write!(f, "degraded"),
-            LinkPhase::Cooldown { .. } => write!(f, "cooldown"),
         }
     }
 }
@@ -195,6 +196,12 @@ pub struct SrtlaConnection {
     /// loss actually fires. `0` means "no signal" — selection skips
     /// the cap.
     pub(crate) cc_target_bps: u64,
+    /// Latched verdict from `LinkCongestionState`: the link's
+    /// time-decayed loss EWMA has been sustained high (see
+    /// `LOSS_DEGRADE_*`). Drives a graded demotion to `Degraded` in the
+    /// phase machine; it never removes the link from scheduling (a
+    /// genuinely dead link is handled by `is_timed_out`/`CONN_TIMEOUT`).
+    pub(crate) loss_degraded: bool,
     /// Strategy for steering this uplink's socket onto its egress path.
     /// Retained so reconnects re-apply the same binding (source IP on Linux,
     /// host `Network.bindSocket` callback on Android).
@@ -244,6 +251,7 @@ impl SrtlaConnection {
             weak: false,
             cc_backing_off: false,
             cc_target_bps: 0,
+            loss_degraded: false,
             binder,
         })
     }
@@ -415,66 +423,59 @@ impl SrtlaConnection {
 
     /// Drive phase transitions based on current connection health.
     ///
-    /// Called from housekeeping. Detects degradation (high NAK + low quality)
-    /// and manages cooldown re-entry.
+    /// Called from housekeeping. A degraded link stays **schedulable**:
+    /// demotion only lowers its score (via quality + the `Degraded`
+    /// phase), it never removes the link. Removing a link starves it of
+    /// the ACK traffic that proves its own recovery, which on bonded
+    /// cellular turns a transient HARQ stall (400-800ms) into a
+    /// self-sustaining false death. A genuinely unresponsive link is
+    /// pruned by `is_timed_out`/`CONN_TIMEOUT`, not here.
     pub fn update_phase(&mut self) {
-        const COOLDOWN_DURATION_MS: u64 = 5_000;
         const DEGRADED_QUALITY_THRESHOLD: f64 = 0.5;
         const DEGRADED_NAK_BURST_THRESHOLD: i32 = 5;
 
+        // Combined degradation signal: the fast NAK-quality path catches
+        // mild degradation; the sustained loss-EWMA verdict
+        // (`loss_degraded`, latched with hysteresis in
+        // `LinkCongestionState`) catches a link that is genuinely
+        // shedding most of its traffic without a binary kill.
+        let nak_degraded = self.quality_cache.multiplier < DEGRADED_QUALITY_THRESHOLD
+            && self.congestion.nak_burst_count >= DEGRADED_NAK_BURST_THRESHOLD;
+        let nak_recovered = self.quality_cache.multiplier >= DEGRADED_QUALITY_THRESHOLD
+            && self.congestion.nak_burst_count < DEGRADED_NAK_BURST_THRESHOLD;
+
         match self.phase {
-            LinkPhase::Warming { entered_ms, .. } => {
-                // Auto-promote to Live if warming takes too long
-                if now_ms().saturating_sub(entered_ms) >= WARMING_TIMEOUT_MS {
-                    debug!(
-                        "{}: warming timeout ({}ms), auto-promoting to Live",
-                        self.label, WARMING_TIMEOUT_MS
-                    );
-                    self.phase = LinkPhase::Live;
-                }
-            }
-            LinkPhase::Live => {
-                // Detect degradation: sustained low quality + NAK bursts
-                if self.quality_cache.multiplier < DEGRADED_QUALITY_THRESHOLD
-                    && self.congestion.nak_burst_count >= DEGRADED_NAK_BURST_THRESHOLD
-                {
-                    debug!(
-                        "{}: Live → Degraded (quality={:.2}, nak_burst={})",
-                        self.label, self.quality_cache.multiplier, self.congestion.nak_burst_count
-                    );
-                    self.phase = LinkPhase::Degraded;
-                }
-            }
-            LinkPhase::Degraded => {
-                // Recover back to Live when quality improves
-                if self.quality_cache.multiplier >= DEGRADED_QUALITY_THRESHOLD
-                    && self.congestion.nak_burst_count < DEGRADED_NAK_BURST_THRESHOLD
-                {
-                    debug!(
-                        "{}: Degraded → Live (quality={:.2})",
-                        self.label, self.quality_cache.multiplier
-                    );
-                    self.phase = LinkPhase::Live;
-                }
-                // Enter cooldown if quality is critically low
-                if self.quality_cache.multiplier < 0.35 {
-                    debug!(
-                        "{}: Degraded → Cooldown (quality={:.2})",
-                        self.label, self.quality_cache.multiplier
-                    );
-                    self.phase = LinkPhase::Cooldown {
-                        entered_ms: now_ms(),
-                    };
-                }
-            }
-            // Exit cooldown after duration elapses
-            LinkPhase::Cooldown { entered_ms }
-                if now_ms().saturating_sub(entered_ms) >= COOLDOWN_DURATION_MS =>
+            // Auto-promote to Live if warming takes too long.
+            LinkPhase::Warming { entered_ms, .. }
+                if now_ms().saturating_sub(entered_ms) >= WARMING_TIMEOUT_MS =>
             {
-                debug!("{}: Cooldown → Live", self.label);
+                debug!(
+                    "{}: warming timeout ({}ms), auto-promoting to Live",
+                    self.label, WARMING_TIMEOUT_MS
+                );
                 self.phase = LinkPhase::Live;
             }
-            // Registering and Warming are driven by REG3 and RTT probes
+            LinkPhase::Live if nak_degraded || self.loss_degraded => {
+                debug!(
+                    "{}: Live -> Degraded (quality={:.2}, nak_burst={}, loss_degraded={})",
+                    self.label,
+                    self.quality_cache.multiplier,
+                    self.congestion.nak_burst_count,
+                    self.loss_degraded
+                );
+                self.phase = LinkPhase::Degraded;
+            }
+            // Recover to Live only when both signals clear: the fast
+            // NAK-quality path AND the latched loss-EWMA verdict.
+            LinkPhase::Degraded if nak_recovered && !self.loss_degraded => {
+                debug!(
+                    "{}: Degraded -> Live (quality={:.2})",
+                    self.label, self.quality_cache.multiplier
+                );
+                self.phase = LinkPhase::Live;
+            }
+            // Registering, plus Warming/Live/Degraded whose guards did
+            // not fire, hold their phase.
             _ => {}
         }
     }

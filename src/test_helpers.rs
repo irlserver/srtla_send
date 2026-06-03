@@ -67,6 +67,7 @@ fn create_connection_from_socket(
         weak: false,
         cc_backing_off: false,
         cc_target_bps: 0,
+        loss_degraded: false,
         binder: Arc::new(crate::connection::SourceIpBinder),
     }
 }

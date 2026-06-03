@@ -103,6 +103,28 @@ const MAX_TARGET_BPS: u64 = 200_000_000;
 /// Initial target on first sample. Conservative on purpose.
 const INITIAL_TARGET_BPS: u64 = 1_000_000;
 
+/// Time constant (ms) for the link loss EWMA that drives continuous
+/// phase demotion. Cellular HARQ stalls last 400-800ms; a 2s tau keeps
+/// the signal from reacting to a single stall while still demoting a
+/// link that is genuinely shedding traffic.
+const LOSS_EWMA_TAU_MS: f64 = 2_000.0;
+
+/// Loss-EWMA fraction (0..1) above which, once sustained for
+/// `LOSS_DEGRADE_SUSTAIN_MS`, the link is flagged degraded. High on
+/// purpose: only a link losing most of its traffic trips it, so
+/// transient stalls do not cause a false demotion. This drives a graded
+/// score penalty, never a hard removal — the scheduler keeps the link
+/// so it can prove its own recovery on the next ACK.
+const LOSS_DEGRADE_ENTER: f64 = 0.55;
+
+/// Hysteresis: the loss EWMA must fall back below this before the
+/// degraded flag clears.
+const LOSS_DEGRADE_CLEAR: f64 = 0.25;
+
+/// How long the loss EWMA must stay above `LOSS_DEGRADE_ENTER` before
+/// the degraded flag latches.
+const LOSS_DEGRADE_SUSTAIN_MS: u64 = 4_000;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum CcState {
     /// Pre-RTT-sample bootstrap state. Target stays at the floor until
@@ -207,6 +229,17 @@ pub struct LinkCongestionState {
     /// know what "previous" means so we just stash the totals as a
     /// baseline without emitting a loss sample.
     traffic_baseline_set: bool,
+    /// Time-decayed EWMA of the windowed loss fraction (0..1). Drives
+    /// continuous phase demotion in place of a binary link-death gate.
+    loss_ewma: f64,
+    /// Wall-clock of the last `loss_ewma` update. 0 = never updated.
+    loss_ewma_last_ms: u64,
+    /// Wall-clock since which `loss_ewma` has been continuously above
+    /// `LOSS_DEGRADE_ENTER`. 0 = currently below the entry threshold.
+    loss_high_since_ms: u64,
+    /// Latched hysteretic verdict: true once loss has been sustained
+    /// high, false again once it recovers below `LOSS_DEGRADE_CLEAR`.
+    loss_degraded: bool,
 }
 
 impl Default for LinkCongestionState {
@@ -226,6 +259,10 @@ impl Default for LinkCongestionState {
             prev_bytes_sent_total: 0,
             prev_nak_total: 0,
             traffic_baseline_set: false,
+            loss_ewma: 0.0,
+            loss_ewma_last_ms: 0,
+            loss_high_since_ms: 0,
+            loss_degraded: false,
         }
     }
 }
@@ -357,6 +394,7 @@ impl LinkCongestionState {
         }
 
         let loss_pm = self.loss_permille();
+        self.update_loss_ewma(loss_pm, now_ms);
         let rtt_inflation = if self.rtt_min_ms.is_finite() && self.rtt_min_ms > 0.0 {
             self.rtt_ewma_ms / self.rtt_min_ms
         } else {
@@ -440,6 +478,37 @@ impl LinkCongestionState {
         self.target_bps = (next as u64).clamp(MIN_TARGET_BPS, MAX_TARGET_BPS);
     }
 
+    /// Fold the latest windowed loss permille into the time-decayed
+    /// loss EWMA and update the latched degraded verdict. Demotion is
+    /// graded: the verdict only gates score (via the phase machine), it
+    /// never removes the link from scheduling, so a link that briefly
+    /// stalls and recovers is never starved of the ACK traffic that
+    /// proves its recovery.
+    fn update_loss_ewma(&mut self, loss_pm: u32, now_ms: u64) {
+        let inst = (loss_pm as f64 / 1_000.0).clamp(0.0, 1.0);
+        if self.loss_ewma_last_ms == 0 {
+            self.loss_ewma = inst;
+        } else {
+            let dt = now_ms.saturating_sub(self.loss_ewma_last_ms) as f64;
+            let alpha = 1.0 - (-dt / LOSS_EWMA_TAU_MS).exp();
+            self.loss_ewma += (inst - self.loss_ewma) * alpha;
+        }
+        self.loss_ewma_last_ms = now_ms;
+
+        if self.loss_ewma > LOSS_DEGRADE_ENTER {
+            if self.loss_high_since_ms == 0 {
+                self.loss_high_since_ms = now_ms;
+            } else if now_ms.saturating_sub(self.loss_high_since_ms) >= LOSS_DEGRADE_SUSTAIN_MS {
+                self.loss_degraded = true;
+            }
+        } else {
+            self.loss_high_since_ms = 0;
+            if self.loss_ewma < LOSS_DEGRADE_CLEAR {
+                self.loss_degraded = false;
+            }
+        }
+    }
+
     /// Decide which sub-mode applies on this Climbing tick.
     ///
     /// Order of precedence:
@@ -471,6 +540,8 @@ impl LinkCongestionState {
                 0.0
             },
             loss_permille: self.loss_permille(),
+            loss_ewma: self.loss_ewma,
+            loss_degraded: self.loss_degraded,
         }
     }
 }
@@ -484,6 +555,12 @@ pub struct LinkCcSnapshot {
     pub rtt_var_ms: f64,
     pub rtt_min_ms: f64,
     pub loss_permille: u32,
+    /// Time-decayed loss fraction (0..1) driving phase demotion.
+    pub loss_ewma: f64,
+    /// Latched hysteretic verdict that loss has been sustained high.
+    /// Consumed by the connection phase machine to demote (not remove)
+    /// the link.
+    pub loss_degraded: bool,
 }
 
 /// Owns one [`LinkCongestionState`] per connection. Driven by the
@@ -715,10 +792,64 @@ mod tests {
     }
 
     #[test]
+    fn loss_ewma_latches_degraded_after_sustained_loss_and_clears_with_hysteresis() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+
+        // Drive sustained ~80% loss for well over LOSS_DEGRADE_SUSTAIN_MS.
+        // Each tick feeds a fresh high-loss window via record_loss so the
+        // permille stays high as the EWMA climbs past the entry threshold.
+        let mut t = 0u64;
+        for _ in 0..40 {
+            t += 200;
+            cc.record_loss(1_000, 800, t);
+            cc.tick(2_000_000, t);
+        }
+        assert!(
+            cc.snapshot().loss_degraded,
+            "sustained high loss should latch the degraded verdict (ewma={:.3})",
+            cc.loss_ewma
+        );
+
+        // Recover: zero loss long enough for the EWMA to fall below
+        // LOSS_DEGRADE_CLEAR. record_loss with a clean window drains it.
+        for _ in 0..60 {
+            t += 200;
+            cc.record_loss(1_000, 0, t);
+            cc.tick(2_000_000, t);
+        }
+        assert!(
+            !cc.snapshot().loss_degraded,
+            "recovered loss should clear the verdict (ewma={:.3})",
+            cc.loss_ewma
+        );
+    }
+
+    #[test]
+    fn loss_ewma_does_not_latch_on_a_transient_spike() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        // One bad window, then clean. Must not latch (sustain not met).
+        cc.record_loss(1_000, 900, 200);
+        cc.tick(2_000_000, 200);
+        for _ in 0..10 {
+            cc.record_loss(1_000, 0, 400);
+        }
+        cc.tick(2_000_000, 1_600);
+        assert!(
+            !cc.snapshot().loss_degraded,
+            "a single bad window must not demote the link"
+        );
+    }
+
+    #[test]
     fn observe_traffic_first_call_sets_baseline_without_sample() {
         let mut cc = LinkCongestionState::default();
         cc.observe_traffic(1_000_000, 5, 100);
-        assert!(cc.loss_samples.is_empty(), "first call must not emit a sample");
+        assert!(
+            cc.loss_samples.is_empty(),
+            "first call must not emit a sample"
+        );
         assert!(cc.traffic_baseline_set);
         assert_eq!(cc.prev_bytes_sent_total, 1_000_000);
         assert_eq!(cc.prev_nak_total, 5);
@@ -746,7 +877,10 @@ mod tests {
         cc.observe_traffic(1_000_000, 0, 0);
         cc.observe_traffic(1_000_000, 5, 100);
         let pm = cc.loss_permille();
-        assert!(pm > 0, "loss with no fresh bytes should still register, got {pm}");
+        assert!(
+            pm > 0,
+            "loss with no fresh bytes should still register, got {pm}"
+        );
         // Hard cap from `loss_permille` saturation.
         assert!(pm <= 1_000_000);
     }
