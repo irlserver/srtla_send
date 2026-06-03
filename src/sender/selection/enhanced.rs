@@ -36,6 +36,18 @@ const SWITCH_THRESHOLD: f64 = 1.10; // New connection must be 10% better
 /// loss for the recovery decision.
 const CC_SOFT_CAP_FLOOR: f64 = 0.10;
 
+/// Score multiplier applied to a quality-gated link (`weak` or
+/// `cc_backing_off`) when at least one un-gated link is schedulable.
+/// The link stays in the ranking at a crushed score instead of being
+/// dropped outright. In steady state a healthy link's full score still
+/// wins decisively, so routing is unchanged; the point is that the
+/// demoted link remains eligible to be second-best (so exploration can
+/// probe it) and keeps a trickle of data flowing. Without this, an
+/// excluded link earns zero throughput share, which the classifier
+/// reads as `NoTraffic`/`LowShare` and keeps flagging weak — a
+/// self-sustaining starvation lock that never re-tests the link.
+const GATED_LINK_PENALTY: f64 = 0.02;
+
 /// In-flight cap (packets) derived from the per-link CC target rate.
 /// Returns `None` when there's no signal (`cc_target_bps == 0`, i.e.
 /// the CC controller hasn't published a target yet) — selection treats
@@ -146,17 +158,28 @@ pub fn select_connection(
         if c.is_timed_out() || !c.is_schedulable() {
             continue;
         }
-        if any_unconstrained && (c.weak || c.cc_backing_off || in_flight_cap_exceeded(c)) {
+        // Hard-skip only the in-flight cap: it bounds queueing delay and
+        // is transient (self-clears as the link drains), so piling more
+        // on is counterproductive. Quality gates (`weak`,
+        // `cc_backing_off`) instead crush the score but keep the link
+        // rankable, so it is never starved into a permanent weak lock.
+        if any_unconstrained && in_flight_cap_exceeded(c) {
             continue;
         }
+        let quality_gated = any_unconstrained && (c.weak || c.cc_backing_off);
+        let gate_mult = if quality_gated {
+            GATED_LINK_PENALTY
+        } else {
+            1.0
+        };
         let base = c.get_score() as f64;
         let cap_mult = cc_soft_cap_multiplier(c);
         let score = if !enable_quality {
-            base * cap_mult
+            base * cap_mult * gate_mult
         } else {
             // Use cached quality multiplier (recalculates every 50ms)
             let quality_mult = c.get_cached_quality_multiplier(current_time_ms);
-            let final_score = base * quality_mult * cap_mult;
+            let final_score = base * quality_mult * cap_mult * gate_mult;
 
             // Log quality issues and recoveries for debugging (cold path)
             log_quality_state(c, quality_mult, base, final_score);

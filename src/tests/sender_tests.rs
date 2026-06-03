@@ -167,6 +167,41 @@ mod tests {
     }
 
     #[test]
+    fn test_enhanced_weak_link_stays_reachable_for_exploration() {
+        // A2: a quality-gated link is crushed in score but not removed,
+        // so exploration can still probe it. Without that, the gated link
+        // is never ranked second-best, exploration can't reach it, it
+        // earns zero throughput share, and the classifier keeps it weak
+        // forever (starvation lock).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let current_time = now_ms();
+
+        // Connection 0 is the current best but has a recent NAK
+        // (degrading). Connection 1 is weak but has no NAKs (recovered).
+        // Exploration's degraded-best + recovered-second path fires
+        // deterministically, independent of wall-clock.
+        connections[0].in_flight_packets = 0;
+        connections[0].congestion.nak_count = 1;
+        connections[0].congestion.last_nak_time_ms = current_time.saturating_sub(1000);
+        connections[1].in_flight_packets = 0;
+        connections[1].weak = true;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: true,
+        };
+        // last_idx = 0 (current best), well outside the switch cooldown.
+        let selected = select_connection_idx(&mut connections, Some(0), 0, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "weak link must remain rankable so exploration can probe it"
+        );
+    }
+
+    #[test]
     fn test_select_connection_idx_quality_scoring() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
