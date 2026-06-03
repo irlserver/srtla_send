@@ -125,6 +125,15 @@ const LOSS_DEGRADE_CLEAR: f64 = 0.25;
 /// the degraded flag latches.
 const LOSS_DEGRADE_SUSTAIN_MS: u64 = 4_000;
 
+/// Reject a single throughput sample that exceeds this factor times the
+/// current target estimate. A stall-release ACK flush (a carrier NAT
+/// rebind dumping thousands of queued ACKs in one window) or a
+/// saturation burst can momentarily read 3-5x the link's true rate;
+/// without this clamp it inflates the soft cap and causes bufferbloat a
+/// few seconds later. The estimate may still rise, just never more than
+/// this factor from one contaminated sample.
+const CC_OUTLIER_FACTOR: f64 = 4.0;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum CcState {
     /// Pre-RTT-sample bootstrap state. Target stays at the floor until
@@ -429,10 +438,19 @@ impl LinkCongestionState {
 
         self.state = next_state;
 
+        // Outlier rejection: clamp a single throughput sample to
+        // `CC_OUTLIER_FACTOR` times the running estimate (floored at the
+        // initial estimate so the first seed isn't pinned to the very
+        // low target_bps floor). This bounds how far one contaminated
+        // burst can move the soft cap, whether at the seed or via the
+        // climb's measured cap.
+        let baseline = self.target_bps.max(INITIAL_TARGET_BPS) as f64;
+        let sane_observed = (observed_bps as f64).min(CC_OUTLIER_FACTOR * baseline) as u64;
+
         // First non-bootstrap tick: seed the target from observed throughput
         // (or a conservative floor if no traffic yet).
         if self.target_bps == MIN_TARGET_BPS {
-            let seed = observed_bps.max(INITIAL_TARGET_BPS);
+            let seed = sane_observed.max(INITIAL_TARGET_BPS);
             self.target_bps = seed.clamp(MIN_TARGET_BPS, MAX_TARGET_BPS);
         }
 
@@ -453,9 +471,10 @@ impl LinkCongestionState {
                 let step = (prev * step_pm as f64) / 1000.0;
                 // Don't grow more than 2x measured traffic — prevents
                 // ramp on idle links. Same cap applies regardless of
-                // step size.
-                let measured_cap = (observed_bps as f64) * 2.0;
-                if observed_bps > 0 {
+                // step size. Uses the outlier-clamped sample so a burst
+                // can't open a huge headroom for the AI to climb into.
+                let measured_cap = (sane_observed as f64) * 2.0;
+                if sane_observed > 0 {
                     prev.max(MIN_TARGET_BPS as f64) + step.min(measured_cap - prev).max(0.0)
                 } else {
                     prev + step
@@ -822,6 +841,45 @@ mod tests {
             !cc.snapshot().loss_degraded,
             "recovered loss should clear the verdict (ewma={:.3})",
             cc.loss_ewma
+        );
+    }
+
+    #[test]
+    fn outlier_burst_at_seed_is_clamped() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        // First non-bootstrap tick sees a 50 Mbps stall-release burst.
+        // The seed must be bounded to a few times the initial estimate,
+        // not pinned to the burst.
+        cc.tick(50_000_000, 0);
+        assert!(
+            cc.target_bps <= 5 * INITIAL_TARGET_BPS,
+            "seed inflated to {} from a burst",
+            cc.target_bps
+        );
+        assert!(cc.target_bps >= INITIAL_TARGET_BPS);
+    }
+
+    #[test]
+    fn outlier_burst_does_not_run_the_target_away() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        // Establish a steady ~2 Mbps estimate.
+        for i in 0..8 {
+            cc.record_rtt(50.0, i * 100);
+            cc.tick(2_000_000, i * 100);
+        }
+        let before = cc.target_bps;
+        // A sustained 50 Mbps burst over a few ticks: each sample is
+        // clamped to 4x the running estimate, so the target can't leap to
+        // the burst rate in one tick.
+        cc.record_rtt(50.0, 900);
+        cc.tick(50_000_000, 900);
+        assert!(
+            cc.target_bps <= before.saturating_mul(4).max(INITIAL_TARGET_BPS),
+            "one burst tick inflated target to {} from {}",
+            cc.target_bps,
+            before
         );
     }
 
