@@ -73,6 +73,9 @@ pub enum WeakReason {
     Healthy,
     /// Link's RTT exceeds the chosen delay tier.
     HighRtt,
+    /// Link's RTT is still within tier but a standing queue is forming
+    /// (jitter-immune delay gradient). Early warning before HighRtt.
+    QueueBuilding,
     /// Link is connected but delivered no traffic in the window.
     NoTraffic,
     /// Link's throughput share is below the entering threshold (or, if
@@ -227,6 +230,11 @@ impl WeakLinkFilter {
 
             let (weak, reason) = if rtt_ms > selected_delay {
                 (true, WeakReason::HighRtt)
+            } else if conn.queue_building_suspected() {
+                // Early warning: RTT under tier but a standing queue is
+                // forming. Mark weak so selection eases off (A2 keeps it
+                // rankable, so this only de-prioritises, never removes).
+                (true, WeakReason::QueueBuilding)
             } else if bps == 0.0 {
                 (true, WeakReason::NoTraffic)
             } else if was_weak && share_permille < leave_threshold_permille {

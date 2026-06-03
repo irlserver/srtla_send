@@ -366,6 +366,7 @@ fn weak_reason_str(reason: WeakReason) -> &'static str {
     match reason {
         WeakReason::Healthy => "healthy",
         WeakReason::HighRtt => "high_rtt",
+        WeakReason::QueueBuilding => "queue_building",
         WeakReason::NoTraffic => "no_traffic",
         WeakReason::LowShare => "low_share",
         WeakReason::Bypassed => "bypassed",

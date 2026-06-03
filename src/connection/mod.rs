@@ -381,6 +381,15 @@ impl SrtlaConnection {
         self.rtt.rtt_jitter_ms
     }
 
+    /// Whether this link's RTT shows a standing queue forming (the
+    /// recent propagation floor lifted above the long-term floor),
+    /// distinct from jitter. Consumed by the weak-link classifier as an
+    /// early-warning signal so the scheduler eases off before the queue
+    /// turns into loss.
+    pub fn queue_building_suspected(&self) -> bool {
+        self.rtt.queue_building_suspected()
+    }
+
     pub fn needs_rtt_measurement(&self) -> bool {
         self.rtt
             .needs_measurement(self.connected, self.reconnection.connection_established_ms)
