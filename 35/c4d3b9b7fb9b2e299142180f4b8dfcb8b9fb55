@@ -1,0 +1,39 @@
+src/stats.rs
+  s_a65360fdd74690::t_d5ab4c8f66922e 123-128
+  s_a65360fdd74690::t_a1ca73e5bc5f2e 274-275,285-286,296-297
+  s_a65360fdd74690::t_a22e045e2b99d4 330-331
+src/connection/mod.rs
+  s_a65360fdd74690::t_3cbf146292fb0e 448-456,458-466,468-474,477-478
+  s_a65360fdd74690::t_28bd5785fa33ec 254
+  s_a65360fdd74690::t_e25c3e3362499d 199-204
+  s_a65360fdd74690::t_d5ae58caf5168b 56-61
+  s_a65360fdd74690::t_31b9a4bf5abb50 426-432,437-446
+src/sender/selection/link_cc.rs
+  s_a65360fdd74690::t_5fbf46c45edbe0 481-511
+  s_a65360fdd74690::t_91cfa07f36e77b 106-127
+  s_a65360fdd74690::t_b0c3974825fece 543-544,558-563
+  s_a65360fdd74690::t_f333963c530e59 795-844
+  s_a65360fdd74690::t_5391749634a914 232-242
+  s_a65360fdd74690::t_8d619ee21e5c50 262-265
+  s_a65360fdd74690::t_79cbdb78235e7c 397
+src/test_helpers.rs
+  s_a65360fdd74690::t_e372cc1d79e1a7 70
+src/sender/mod.rs
+  s_a65360fdd74690::t_6aee0166cec159 275-276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "35c4d3b9b7fb9b2e299142180f4b8dfcb8b9fb55",
+  "prompts": {},
+  "sessions": {
+    "s_a65360fdd74690": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "51471c6b-716a-42e7-bd45-44d3742471ad",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
