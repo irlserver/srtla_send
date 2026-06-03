@@ -1,0 +1,27 @@
+src/tests/sender_tests.rs
+  s_a65360fdd74690::t_9f94bfd79ea1d9 126-127,130,133
+  s_a65360fdd74690::t_cbbc237b3ad250 97-104
+src/stats.rs
+  s_a65360fdd74690::t_8626ffe49304eb 301
+src/sender/selection/enhanced.rs
+  s_a65360fdd74690::t_40ea6dd462cb65 19-26
+  s_a65360fdd74690::t_dec76a748983f1 53-55,57-65,67,71-80,89
+  s_a65360fdd74690::t_3f952729106648 149-150
+  s_a65360fdd74690::t_6a83b53548be9d 352,361-363,368-375,382
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "73a410e54ad1eda26f9f5412ac2d8e475718a116",
+  "prompts": {},
+  "sessions": {
+    "s_a65360fdd74690": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "51471c6b-716a-42e7-bd45-44d3742471ad",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}
