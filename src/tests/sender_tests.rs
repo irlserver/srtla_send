@@ -94,12 +94,14 @@ mod tests {
         let mut connections = rt.block_on(create_test_connections(3));
         let current_time = now_ms();
 
-        // Connection 1 has the best base score but is over its in-flight cap:
-        // cc_target_bps = 1 Mbps → pps ≈ 95 → cap ≈ 2 packets. With
-        // in_flight = 10 the cap is engaged. Connection 0 is unconstrained.
-        connections[0].in_flight_packets = 5;
-        connections[1].in_flight_packets = 10;
-        connections[1].cc_target_bps = 1_000_000;
+        // Connection 1 would have the best base score (lowest in_flight)
+        // but is over its BDP in-flight cap: cc_target_bps = 200 kbps at
+        // the test RTT (~200 ms) gives a cap of ~5 packets, and
+        // in_flight = 6 exceeds it. Connection 0 is unconstrained, so the
+        // capped link must be skipped even though its score is higher.
+        connections[0].in_flight_packets = 12;
+        connections[1].in_flight_packets = 6;
+        connections[1].cc_target_bps = 200_000;
         connections[2].in_flight_packets = 20;
 
         let config = ConfigSnapshot {
@@ -121,13 +123,14 @@ mod tests {
         let mut connections = rt.block_on(create_test_connections(3));
         let current_time = now_ms();
 
-        // Every link is over its in-flight cap. Fallback rule: pick best
+        // Every link is over its BDP in-flight cap (cc_target = 200 kbps
+        // at ~200 ms RTT → cap ~5 packets). Fallback rule: pick the best
         // base score rather than drop the packet.
         for c in connections.iter_mut() {
-            c.cc_target_bps = 1_000_000;
+            c.cc_target_bps = 200_000;
             c.in_flight_packets = 10;
         }
-        connections[1].in_flight_packets = 5; // best score among the capped
+        connections[1].in_flight_packets = 6; // best score among the capped, still > cap
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,

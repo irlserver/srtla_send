@@ -16,12 +16,14 @@ use super::exploration::should_explore_now;
 use super::link_cc::ASSUMED_SRT_PAYLOAD_BYTES;
 use crate::connection::SrtlaConnection;
 
-/// Divisor turning the link's predicted sustainable rate (bps → pps) into
-/// a per-link in-flight cap. `pps / 40` ≈ 25 ms worth of packets — the
-/// budget we're willing to let queue before steering elsewhere. Picked
-/// to align with the per-link CC's RTT-inflation reaction window so the
-/// cap engages before the controller has to back off.
-const IN_FLIGHT_CAP_DIVISOR: u64 = 40;
+/// Headroom multiplier on the bandwidth-delay product for the per-link
+/// in-flight cap. The cap is `BDP * 1.5`: a link should be allowed
+/// roughly one BDP of packets in flight to keep its pipe full, plus 50%
+/// slack for bursts before we steer elsewhere. A fixed packet budget
+/// (the old `pps / 40` ≈ 25 ms) starves a high-RTT link that needs a
+/// deeper pipe and over-fills a low-RTT one; scaling by the link's own
+/// `rtt_min` makes the cap correct across fibre, cellular, and satellite.
+const IN_FLIGHT_CAP_BDP_MULT: f64 = 1.5;
 
 /// Switching hysteresis: require new connection to be meaningfully better.
 /// At 10%, this prevents noise-driven flip-flopping between connections with
@@ -48,23 +50,34 @@ const CC_SOFT_CAP_FLOOR: f64 = 0.10;
 /// self-sustaining starvation lock that never re-tests the link.
 const GATED_LINK_PENALTY: f64 = 0.02;
 
-/// In-flight cap (packets) derived from the per-link CC target rate.
-/// Returns `None` when there's no signal (`cc_target_bps == 0`, i.e.
-/// the CC controller hasn't published a target yet) — selection treats
-/// the cap as inactive in that case.
+/// In-flight cap (packets) as a bandwidth-delay product: the link's
+/// predicted sustainable rate times its own minimum RTT, with
+/// `IN_FLIGHT_CAP_BDP_MULT` headroom.
 ///
-/// `cap = max(1, (cc_target_bps / packet_bits) / 40)`. Floored at 1 so
-/// even on very slow links a single packet can still be in flight; the
-/// cap is meant to bound queueing delay, not to gate the link entirely.
+/// Returns `None` when there's no rate signal (`cc_target_bps == 0`,
+/// i.e. the CC controller hasn't published a target yet) — selection
+/// treats the cap as inactive in that case. `rtt_min_ms` is the link's
+/// windowed minimum RTT; a non-positive value falls back to 1 ms so the
+/// cap stays well-defined before the baseline is established.
+///
+/// `cap = max(1, cc_target_bps * rtt_min_s / 8 * 1.5 / packet_bytes)`.
+/// Floored at 1 so even a very slow link can keep one packet in flight;
+/// the cap bounds queueing delay, it does not gate the link entirely.
 #[inline]
-pub fn in_flight_cap_packets(cc_target_bps: u64) -> Option<i32> {
+pub fn in_flight_cap_packets(cc_target_bps: u64, rtt_min_ms: f64) -> Option<i32> {
     if cc_target_bps == 0 {
         return None;
     }
-    let bits_per_packet = ASSUMED_SRT_PAYLOAD_BYTES.saturating_mul(8);
-    let pps = (cc_target_bps / bits_per_packet).max(1);
-    let cap = (pps / IN_FLIGHT_CAP_DIVISOR).max(1);
-    Some(cap.min(i32::MAX as u64) as i32)
+    let rtt_ms = if rtt_min_ms.is_finite() && rtt_min_ms > 0.0 {
+        rtt_min_ms
+    } else {
+        1.0
+    };
+    let bdp_bytes = (cc_target_bps as f64) * (rtt_ms / 1000.0) / 8.0 * IN_FLIGHT_CAP_BDP_MULT;
+    let cap = (bdp_bytes / ASSUMED_SRT_PAYLOAD_BYTES as f64)
+        .floor()
+        .max(1.0);
+    Some(cap.min(i32::MAX as f64) as i32)
 }
 
 /// Whether the link is currently exceeding its in-flight cap. Used by
@@ -73,7 +86,7 @@ pub fn in_flight_cap_packets(cc_target_bps: u64) -> Option<i32> {
 /// non-capped, non-weak, non-backing-off link is schedulable.
 #[inline(always)]
 pub fn in_flight_cap_exceeded(c: &SrtlaConnection) -> bool {
-    in_flight_cap_packets(c.cc_target_bps)
+    in_flight_cap_packets(c.cc_target_bps, c.get_rtt_min_ms())
         .map(|cap| c.in_flight_packets > cap)
         .unwrap_or(false)
 }
@@ -133,8 +146,8 @@ pub fn select_connection(
     // RTT busts the chosen delay tier, when they fall below the
     // entering throughput-share threshold, or (in shadow-mode-promoted
     // form) when their CC is backing off on observed loss. The
-    // in-flight cap gates a link whose queued packets already exceed
-    // ~25ms of its own predicted sustainable rate, so the scheduler
+    // in-flight cap gates a link whose in-flight packets already exceed
+    // its bandwidth-delay product (plus headroom), so the scheduler
     // doesn't pile more on while the link drains. If any un-gated link
     // is schedulable, the gated ones are excluded from ranking.
     // Otherwise we fall back to the full pool — better to send on a
@@ -336,7 +349,7 @@ mod tests {
     #[test]
     fn in_flight_cap_no_signal() {
         // cc_target_bps == 0 → cap inactive regardless of in_flight.
-        assert_eq!(in_flight_cap_packets(0), None);
+        assert_eq!(in_flight_cap_packets(0, 50.0), None);
         let mut c = one_conn();
         c.cc_target_bps = 0;
         c.in_flight_packets = 10_000;
@@ -345,23 +358,28 @@ mod tests {
 
     #[test]
     fn in_flight_cap_floors_at_one() {
-        // 100 kbps ≈ 9.5 packet/s; cap = 9/40 → 0, floored to 1.
-        let cap = in_flight_cap_packets(100_000).unwrap();
+        // 100 kbps over a 20 ms RTT: BDP = 1e5 * 0.02 / 8 = 250 bytes,
+        // x1.5 = 375 bytes < one packet, so the cap floors at 1.
+        let cap = in_flight_cap_packets(100_000, 20.0).unwrap();
         assert_eq!(cap, 1);
     }
 
     #[test]
-    fn in_flight_cap_scales_with_rate() {
-        // 10 Mbps: pps ≈ 10_000_000 / (1316*8) = 950; cap = 950/40 = 23.
-        let cap = in_flight_cap_packets(10_000_000).unwrap();
-        assert!((22..=24).contains(&cap), "got {cap}");
+    fn in_flight_cap_scales_with_bdp() {
+        // 10 Mbps over 50 ms: BDP = 1e7 * 0.05 / 8 = 62_500 bytes, x1.5
+        // = 93_750, / 1316 ≈ 71 packets.
+        let cap = in_flight_cap_packets(10_000_000, 50.0).unwrap();
+        assert!((68..=74).contains(&cap), "got {cap}");
+        // Same rate at 4x the RTT gives ~4x the cap (path-relative).
+        let cap_high_rtt = in_flight_cap_packets(10_000_000, 200.0).unwrap();
+        assert!(cap_high_rtt > cap * 3, "got {cap_high_rtt} vs {cap}");
     }
 
     #[test]
     fn in_flight_cap_engaged_when_exceeded() {
         let mut c = one_conn();
         c.cc_target_bps = 10_000_000;
-        let cap = in_flight_cap_packets(c.cc_target_bps).unwrap();
+        let cap = in_flight_cap_packets(c.cc_target_bps, c.get_rtt_min_ms()).unwrap();
         c.in_flight_packets = cap;
         assert!(
             !in_flight_cap_exceeded(&c),

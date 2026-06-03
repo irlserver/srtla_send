@@ -298,7 +298,7 @@ impl SharedStats {
                 ),
             };
 
-            let cap = in_flight_cap_packets(cc_target_bps);
+            let cap = in_flight_cap_packets(cc_target_bps, conn.get_rtt_min_ms());
             let in_flight_cap_pkts = cap.unwrap_or(0).max(0) as u32;
             let in_flight_cap_active = cap.map(|c| conn.in_flight_packets > c).unwrap_or(false);
 
