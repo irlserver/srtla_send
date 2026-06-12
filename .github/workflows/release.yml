@@ -1,0 +1,120 @@
+name: Release
+
+# Tag-triggered release: pushing a version tag (e.g. v3.0.0) cross-builds both
+# device architectures, packages the pipeline-compatible .debs, and attaches
+# them to the GitHub release for that tag. No crates.io publish, no scheduled
+# upstream sync — releases are cut deliberately by pushing a tag.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb:
+    name: Build .deb (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            cross: true
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            cross: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Pinned nightly from rust-toolchain.toml + the build target for this leg.
+      - name: Install Rust toolchain (from rust-toolchain.toml) + target
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install aarch64 cross toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross binutils-aarch64-linux-gnu pkg-config
+
+      - name: Build (${{ matrix.target }})
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
+        run: cargo build --release --target ${{ matrix.target }} --verbose
+
+      # ci/build-deb.sh emits srtla-send-rs_<ver>_<arch>.deb and asserts the
+      # control metadata (Package, Architecture, Conflicts), the /usr/bin/srtla_send
+      # path, and the fetch-debs.sh `*${ARCH}*.deb` glob match.
+      - name: Package .deb
+        run: |
+          ci/build-deb.sh "${{ matrix.arch }}" \
+            "target/${{ matrix.target }}/release/srtla_send" dist
+
+      - name: Generate checksum
+        run: |
+          cd dist
+          sha256sum srtla-send-rs_*_${{ matrix.arch }}.deb \
+            > "srtla-send-rs_${{ matrix.arch }}.deb.sha256"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: srtla-send-rs-${{ matrix.arch }}-deb
+          path: |
+            dist/srtla-send-rs_*_${{ matrix.arch }}.deb
+            dist/srtla-send-rs_${{ matrix.arch }}.deb.sha256
+          if-no-files-found: error
+
+  release:
+    name: Attach .debs to release
+    needs: build-deb
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Flatten artifact tree
+        run: |
+          mkdir -p release-assets
+          find ./artifacts -type f \( -name '*.deb' -o -name '*.deb.sha256' \) \
+            -exec cp -v {} release-assets/ \;
+          echo "Release assets:"
+          ls -1 release-assets
+
+      # Final gate: both architectures must be present and each filename must
+      # match the device fetch glob `*${ARCH}*.deb`, mirroring fetch-debs.sh.
+      - name: Verify both arch .debs match the fetch-debs.sh glob
+        run: |
+          rc=0
+          for ARCH in arm64 amd64; do
+            shopt -s nullglob
+            matches=( release-assets/*"${ARCH}"*.deb )
+            shopt -u nullglob
+            if [ ${#matches[@]} -eq 0 ]; then
+              echo "MISSING: no file matches '*${ARCH}*.deb'"; rc=1
+            else
+              echo "OK: ${matches[*]} matches '*${ARCH}*.deb'"
+            fi
+          done
+          exit "$rc"
+
+      - name: Create release and attach .debs
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/srtla-send-rs_*_arm64.deb
+            release-assets/srtla-send-rs_*_amd64.deb
+            release-assets/srtla-send-rs_*.deb.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          token: ${{ secrets.GITHUB_TOKEN }}

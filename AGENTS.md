@@ -12,10 +12,10 @@ RTT). On the device it is driven by CeraUI and feeds the bonded path into
 `irl-srt-server`. Canonical branch `main`; sibling checkout under the workspace root
 (see CRITICAL CONSTRAINTS below).
 
-> **Status:** bootstrap (Task 7). Fork created from upstream HEAD; nightly pinned;
-> baseline gate green on the pinned toolchain. No CERALIVE feature work yet — the
-> `--stats-file` telemetry sink (Task 10), packaging/parity wiring, and CeraUI
-> integration land in follow-up tasks.
+> **Status:** bootstrap (Task 7) + CI/packaging (Task 13). Fork created from upstream
+> HEAD; nightly pinned; baseline gate green on the pinned toolchain. CI now cross-builds
+> aarch64 + x86_64 and produces pipeline-compatible `.deb`s (see CI / PACKAGING). Still
+> pending: the `--stats-file` telemetry sink (Task 10) and CeraUI integration.
 
 **Relationship to `srtla/`:** this is the **sender** engine (Rust). The existing
 `srtla/` repo holds the C `srtla_send`/`srtla_rec` pair plus the bonding receiver and
@@ -103,6 +103,39 @@ cargo test --features test-internals # upstream's full-coverage suite
 The whole sender test corpus runs in-process over loopback UDP — **no root / netns /
 CAP_NET_ADMIN required** (0 tests are gated/ignored).
 
+## CI / PACKAGING
+
+Two workflows; both build on the **pinned nightly** (`setup-rust-toolchain` with no
+`toolchain` input reads `rust-toolchain.toml`):
+
+- **`ci.yml`** (push/PR) — the gate (`fmt`, `clippy -D warnings` lib+bin, `check`,
+  the full test fan-out, `cargo audit`) **plus** a `build-deb` matrix that
+  cross-compiles `aarch64-unknown-linux-gnu` (device) and `x86_64-unknown-linux-gnu`
+  and packages each `.deb` so a packaging break is caught before any tag. Upstream's
+  stable/beta/windows/macOS jobs are kept; under the pin they must call `cargo +<channel>`
+  (explicit `+` outranks `rust-toolchain.toml`) to actually exercise that channel.
+- **`release.yml`** (tag push `v*`) — rebuilds both arches, packages, runs the glob
+  gate, and attaches both `.deb`s + `.sha256`s to the GitHub release for the tag.
+  No crates.io publish; no scheduled upstream-sync.
+
+**`ci/build-deb.sh` is the single source of truth** for the `.deb` and is called by both
+workflows. It pins the contract the device image depends on:
+
+- **Package:** `srtla-send-rs`; **binary at** `/usr/bin/srtla_send`; **Architecture**
+  `arm64` (aarch64 build) / `amd64` (x86_64 build).
+- **Filename** `srtla-send-rs_<ver>_<arch>.deb` — matches `image-building-pipeline`
+  `fetch-debs.sh`'s `*${ARCH}*.deb` glob; the script re-runs that exact glob as a
+  self-test so a rename fails the build, not the image fetch.
+- **`Conflicts: srtla (<< <cutover>)`** (and matching `Replaces:`) — srtla still ships the
+  C `/usr/bin/srtla_send`, so the two packages file-conflict until srtla's cutover release
+  drops the C sender (ADR-003). The bound is `SRTLA_CUTOVER_VERSION` (default `2026.7.0`,
+  current srtla is `2026.6.1`); **set it to the real srtla cutover version when cut.**
+
+aarch64 cross-build env (mirrors the PINNED TOOLCHAIN note): linker
+`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc`, apt
+`gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu pkg-config`,
+`PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig`.
+
 ## CODEBASE (inherited from upstream)
 
 ```
@@ -119,7 +152,8 @@ src/
 crates/network-sim/  dev-only network simulation harness (workspace member)
 rust-toolchain.toml  pinned nightly (CERALIVE)
 rustfmt.toml         unstable nightly fmt config (edition 2024)
-.github/workflows/   upstream CI (ci.yml) + Debian packaging (build-debian.yml)
+ci/build-deb.sh      single-source .deb packager (control + filename + glob self-test)
+.github/workflows/   ci.yml (gate + cross-build/package) + release.yml (tag-triggered)
 ```
 
 Conventions (enforced by the gate): edition 2024, `anyhow::Result`, `tracing` macros,

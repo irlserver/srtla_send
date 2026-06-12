@@ -1,7 +1,7 @@
 # SRTLA Sender (Rust)
 
-[![CI](https://github.com/irlserver/srtla_send/actions/workflows/ci.yml/badge.svg)](https://github.com/irlserver/srtla_send/actions/workflows/ci.yml)
-[![Build Debian Packages](https://github.com/irlserver/srtla_send/actions/workflows/build-debian.yml/badge.svg)](https://github.com/irlserver/srtla_send/actions/workflows/build-debian.yml)
+[![CI](https://github.com/CERALIVE/srtla-send-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/CERALIVE/srtla-send-rs/actions/workflows/ci.yml)
+[![Release](https://github.com/CERALIVE/srtla-send-rs/actions/workflows/release.yml/badge.svg)](https://github.com/CERALIVE/srtla-send-rs/actions/workflows/release.yml)
 
 A Rust implementation of the SRTLA bonding sender. SRTLA is a SRT transport proxy with link aggregation for connection bonding that can transport [SRT](https://github.com/Haivision/srt/) traffic over multiple network links for capacity aggregation and redundancy. Traffic is balanced dynamically, depending on the network conditions. The intended application is bonding mobile modems for live streaming.
 
@@ -114,12 +114,22 @@ cargo fmt --all -- --check
 
 ### CI/CD
 
-The project uses GitHub Actions for continuous integration with automated testing on every push and pull request, including:
+GitHub Actions runs on the **pinned nightly** from `rust-toolchain.toml` on every push
+and pull request (`.github/workflows/ci.yml`):
 
-- Multi-platform testing (Linux, Windows, macOS)
-- Code formatting and linting checks
-- Security vulnerability scanning
-- Build verification across multiple Rust versions
+- The gate: `fmt`, `clippy -D warnings`, the full test fan-out, and `cargo audit`
+- Cross-builds for `aarch64-unknown-linux-gnu` (device) and `x86_64-unknown-linux-gnu`,
+  each packaged into a `.deb`
+- Cross-platform/cross-channel coverage (Linux/Windows/macOS, stable/beta)
+
+### Debian packaging
+
+`ci/build-deb.sh` is the single source of truth for the `.deb`. It installs the binary at
+`/usr/bin/srtla_send`, names the artifact `srtla-send-rs_<ver>_<arch>.deb` (Architecture
+`arm64`/`amd64`), and declares `Conflicts: srtla (<< <cutover>)` because the `srtla`
+package still ships the C `srtla_send`. Pushing a `v*` tag runs
+`.github/workflows/release.yml`, which rebuilds both architectures and attaches the
+`.deb`s to the GitHub release. See `AGENTS.md` → CI / PACKAGING for the full contract.
 
 ## Usage
 
