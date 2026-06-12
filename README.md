@@ -145,6 +145,8 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 - `--exploration`: Enable connection exploration (enhanced only)
 - `--rtt-delta-ms <N>`: RTT delta threshold in ms (default: 30, rtt-threshold only)
 - `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `/tmp/srtla.sock`)
+- `--stats-file <PATH>`: Write per-uplink telemetry JSON to `<PATH>` (opt-in; see [Telemetry](#telemetry))
+- `--stats-file-interval <MS>`: Telemetry write cadence in milliseconds (default: 1000)
 - `-v, --version`: Print version and exit
 
 ### Configuration check
@@ -264,6 +266,34 @@ kill -HUP <pid_of_srtla_send>
 ```
 
 On Windows this arm is disabled; restart the process after editing the IP list.
+
+## Telemetry (`--stats-file`, ADR-001)
+
+`srtla_send` can publish a per-uplink JSON snapshot to a file for consumers such as the
+CeraUI backend (`@ceralive/srtla` telemetry reader). It is **opt-in**: without
+`--stats-file` no file is ever created.
+
+```bash
+./target/release/srtla_send 6000 10.0.0.1 5000 /tmp/srtla_ips \
+  --stats-file /tmp/srtla-send-stats-6000.json --stats-file-interval 1000
+```
+
+The document is rewritten atomically (`<path>.tmp` → `fsync` → `rename(2)`) every
+`--stats-file-interval` ms (default 1000), so a concurrent reader never observes a torn
+write. It is a single newline-free object:
+
+```json
+{"schema_version":1,"last_updated_ms":1749556546000,"connections":[{"conn_id":"0","rtt_ms":42,"nak_count":3,"weight_percent":85,"window":8192,"in_flight":100,"bitrate_bps":2500000}]}
+```
+
+- `conn_id` — the uplink's index in `BIND_IPS_FILE` order, as a string.
+- `rtt_ms` — Kalman-smoothed RTT.
+- `weight_percent` — the link's normalized share of selection weight (0–100).
+- `bitrate_bps` — send rate in **bits per second** (wire bytes/s × 8).
+- `window` / `in_flight` — congestion-window and in-flight packet counts.
+
+With no active links the file still exists with `"connections": []` ("running but idle",
+distinct from "absent"). The live file is removed on clean shutdown (SIGTERM/SIGINT).
 
 ## How It Works
 

@@ -44,6 +44,7 @@ use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 use crate::config::DynamicConfig;
 use crate::registration::SrtlaRegistrationManager;
 use crate::stats::SharedStats;
+use crate::telemetry_file::TelemetryWriter;
 
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
 const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
@@ -55,6 +56,7 @@ pub async fn run_sender_with_config(
     ips_file: &str,
     config: DynamicConfig,
     shared_stats: SharedStats,
+    telemetry: Option<TelemetryWriter>,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}, mode={}",
@@ -127,6 +129,16 @@ pub async fn run_sender_with_config(
     );
     batch_flush_timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
+    // ADR-001 telemetry sink: opt-in via --stats-file. With no path, no writer is
+    // built and nothing is ever written. The writer unlinks its file on drop, so
+    // every graceful exit (signal, channel close, fatal error) cleans up.
+    let telemetry_period = telemetry
+        .as_ref()
+        .map_or_else(|| Duration::from_millis(1000), |w| w.period());
+    let mut telemetry_timer =
+        time::interval_at(Instant::now() + telemetry_period, telemetry_period);
+    telemetry_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
     let mut status_elapsed_ms: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
     // Zero-allocation ring buffer for sequence tracking
@@ -139,6 +151,12 @@ pub async fn run_sender_with_config(
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
     let mut sighup = signal(SignalKind::hangup())?;
+    // SIGTERM/SIGINT drive a graceful shutdown so the telemetry file is unlinked
+    // (via the writer's Drop) instead of being orphaned by an abrupt kill.
+    #[cfg(unix)]
+    let mut sigterm = signal(SignalKind::terminate())?;
+    #[cfg(unix)]
+    let mut sigint = signal(SignalKind::interrupt())?;
 
     // Main loop - run housekeeping frequently like C version
     // Run housekeeping once before entering the main event loop so we start in a clean state.
@@ -156,6 +174,13 @@ pub async fn run_sender_with_config(
         {
             warn!("initial housekeeping failed: {err}");
         }
+    }
+
+    // Emit an initial snapshot immediately so a consumer sees a fresh file well
+    // before the first cadence tick, rather than waiting a full interval.
+    if let Some(writer) = telemetry.as_ref() {
+        shared_stats.update(&connections, &config.snapshot());
+        writer.publish(&shared_stats.get());
     }
 
     // Use a macro to avoid duplicating the event loop for Unix/non-Unix
@@ -269,6 +294,11 @@ pub async fn run_sender_with_config(
                         )
                         .await;
                     }
+                    _ = telemetry_timer.tick() => {
+                        if let Some(writer) = telemetry.as_ref() {
+                            writer.publish(&shared_stats.get());
+                        }
+                    }
                     $($sighup_branch)*
                     _ = batch_flush_timer.tick() => {
                         flush_all_batches(&mut connections).await;
@@ -302,6 +332,14 @@ pub async fn run_sender_with_config(
                 &config_snap,
             )
             .await;
+        }
+        _ = sigterm.recv() => {
+            info!("received SIGTERM - shutting down");
+            return Ok(());
+        }
+        _ = sigint.recv() => {
+            info!("received SIGINT - shutting down");
+            return Ok(());
         }
     }
 

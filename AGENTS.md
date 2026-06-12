@@ -12,10 +12,10 @@ RTT). On the device it is driven by CeraUI and feeds the bonded path into
 `irl-srt-server`. Canonical branch `main`; sibling checkout under the workspace root
 (see CRITICAL CONSTRAINTS below).
 
-> **Status:** bootstrap (Task 7). Fork created from upstream HEAD; nightly pinned;
-> baseline gate green on the pinned toolchain. No CERALIVE feature work yet — the
-> `--stats-file` telemetry sink (Task 10), packaging/parity wiring, and CeraUI
-> integration land in follow-up tasks.
+> **Status:** bootstrap (Task 7) + telemetry sink (Task 10). Fork created from
+> upstream HEAD; nightly pinned; baseline gate green on the pinned toolchain. The
+> opt-in `--stats-file` ADR-001 telemetry sink is implemented (`src/telemetry_file.rs`);
+> packaging/parity wiring and CeraUI integration land in follow-up tasks.
 
 **Relationship to `srtla/`:** this is the **sender** engine (Rust). The existing
 `srtla/` repo holds the C `srtla_send`/`srtla_rec` pair plus the bonding receiver and
@@ -80,18 +80,21 @@ CeraUI and the device integration depend on these staying stable:
   IP list and resolve the receiver, print them, then exit `0` without binding any socket;
   an unusable IP list — missing/unreadable, empty, or zero valid IPs — exits non-zero with
   a specific error), `--stats-file <path>` and `--stats-file-interval <ms>` (default
-  `1000`). The `--stats-file` flag is **accepted and stored** but its telemetry **sink is
-  not yet wired** — until the sink lands no file is written, so do not assume the file
-  exists.
+  `1000`). The `--stats-file` telemetry sink is **implemented** (`src/telemetry_file.rs`)
+  and opt-in — absent means no file is ever written.
 - **Upstream scheduler/control-socket flags** (`--mode`, `--no-quality`, `--exploration`,
   `--rtt-delta-ms`, `--control-socket`, `-v/--version`) stay present and functional but
   are **not** surfaced in CeraUI.
-- **Telemetry contract (forthcoming `--stats-file`, ADR-001):** newline-free JSON
-  document, atomically written, shape
-  `{"schema_version":1,"last_updated_ms":<ms>,"connections":[{"conn_id","rtt_ms","weight_percent","bitrate_bps","nak_count"}]}`,
-  where `bitrate_bps` is wire-bytes/s × 8 (the ×8 bits-per-second conversion is
-  mandatory) and `conn_id` is assigned by ips-file order (stable until SIGHUP reload).
-  When implementing the sink, honor this verbatim — CeraUI parses it.
+- **Telemetry contract (`--stats-file <path>`, ADR-001):** opt-in (absent ⇒ no file is
+  ever written). Newline-free JSON document, atomically published (temp sibling →
+  `fsync` → `rename(2)`), shape
+  `{"schema_version":1,"last_updated_ms":<ms>,"connections":[{"conn_id","rtt_ms","nak_count","weight_percent","window","in_flight","bitrate_bps"}]}`.
+  `bitrate_bps` is wire-bytes/s × 8 (the ×8 bits-per-second conversion is mandatory);
+  `conn_id` is the string IP-list index (stable until a SIGHUP reorder); `window` and
+  `in_flight` are **required** by the frozen `@ceralive/srtla` Zod reader. The cadence is
+  `--stats-file-interval` ms (default 1000). The live file is unlinked on clean shutdown
+  (SIGTERM/SIGINT). `schema_version` is additive over the C producer — the Zod reader
+  strips it. Implemented in `src/telemetry_file.rs`; CeraUI parses this verbatim.
 - **IP-list reload:** `SIGHUP` (Unix) reloads `BIND_IPS_FILE` without restart.
 
 ## BUILD / GATE

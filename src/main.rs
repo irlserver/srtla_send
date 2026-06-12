@@ -20,6 +20,7 @@ mod protocol;
 mod registration;
 mod sender;
 mod stats;
+mod telemetry_file;
 mod utils;
 
 // Test helpers for binary tests
@@ -69,11 +70,12 @@ struct Cli {
     #[arg(long = "dry-run")]
     dry_run: bool,
 
-    /// Write per-uplink telemetry JSON to this path
+    /// Write per-uplink telemetry JSON to this path (ADR-001 stats file).
+    /// Opt-in: absent means no telemetry file is ever created.
     #[arg(long = "stats-file")]
     stats_file: Option<String>,
 
-    /// Telemetry write cadence in milliseconds for `--stats-file`
+    /// Telemetry write cadence in milliseconds for `--stats-file` (default 1000).
     #[arg(long = "stats-file-interval", default_value_t = DEFAULT_STATS_FILE_INTERVAL_MS)]
     stats_file_interval: u64,
 
@@ -241,6 +243,10 @@ async fn main() -> Result<()> {
     // Start config listener (stdin or Unix socket)
     config::spawn_config_listener(config.clone(), args.control_socket, shared_stats.clone());
 
+    let telemetry = args.stats_file.as_deref().map(|path| {
+        telemetry_file::TelemetryWriter::new(path.to_string(), args.stats_file_interval)
+    });
+
     sender::run_sender_with_config(
         local_srt_port,
         receiver_host,
@@ -248,6 +254,7 @@ async fn main() -> Result<()> {
         ips_file,
         config,
         shared_stats,
+        telemetry,
     )
     .await
     .context("srtla_send failed")
