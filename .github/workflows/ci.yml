@@ -7,33 +7,27 @@ on:
     branches: [main, master]
 
 jobs:
+  # Primary gate — runs on the PINNED nightly from rust-toolchain.toml. The
+  # `toolchain` input is intentionally omitted so setup-rust-toolchain reads the
+  # toolchain file (nightly-2026-06-12 + rustfmt/clippy/rust-src + the aarch64
+  # target). Upstream floated `nightly`; the fork pins a date for a reproducible
+  # device build, so CI must honour the pin. Keep every upstream step (fmt,
+  # clippy -D warnings, check, the full test fan-out, and the cargo audit).
   test:
-    name: Test
+    name: Test (pinned nightly)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (from rust-toolchain.toml)
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: nightly
-          components: rustfmt, clippy
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # lib + bin only (NOT --all-targets): upstream test code carries pedantic
+      # clippy debt; the gate matches upstream ci.yml exactly.
       - name: Run clippy
         run: cargo clippy -- -D warnings
 
@@ -61,6 +55,67 @@ jobs:
       - name: Run security audit
         run: cargo audit
 
+  # Cross-build both device-relevant targets and package the pipeline-compatible
+  # .deb on every push/PR, so a packaging break (name, binary path, Conflicts,
+  # filename glob) is caught before a tag is ever cut. The aarch64 leg is the
+  # device target; the x86_64 leg is the dev/CI target. ci/build-deb.sh is the
+  # single source of truth for the control metadata and runs the fetch-debs.sh
+  # glob self-test.
+  build-deb:
+    name: Build .deb (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            cross: true
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            cross: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Pinned nightly from rust-toolchain.toml + the extra build target. The
+      # toolchain file already lists aarch64; `target` re-adds it harmlessly and
+      # adds x86_64 for the amd64 leg.
+      - name: Install Rust toolchain (from rust-toolchain.toml) + target
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install aarch64 cross toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross binutils-aarch64-linux-gnu pkg-config
+
+      - name: Build (${{ matrix.target }})
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
+        run: cargo build --release --target ${{ matrix.target }} --verbose
+
+      - name: Package .deb (asserts name, binary path, Conflicts, fetch glob)
+        run: |
+          ci/build-deb.sh "${{ matrix.arch }}" \
+            "target/${{ matrix.target }}/release/srtla_send" dist
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: srtla-send-rs-${{ matrix.arch }}-deb
+          path: dist/srtla-send-rs_*_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  # Upstream cross-channel/cross-OS coverage — kept intact. rust-toolchain.toml
+  # would otherwise force the pinned nightly onto these runners, so each job
+  # invokes cargo with an explicit `+<channel>` (highest precedence, above the
+  # toolchain file) to genuinely exercise stable/beta as upstream intended.
   test-stable:
     name: Test (Rust stable)
     runs-on: ubuntu-latest
@@ -74,7 +129,7 @@ jobs:
           toolchain: stable
 
       - name: Run tests
-        run: cargo test --features test-internals
+        run: cargo +stable test --features test-internals
 
   test-beta:
     name: Test (Rust beta)
@@ -89,7 +144,7 @@ jobs:
           toolchain: beta
 
       - name: Run tests
-        run: cargo test
+        run: cargo +beta test
 
   test-windows:
     name: Test (Windows)
@@ -100,9 +155,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
 
       - name: Run tests
-        run: cargo test --features test-internals --verbose
+        run: cargo +stable test --features test-internals --verbose
 
   test-macos:
     name: Test (macOS)
@@ -113,6 +170,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo +stable test --verbose
