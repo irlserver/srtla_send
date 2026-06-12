@@ -73,10 +73,19 @@ CeraUI and the device integration depend on these staying stable:
 
 - **Binary name:** exactly `srtla_send`.
 - **CLI positional order:**
-  `srtla_send <SRT_LISTEN_PORT> <SRTLA_HOST> <SRTLA_PORT> <BIND_IPS_FILE> [OPTIONS]`
-  (`--mode`, `--no-quality`, `--exploration`, `--rtt-delta-ms`, `--control-socket`,
-  `-v/--version`). A `--stats-file <path>` telemetry sink is **not yet present** — it is
-  added in a later task; until then do not assume it exists.
+  `srtla_send <SRT_LISTEN_PORT> <SRTLA_HOST> <SRTLA_PORT> <BIND_IPS_FILE> [OPTIONS]` —
+  the four positionals are load-bearing and resolved in exactly the order CeraUI's
+  `buildSrtlaSendArgs` emits them.
+- **CeraLive control-plane flags:** `--verbose` (debug logging), `--dry-run` (parse the
+  IP list and resolve the receiver, print them, then exit `0` without binding any socket;
+  an unusable IP list — missing/unreadable, empty, or zero valid IPs — exits non-zero with
+  a specific error), `--stats-file <path>` and `--stats-file-interval <ms>` (default
+  `1000`). The `--stats-file` flag is **accepted and stored** but its telemetry **sink is
+  not yet wired** — until the sink lands no file is written, so do not assume the file
+  exists.
+- **Upstream scheduler/control-socket flags** (`--mode`, `--no-quality`, `--exploration`,
+  `--rtt-delta-ms`, `--control-socket`, `-v/--version`) stay present and functional but
+  are **not** surfaced in CeraUI.
 - **Telemetry contract (forthcoming `--stats-file`, ADR-001):** newline-free JSON
   document, atomically written, shape
   `{"schema_version":1,"last_updated_ms":<ms>,"connections":[{"conn_id","rtt_ms","weight_percent","bitrate_bps","nak_count"}]}`,

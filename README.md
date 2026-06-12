@@ -136,12 +136,26 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 
 ### Options
 
+- `--verbose`: Enable verbose (debug-level) logging
+- `--dry-run`: Validate the IP list and resolve the receiver, print them, then exit without binding any socket (non-zero exit if the IP list is unusable)
+- `--stats-file <PATH>`: Write per-uplink telemetry JSON to this path (flag accepted; the telemetry sink is not yet wired)
+- `--stats-file-interval <MS>`: Telemetry write cadence in milliseconds (default: 1000)
 - `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default), `rtt-threshold`
 - `--no-quality`: Disable quality scoring (enhanced/rtt-threshold only)
 - `--exploration`: Enable connection exploration (enhanced only)
 - `--rtt-delta-ms <N>`: RTT delta threshold in ms (default: 30, rtt-threshold only)
 - `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `/tmp/srtla.sock`)
 - `-v, --version`: Print version and exit
+
+### Configuration check
+
+Validate the receiver address and IP list without starting the stream or binding any socket:
+
+```bash
+./target/release/srtla_send 6000 rec.example.com 5000 ./uplinks.txt --dry-run
+```
+
+This prints the resolved receiver address(es) and source uplink IPs and exits `0`. If the IP list is missing, empty, or has no valid IPs, it prints a specific error and exits non-zero.
 
 ## Example Usage
 
