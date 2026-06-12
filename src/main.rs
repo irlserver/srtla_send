@@ -16,6 +16,7 @@ mod protocol;
 mod registration;
 mod sender;
 mod stats;
+mod telemetry_file;
 mod utils;
 
 // Test helpers for binary tests
@@ -23,6 +24,9 @@ mod utils;
 mod test_helpers;
 
 use mode::SchedulingMode;
+
+/// Default telemetry write cadence in milliseconds (`--stats-file-interval`).
+const DEFAULT_STATS_FILE_INTERVAL_MS: u64 = 1000;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -52,6 +56,15 @@ struct Cli {
     /// uplinks
     #[arg(required_unless_present = "print_version")]
     ips_file: Option<String>,
+
+    /// Write per-uplink telemetry JSON to this path (ADR-001 stats file).
+    /// Opt-in: absent means no telemetry file is ever created.
+    #[arg(long = "stats-file")]
+    stats_file: Option<String>,
+
+    /// Telemetry write cadence in milliseconds for `--stats-file` (default 1000).
+    #[arg(long = "stats-file-interval", default_value_t = DEFAULT_STATS_FILE_INTERVAL_MS)]
+    stats_file_interval: u64,
 
     /// Unix domain socket path for remote toggle control (e.g.,
     /// /tmp/srtla.sock)
@@ -115,6 +128,10 @@ async fn main() -> Result<()> {
     // Start config listener (stdin or Unix socket)
     config::spawn_config_listener(config.clone(), args.control_socket, shared_stats.clone());
 
+    let telemetry = args
+        .stats_file
+        .map(|path| telemetry_file::TelemetryWriter::new(path, args.stats_file_interval));
+
     sender::run_sender_with_config(
         local_srt_port,
         receiver_host,
@@ -122,6 +139,7 @@ async fn main() -> Result<()> {
         ips_file,
         config,
         shared_stats,
+        telemetry,
     )
     .await
     .context("srtla_send failed")
