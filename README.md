@@ -265,6 +265,18 @@ Send SIGHUP to trigger an IP list reload without restarting:
 kill -HUP <pid_of_srtla_send>
 ```
 
+Surviving uplinks keep streaming across the reload (no re-handshake, no
+disconnect); newly listed IPs join and dropped IPs are torn down. The connection
+pool is rebuilt in ips-file order, so each uplink's telemetry `conn_id` follows
+the file.
+
+A reload that would resolve to **zero valid source IPs** — a missing/unreadable,
+empty, or all-garbage file — is **refused**: the sender logs a specific reason
+(`ips file not found/unreadable`, `ips file is empty`, `invalid IP on line N`,
+or `no valid source IPs … keeping existing connections`) and keeps streaming on
+the existing links rather than tearing the stream down. A file that mixes valid
+and invalid lines still applies, skipping the bad lines with a warning.
+
 On Windows this arm is disabled; restart the process after editing the IP list.
 
 ## Telemetry (`--stats-file`, ADR-001)
@@ -294,6 +306,19 @@ write. It is a single newline-free object:
 
 With no active links the file still exists with `"connections": []` ("running but idle",
 distinct from "absent"). The live file is removed on clean shutdown (SIGTERM/SIGINT).
+
+## Startup Without an IP List (Unix)
+
+A missing, empty, or all-invalid `BIND_IPS_FILE` at startup is not fatal. The
+sender binds its local SRT listener, starts with an empty uplink pool, and waits
+for a `SIGHUP` reload — convenient when a supervisor (e.g. CeraUI) writes the IP
+file and signals the process only once network interfaces appear.
+
+## Clean Shutdown (Unix)
+
+`SIGTERM` and `SIGINT` trigger a graceful shutdown: the process exits `0`
+promptly, and the `--stats-file` telemetry file (with its `.tmp` sibling) is
+removed so no stale snapshot outlives the process.
 
 ## How It Works
 

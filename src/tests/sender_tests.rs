@@ -8,6 +8,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use crate::config::{ConfigSnapshot, DynamicConfig};
+    use crate::connection::SrtlaConnection;
     use crate::mode::SchedulingMode;
     use crate::sender::*;
     use crate::test_helpers::create_test_connections;
@@ -395,6 +396,135 @@ mod tests {
         // (they were cleaned up by remove_connection)
         assert!(seq_tracker.get(100, now).is_none());
         assert!(seq_tracker.get(200, now).is_none());
+    }
+
+    /// Relabel test connections as real `host:port via ip` uplinks so they match
+    /// the labels `apply_connection_changes` derives, exercising the survivor path.
+    fn relabel_as_uplinks(
+        connections: &mut [SrtlaConnection],
+        host: &str,
+        port: u16,
+        ips: &[IpAddr],
+    ) {
+        for (conn, ip) in connections.iter_mut().zip(ips.iter()) {
+            conn.local_ip = *ip;
+            conn.label = format!("{host}:{port} via {ip}");
+        }
+    }
+
+    #[test]
+    fn test_reload_reorders_conn_ids_to_file_order_keeping_survivors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let host = "127.0.0.1";
+        let port = 9000u16;
+        let ip_a = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
+        relabel_as_uplinks(&mut connections, host, port, &[ip_a, ip_b]);
+        let cid_a = connections[0].conn_id;
+        let cid_b = connections[1].conn_id;
+
+        let mut last_selected_idx = Some(0);
+        let mut seq_tracker = SequenceTracker::new();
+
+        // Reload reverses the file order: [B, A]. Both survive (no new binds).
+        rt.block_on(apply_connection_changes(
+            &mut connections,
+            &[ip_b, ip_a],
+            host,
+            port,
+            &mut last_selected_idx,
+            &mut seq_tracker,
+        ));
+
+        assert_eq!(
+            connections.len(),
+            2,
+            "both uplinks must survive the reorder"
+        );
+        assert_eq!(
+            connections[0].conn_id, cid_b,
+            "telemetry conn_id 0 must follow the new file order (B first)"
+        );
+        assert_eq!(connections[1].conn_id, cid_a, "conn_id 1 must be A");
+        assert_eq!(
+            last_selected_idx, None,
+            "a reorder must invalidate the cached selection index"
+        );
+    }
+
+    #[test]
+    fn test_reload_removes_one_keeps_survivor_and_cleans_seq_tracker() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let host = "127.0.0.1";
+        let port = 9000u16;
+        let ip_a = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
+        relabel_as_uplinks(&mut connections, host, port, &[ip_a, ip_b]);
+        let cid_a = connections[0].conn_id;
+        let cid_b = connections[1].conn_id;
+
+        let mut last_selected_idx = Some(1);
+        let mut seq_tracker = SequenceTracker::new();
+        let now = now_ms();
+        seq_tracker.insert(100, cid_b, now);
+
+        // Reload drops B, keeps A.
+        rt.block_on(apply_connection_changes(
+            &mut connections,
+            &[ip_a],
+            host,
+            port,
+            &mut last_selected_idx,
+            &mut seq_tracker,
+        ));
+
+        assert_eq!(connections.len(), 1, "only the surviving uplink remains");
+        assert_eq!(
+            connections[0].conn_id, cid_a,
+            "survivor A keeps its identity (not torn down and rebuilt)"
+        );
+        assert!(
+            seq_tracker.get(100, now).is_none(),
+            "the removed uplink's sequence entry must be cleared"
+        );
+        assert_eq!(last_selected_idx, None);
+    }
+
+    #[test]
+    fn test_reload_identical_list_keeps_selection_no_disconnect() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let host = "127.0.0.1";
+        let port = 9000u16;
+        let ip_a = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
+        relabel_as_uplinks(&mut connections, host, port, &[ip_a, ip_b]);
+        let cid_a = connections[0].conn_id;
+        let cid_b = connections[1].conn_id;
+
+        let mut last_selected_idx = Some(1);
+        let mut seq_tracker = SequenceTracker::new();
+
+        // A SIGHUP whose file is unchanged must not disturb any link.
+        rt.block_on(apply_connection_changes(
+            &mut connections,
+            &[ip_a, ip_b],
+            host,
+            port,
+            &mut last_selected_idx,
+            &mut seq_tracker,
+        ));
+
+        assert_eq!(connections.len(), 2);
+        assert_eq!(connections[0].conn_id, cid_a);
+        assert_eq!(connections[1].conn_id, cid_b);
+        assert_eq!(
+            last_selected_idx,
+            Some(1),
+            "an unchanged reload must keep the selection index (zero disconnects)"
+        );
     }
 
     #[test]

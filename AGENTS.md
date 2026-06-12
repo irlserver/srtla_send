@@ -95,7 +95,23 @@ CeraUI and the device integration depend on these staying stable:
   `--stats-file-interval` ms (default 1000). The live file is unlinked on clean shutdown
   (SIGTERM/SIGINT). `schema_version` is additive over the C producer — the Zod reader
   strips it. Implemented in `src/telemetry_file.rs`; CeraUI parses this verbatim.
-- **IP-list reload:** `SIGHUP` (Unix) reloads `BIND_IPS_FILE` without restart.
+- **IP-list reload (`SIGHUP`, Unix):** reloads `BIND_IPS_FILE` without restart.
+  Surviving uplinks keep their socket + registration (no re-handshake, zero
+  disconnect); the pool is rebuilt in **ips-file order** so `conn_id` tracks the
+  file (reorder reorders `conn_id`, matching the telemetry contract above). A
+  reload that resolves to **zero valid source IPs** — missing/unreadable, empty,
+  or all-garbage — is **refused** (the stream keeps running on the existing
+  links) with a specific log: `ips file not found/unreadable`, `ips file is
+  empty`, `invalid IP on line N` (mixed valid+invalid still applies), or `no
+  valid source IPs … keeping existing connections`. Mirrors the C reload guard
+  (`srtla/src/sender_logic.h`).
+- **Empty start:** a missing / empty / all-invalid `BIND_IPS_FILE` at startup is
+  **not** fatal — the sender binds the local listener, starts with an empty
+  uplink pool, and waits for a `SIGHUP` (CeraUI writes the file and signals once
+  interfaces appear). It must not crash-loop the device.
+- **Clean shutdown (`SIGTERM`/`SIGINT`, Unix):** exit `0` well within CeraUI's
+  10s SIGKILL window; the `--stats-file` telemetry file (and its `.tmp` sibling)
+  is unlinked so no stale snapshot outlives the process.
 
 ## BUILD / GATE
 

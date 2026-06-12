@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
         telemetry_file::TelemetryWriter::new(path.to_string(), args.stats_file_interval)
     });
 
-    sender::run_sender_with_config(
+    let outcome = sender::run_sender_with_config(
         local_srt_port,
         receiver_host,
         receiver_port,
@@ -256,8 +256,17 @@ async fn main() -> Result<()> {
         shared_stats,
         telemetry,
     )
-    .await
-    .context("srtla_send failed")
+    .await;
+
+    // On shutdown (clean signal exit or fatal error) remove the telemetry stats
+    // file so a stale snapshot never outlives the process: CeraUI respawns
+    // srtla_send on every network change and would read a leftover file as live.
+    if let Some(stats_file) = args.stats_file.as_deref() {
+        let _ = std::fs::remove_file(stats_file);
+        let _ = std::fs::remove_file(format!("{stats_file}.tmp"));
+    }
+
+    outcome.context("srtla_send failed")
 }
 
 #[cfg(test)]

@@ -113,7 +113,11 @@ pub async fn handle_housekeeping(
     // This matches the C implementation's connection_housekeeping logic
     let active_connections = connections.iter().filter(|c| !c.is_timed_out()).count();
 
-    if active_connections == 0 {
+    if connections.is_empty() {
+        // Empty pool (empty-start, awaiting a SIGHUP reload) is an idle wait, not
+        // an all-links-failed recovery condition; don't arm the failure timeout.
+        *all_failed_at = None;
+    } else if active_connections == 0 {
         if all_failed_at.is_none() {
             *all_failed_at = Some(Instant::now());
         }
