@@ -1,0 +1,15 @@
+# Pinned toolchain for the CERALIVE fork.
+#
+# Upstream (irlserver/srtla_send) CI uses a *floating* `nightly` channel
+# (.github/workflows/ci.yml, build-debian.yml). The device image needs a
+# reproducible build, so the fork pins an exact nightly date instead. The
+# crate genuinely requires nightly: rustfmt.toml enables unstable formatting
+# features (edition 2024, group_imports, format_strings, ...).
+#
+# Bump policy: only as part of a deliberate, COMPAT-GATED upstream-merge or
+# toolchain-bump PR — never silently. Re-run the full gate after any bump.
+[toolchain]
+channel = "nightly-2026-06-12"
+components = ["rustfmt", "clippy", "rust-src"]
+targets = ["aarch64-unknown-linux-gnu"]
+profile = "minimal"

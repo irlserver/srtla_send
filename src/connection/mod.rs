@@ -281,7 +281,6 @@ impl SrtlaConnection {
         self.rtt.kalman_rtt.velocity()
     }
 
-
     pub fn get_rtt_min_ms(&self) -> f64 {
         self.rtt.rtt_min_ms
     }

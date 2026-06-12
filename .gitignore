@@ -23,3 +23,6 @@ target/
 bond-bunny-main/
 moblin/
 /.claude
+
+# Local orchestration scratch dir (workspace-local, never committed)
+.omo/

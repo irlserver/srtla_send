@@ -49,11 +49,11 @@ pub fn select_from(conns: &[SrtlaConnection], pkt_size: usize) -> Option<usize> 
     let mut best_arrival = f64::MAX;
 
     for (i, conn) in conns.iter().enumerate() {
-        if let Some(arrival) = predicted_arrival(conn, pkt_size) {
-            if arrival < best_arrival {
-                best_arrival = arrival;
-                best_idx = Some(i);
-            }
+        if let Some(arrival) = predicted_arrival(conn, pkt_size)
+            && arrival < best_arrival
+        {
+            best_arrival = arrival;
+            best_idx = Some(i);
         }
     }
 
@@ -72,13 +72,12 @@ pub fn select_from_indices(
     let mut best_arrival = f64::MAX;
 
     for &i in indices {
-        if i < conns.len() {
-            if let Some(arrival) = predicted_arrival(&conns[i], pkt_size) {
-                if arrival < best_arrival {
-                    best_arrival = arrival;
-                    best_idx = Some(i);
-                }
-            }
+        if i < conns.len()
+            && let Some(arrival) = predicted_arrival(&conns[i], pkt_size)
+            && arrival < best_arrival
+        {
+            best_arrival = arrival;
+            best_idx = Some(i);
         }
     }
 
@@ -114,7 +113,11 @@ mod tests {
         conns[2].rtt.rtt_min_ms = 100.0;
 
         let result = select_from(&conns, SRT_PKT_SIZE);
-        assert_eq!(result, Some(1), "Should pick conn with lowest predicted arrival");
+        assert_eq!(
+            result,
+            Some(1),
+            "Should pick conn with lowest predicted arrival"
+        );
     }
 
     #[test]
