@@ -1,6 +1,7 @@
 mod connections;
 mod housekeeping;
 mod packet_handler;
+mod reload;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod selection;
 #[cfg(not(any(test, feature = "test-internals")))]
@@ -15,7 +16,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 // Re-export connection management functions for tests
 #[allow(unused_imports)]
 pub use connections::{
@@ -64,7 +65,20 @@ pub async fn run_sender_with_config(
         ips_file,
         config.mode()
     );
-    let ips = read_ip_list(ips_file).await?;
+    // A missing / empty / all-invalid ips file at startup is not fatal: bind no
+    // uplinks, start with an empty pool, and wait for a SIGHUP reload. CeraUI
+    // writes the IP file and signals srtla_send once interfaces appear, so
+    // crashing here would crash-loop the device before the first modem is up.
+    let ips = match read_ip_list(ips_file).await {
+        Ok(ips) => ips,
+        Err(e) => {
+            warn!(
+                "ips file unreadable at startup ({e}); starting with no uplinks, waiting for \
+                 SIGHUP"
+            );
+            SmallVec::new()
+        }
+    };
     debug!(
         "uplink IPs loaded: {}",
         ips.iter()
@@ -73,13 +87,13 @@ pub async fn run_sender_with_config(
             .join(", ")
     );
     if ips.is_empty() {
-        return Err(anyhow!("no IPs in list: {}", ips_file));
+        warn!(
+            "no source IPs at startup; starting with an empty uplink pool (send SIGHUP after \
+             writing {ips_file})"
+        );
     }
 
     let mut connections = create_connections_from_ips(&ips, receiver_host, receiver_port).await;
-    if connections.is_empty() {
-        return Err(anyhow!("no uplinks available"));
-    }
 
     let local_listener = UdpSocket::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, local_srt_port)))
         .await
@@ -88,7 +102,12 @@ pub async fn run_sender_with_config(
 
     let mut reg = SrtlaRegistrationManager::new();
 
-    reg.start_probing(&mut connections).await;
+    // Probing bootstraps the connection group; with an empty pool there is
+    // nothing to probe, so it is (re)started after the first reload populates
+    // the pool (see the SIGHUP-apply block below).
+    if !connections.is_empty() {
+        reg.start_probing(&mut connections).await;
+    }
 
     let (packet_tx, mut packet_rx) = create_uplink_channel();
     let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
@@ -139,6 +158,12 @@ pub async fn run_sender_with_config(
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
     let mut sighup = signal(SignalKind::hangup())?;
+    // SIGTERM/SIGINT drive a graceful return so the process exits 0 well inside
+    // CeraUI's 10s SIGKILL window and any telemetry stats file is unlinked.
+    #[cfg(unix)]
+    let mut sigterm = signal(SignalKind::terminate())?;
+    #[cfg(unix)]
+    let mut sigint = signal(SignalKind::interrupt())?;
 
     // Main loop - run housekeeping frequently like C version
     // Run housekeeping once before entering the main event loop so we start in a clean state.
@@ -247,6 +272,12 @@ pub async fn run_sender_with_config(
                             ).await;
                             info!("connection changes applied successfully");
                             sync_readers(&connections, &mut reader_handles, &packet_tx);
+                            // Bootstrap registration if we empty-started: start_probing
+                            // self-guards (a no-op once the group is established), so this
+                            // only fires on the empty-pool -> first-uplinks transition.
+                            if !connections.is_empty() {
+                                reg.start_probing(&mut connections).await;
+                            }
                         }
 
                         status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
@@ -281,14 +312,30 @@ pub async fn run_sender_with_config(
     #[cfg(unix)]
     event_loop! {
         _ = sighup.recv() => {
-            info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
-            if let Ok(new_ips) = read_ip_list(ips_file).await {
-                pending_changes = Some(PendingConnectionChanges {
-                    new_ips: Some(new_ips),
-                    receiver_host: receiver_host.to_string(),
-                    receiver_port,
-                });
-                info!("uplink IP changes queued for next processing cycle");
+            info!("received SIGHUP - reloading uplink IP list from {ips_file}");
+            match reload::analyze_ip_reload(ips_file) {
+                reload::IpReload::Apply { ips, first_invalid_line } => {
+                    if let Some(line) = first_invalid_line {
+                        warn!("invalid IP on line {line} in {ips_file}: skipping invalid lines");
+                    }
+                    pending_changes = Some(PendingConnectionChanges {
+                        new_ips: Some(ips),
+                        receiver_host: receiver_host.to_string(),
+                        receiver_port,
+                    });
+                    info!("uplink IP changes queued for next processing cycle");
+                }
+                reload::IpReload::Refuse(reason) => match reason {
+                    reload::ReloadRefusal::NotFound => warn!(
+                        "ips file not found/unreadable: {ips_file}, refusing reload; keeping existing connections"
+                    ),
+                    reload::ReloadRefusal::Empty => warn!(
+                        "ips file is empty: {ips_file}, refusing reload; keeping existing connections"
+                    ),
+                    reload::ReloadRefusal::NoValidIps { first_invalid_line } => warn!(
+                        "no valid source IPs in {ips_file} (parse error, first invalid line {first_invalid_line}); keeping existing connections"
+                    ),
+                },
             }
             let config_snap = config.snapshot();
             drain_packet_queue(
@@ -302,6 +349,14 @@ pub async fn run_sender_with_config(
                 &config_snap,
             )
             .await;
+        }
+        _ = sigterm.recv() => {
+            info!("received SIGTERM - shutting down");
+            return Ok(());
+        }
+        _ = sigint.recv() => {
+            info!("received SIGINT - shutting down");
+            return Ok(());
         }
     }
 
