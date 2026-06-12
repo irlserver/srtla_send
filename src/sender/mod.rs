@@ -1,6 +1,7 @@
 mod connections;
 mod housekeeping;
 mod packet_handler;
+#[cfg(unix)]
 mod reload;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod selection;
