@@ -1,4 +1,0 @@
-20:    tags:
-39:      # @ceralive:registry mapping; auth is read from NODE_AUTH_TOKEN at publish.
-44:          registry-url: "https://npm.pkg.github.com"
-78:          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

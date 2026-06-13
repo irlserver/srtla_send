@@ -1,9 +1,0 @@
-    Finished `test` profile [optimized + debuginfo] target(s) in 0.09s
-     Running unittests src/lib.rs (target/debug/deps/srtla_send-4f42dda8460ff0fa)
-
-running 2 tests
-test tests::sender_tests::tests::sighup_tests::sighup_surviving_uplink_no_rehandshake ... ok
-test tests::sender_tests::tests::sighup_tests::sighup_reorder_reassigns_conn_id ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 270 filtered out; finished in 0.01s
-

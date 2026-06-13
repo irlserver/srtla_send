@@ -26,3 +26,6 @@ moblin/
 
 # Local orchestration scratch dir (workspace-local, never committed)
 .omo/
+
+# Local QA evidence files (agent-generated, never committed)
+test-results/
