@@ -6,13 +6,16 @@ mod tests {
 
     use smallvec::SmallVec;
     use tempfile::NamedTempFile;
+    use tokio::time::Duration;
 
     use crate::config::{ConfigSnapshot, DynamicConfig};
     use crate::connection::SrtlaConnection;
     use crate::mode::SchedulingMode;
-    use crate::protocol::CONN_TIMEOUT;
+    use crate::protocol::{
+        CONN_TIMEOUT, SRT_TYPE_ACK, SRT_TYPE_DATA, SRT_TYPE_NAK, get_packet_type, is_srt_ack,
+    };
     use crate::sender::*;
-    use crate::test_helpers::create_test_connections;
+    use crate::test_helpers::{advance_test_clock, create_test_connections};
     use crate::utils::now_ms;
 
     #[test]
@@ -715,6 +718,282 @@ mod tests {
             (mult_burst - 0.571).abs() < 0.02,
             "Expected ~0.571, got {}",
             mult_burst
+        );
+    }
+
+    /// Build a minimal 16-byte SRT control packet carrying `srt_type` in the
+    /// first two bytes (big-endian), mirroring `make_control_packet` in
+    /// `srtla/tests/test_broadcast_ack.cpp`.
+    fn make_srt_control(srt_type: u16) -> [u8; 16] {
+        let mut pkt = [0u8; 16];
+        pkt[0..2].copy_from_slice(&srt_type.to_be_bytes());
+        pkt
+    }
+
+    /// Mirror the NAK-attribution arm of `process_connection_events`
+    /// (`sender/packet_handler.rs`): a NAK is first routed to the uplink the
+    /// `SequenceTracker` (`sender/sequence.rs`) recorded as the sender of that
+    /// sequence; if that lookup misses (never tracked, or the entry expired past
+    /// `SEQUENCE_TRACKING_MAX_AGE_MS`) it falls back to scanning every uplink and
+    /// letting the first one still holding the sequence in its packet_log account
+    /// it. Crucially, once the tracked uplink IS found the fallback is suppressed
+    /// even if its `handle_nak` reports the sequence already gone — that
+    /// short-circuit (`handled = true`) is the dedup behavior that stops a
+    /// duplicate NAK being re-counted on a different link.
+    ///
+    /// We replicate exactly that decision (the real `SequenceTracker::get` and
+    /// `handle_nak` from `connection/ack_nak.rs` still run) so the contract is
+    /// exercised without standing up the async UDP/registration harness — the
+    /// same approach `connection_tests.rs::poll_keepalive` uses for the
+    /// housekeeping keepalive gate.
+    ///
+    /// Returns the index of the uplink that actually counted the NAK, or `None`
+    /// when it was a no-op (deduped, or attributable to no uplink).
+    fn attribute_nak(
+        connections: &mut [SrtlaConnection],
+        seq_tracker: &SequenceTracker,
+        nak: u32,
+        current_time_ms: u64,
+    ) -> Option<usize> {
+        let mut counted_by: Option<usize> = None;
+        let mut handled = false;
+
+        if let Some(conn_id) = seq_tracker.get(nak, current_time_ms)
+            && let Some(pos) = connections.iter().position(|c| c.conn_id == conn_id)
+        {
+            if connections[pos].handle_nak(nak as i32) {
+                counted_by = Some(pos);
+            }
+            // Found the tracked uplink: do not fall through even if the sequence
+            // was already cleared (duplicate NAK), so it can't be re-counted.
+            handled = true;
+        }
+
+        if !handled {
+            for (i, conn) in connections.iter_mut().enumerate() {
+                if conn.handle_nak(nak as i32) {
+                    counted_by = Some(i);
+                    break;
+                }
+            }
+        }
+
+        counted_by
+    }
+
+    /// Port of `srtla/tests/test_broadcast_ack.cpp` (ACK arm) plus the ACK
+    /// fan-out in `process_connection_events`: an SRT ACK is broadcast to *every*
+    /// uplink and is cumulative, so each link clears its own in-flight packets
+    /// with seq ≤ ack; a NAK is never broadcast. We first lock the broadcast
+    /// *predicate* the C test pins (an ACK classifies as ACK; a NAK / data packet
+    /// does not), then drive the real cumulative `handle_srt_ack`
+    /// (`connection/ack_nak.rs`) across a 3-uplink pool and assert in-flight drops
+    /// only where seq ≤ ack.
+    #[test]
+    fn ack_reduces_in_flight() {
+        // -- broadcast eligibility predicate (mirrors test_broadcast_ack.cpp) --
+        let ack_pkt = make_srt_control(SRT_TYPE_ACK);
+        let nak_pkt = make_srt_control(SRT_TYPE_NAK);
+        let data_pkt = make_srt_control(SRT_TYPE_DATA);
+        assert!(
+            is_srt_ack(&ack_pkt),
+            "an ACK packet must be ACK-classified (broadcast-eligible)"
+        );
+        assert!(!is_srt_ack(&nak_pkt), "a NAK packet is not an ACK");
+        assert_eq!(
+            get_packet_type(&nak_pkt),
+            Some(SRT_TYPE_NAK),
+            "the NAK packet must classify as NAK"
+        );
+        assert!(
+            !is_srt_ack(&data_pkt),
+            "an SRT data packet is never ACK-broadcast-eligible"
+        );
+
+        // -- cumulative ACK reduces in-flight on the correct uplink(s) --
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let now = now_ms();
+
+        // uplink 0 sent 10/20/30 ; uplink 1 sent 15/25 ; uplink 2 sent 100 (beyond ack)
+        connections[0].register_packet(10, now);
+        connections[0].register_packet(20, now);
+        connections[0].register_packet(30, now);
+        connections[1].register_packet(15, now);
+        connections[1].register_packet(25, now);
+        connections[2].register_packet(100, now);
+        assert_eq!(connections[0].in_flight_packets, 3);
+        assert_eq!(connections[1].in_flight_packets, 2);
+        assert_eq!(connections[2].in_flight_packets, 1);
+
+        // Broadcast a cumulative ACK of 30 to every uplink, exactly as
+        // process_connection_events does (`for c in connections { c.handle_srt_ack }`).
+        for c in connections.iter_mut() {
+            c.handle_srt_ack(30);
+        }
+
+        assert_eq!(
+            connections[0].in_flight_packets, 0,
+            "uplink 0: 10/20/30 all ≤ 30, cleared"
+        );
+        assert_eq!(
+            connections[1].in_flight_packets, 0,
+            "uplink 1: 15/25 ≤ 30, cleared"
+        );
+        assert_eq!(
+            connections[2].in_flight_packets, 1,
+            "uplink 2: seq 100 > 30 stays in-flight (ACK is cumulative, not blanket)"
+        );
+    }
+
+    /// Port of the NAK-attribution contract (README "Implementation Details":
+    /// NAKs are attributed to the uplink that originally sent the sequence,
+    /// tracked via the `SequenceTracker`). Forward seq S on uplink 1, record it in
+    /// the tracker, inject a NAK for S, and assert only uplink 1 is penalized
+    /// (nak_count++ and in-flight−−); the other uplinks are untouched.
+    #[test]
+    fn nak_attributed_to_sending_uplink() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let now = now_ms();
+
+        let seq: u32 = 500;
+        // Uplink 1 is the sender: register in its packet_log + record attribution.
+        connections[1].register_packet(seq as i32, now);
+        let mut seq_tracker = SequenceTracker::new();
+        seq_tracker.insert(seq, connections[1].conn_id, now);
+
+        let before: Vec<i32> = connections.iter().map(|c| c.congestion.nak_count).collect();
+        let before_inflight = connections[1].in_flight_packets;
+
+        let counted = attribute_nak(&mut connections, &seq_tracker, seq, now);
+
+        assert_eq!(
+            counted,
+            Some(1),
+            "the NAK must be attributed to the uplink that sent the sequence"
+        );
+        assert_eq!(
+            connections[1].congestion.nak_count,
+            before[1] + 1,
+            "sending uplink's nak_count increments"
+        );
+        assert_eq!(
+            connections[1].in_flight_packets,
+            before_inflight - 1,
+            "sending uplink's in-flight decreases"
+        );
+        assert_eq!(
+            connections[0].congestion.nak_count, before[0],
+            "uplink 0 (did not send S) is untouched"
+        );
+        assert_eq!(
+            connections[2].congestion.nak_count, before[2],
+            "uplink 2 (did not send S) is untouched"
+        );
+    }
+
+    /// Port of the documented NAK fallback: when the sequence is *not* tracked the
+    /// sender scans uplinks and lets the one still holding it in its packet_log
+    /// account the NAK (README: "falling back ... if unknown"). Because a sequence
+    /// only ever lives in its real sender's packet_log, the fallback still lands
+    /// on the originating uplink. A sequence held by NO uplink is silently ignored
+    /// — never double-counted, never a panic.
+    #[test]
+    fn nak_unknown_uplink_fallback() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let now = now_ms();
+        let seq_tracker = SequenceTracker::new(); // deliberately empty: nothing tracked
+
+        // (a) untracked but present in uplink 2's packet_log → fallback finds it.
+        let known: u32 = 700;
+        connections[2].register_packet(known as i32, now);
+        let before2 = connections[2].congestion.nak_count;
+
+        let counted = attribute_nak(&mut connections, &seq_tracker, known, now);
+        assert_eq!(
+            counted,
+            Some(2),
+            "fallback attributes the NAK to the uplink still holding the sequence"
+        );
+        assert_eq!(connections[2].congestion.nak_count, before2 + 1);
+        assert_eq!(connections[0].congestion.nak_count, 0);
+        assert_eq!(connections[1].congestion.nak_count, 0);
+
+        // (b) truly unknown: not tracked and in no packet_log → no-op.
+        let counts_before: Vec<i32> = connections.iter().map(|c| c.congestion.nak_count).collect();
+        let counted_unknown = attribute_nak(&mut connections, &seq_tracker, 999_999, now);
+        assert_eq!(
+            counted_unknown, None,
+            "a sequence no uplink holds is attributable to none"
+        );
+        let counts_after: Vec<i32> = connections.iter().map(|c| c.congestion.nak_count).collect();
+        assert_eq!(
+            counts_before, counts_after,
+            "an unattributable NAK must not perturb any uplink"
+        );
+    }
+
+    /// Port of `srtla/tests/test_nak_dedup.cpp` (dedup within the suppression
+    /// window). The Rust sender has no separate `NakDeduplicator`; dedup is
+    /// structural — `handle_nak` removes the sequence from the packet_log, so a
+    /// *second* NAK for the same sequence finds nothing and `handle_nak` returns
+    /// false (not counted). Inside the `SequenceTracker` window both NAKs route to
+    /// the same uplink, and the attribution short-circuit keeps the duplicate from
+    /// falling through to another link. We assert single accounting under a
+    /// *paused* virtual clock (no real sleep); the tracker's own window is driven
+    /// with explicit timestamps, exactly as the C test uses explicit ms
+    /// (1000, 1000+SUPPRESS_MS, …).
+    #[tokio::test(start_paused = true)]
+    async fn nak_dedup_within_window() {
+        let mut connections = create_test_connections(2).await;
+        let base = now_ms();
+
+        let seq: u32 = 800;
+        connections[0].register_packet(seq as i32, base);
+        let mut seq_tracker = SequenceTracker::new();
+        seq_tracker.insert(seq, connections[0].conn_id, base);
+        assert_eq!(connections[0].in_flight_packets, 1);
+
+        // First sighting inside the window: counted once on the sending uplink.
+        let first = attribute_nak(&mut connections, &seq_tracker, seq, base);
+        assert_eq!(first, Some(0));
+        assert_eq!(connections[0].congestion.nak_count, 1, "first NAK is counted");
+        assert_eq!(
+            connections[0].in_flight_packets, 0,
+            "first NAK clears the in-flight packet"
+        );
+
+        // Advance the paused clock well within the tracking window (no real sleep).
+        advance_test_clock(Duration::from_millis(50)).await;
+        let within = base + 50;
+        assert!(
+            50 < SEQUENCE_TRACKING_MAX_AGE_MS,
+            "50ms must be inside the dedup window"
+        );
+        assert_eq!(
+            seq_tracker.get(seq, within),
+            Some(connections[0].conn_id),
+            "the tracker still resolves the sequence to uplink 0 inside the window"
+        );
+
+        // Duplicate NAK inside the window: routed to the same uplink, whose
+        // packet_log no longer holds the sequence → not re-counted, and the
+        // short-circuit keeps the other uplink clean.
+        let dup = attribute_nak(&mut connections, &seq_tracker, seq, within);
+        assert_eq!(dup, None, "the duplicate NAK is a no-op (single accounting)");
+        assert_eq!(
+            connections[0].congestion.nak_count, 1,
+            "duplicate NAK within the window is NOT double-counted"
+        );
+        assert_eq!(
+            connections[0].in_flight_packets, 0,
+            "in-flight stays cleared after the duplicate"
+        );
+        assert_eq!(
+            connections[1].congestion.nak_count, 0,
+            "the duplicate never leaks onto another uplink"
         );
     }
 }
