@@ -721,6 +721,138 @@ mod tests {
         );
     }
 
+    /// SIGHUP IP-list reload contract (Unix-only — `signal(SignalKind::hangup())`
+    /// has no Windows arm). These pin the parity-critical telemetry behavior:
+    /// surviving uplinks keep their socket + registration across a reload (no
+    /// re-handshake, zero disconnect), and the pool is rebuilt in ips-file order
+    /// so `conn_id` tracks the file (a reorder reorders `conn_id`). The whole
+    /// module is gated so the aarch64 cross and Windows CI jobs still compile.
+    #[cfg(unix)]
+    mod sighup_tests {
+        use std::sync::Arc;
+
+        use super::*;
+
+        /// A survivor's `socket: Arc<BatchUdpSocket>` is moved intact across a
+        /// reload, so its Arc backing pointer is stable. A re-handshake would run
+        /// `connect_from_ip` (a fresh bind + new `conn_id`), changing this pointer.
+        fn socket_ptr(conn: &SrtlaConnection) -> *const () {
+            Arc::as_ptr(&conn.socket) as *const ()
+        }
+
+        /// Reordering the ips file ([A, B] → [B, A]) reorders the pool: B takes
+        /// telemetry index 0, A takes index 1. Both uplinks survive — each keeps
+        /// its original socket and `conn_id` (no tear-down/rebuild) — they are
+        /// only repositioned to match the new file order.
+        #[test]
+        fn sighup_reorder_reassigns_conn_id() {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let mut connections = rt.block_on(create_test_connections(2));
+            let host = "127.0.0.1";
+            let port = 9000u16;
+            let ip_a = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+            let ip_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
+            relabel_as_uplinks(&mut connections, host, port, &[ip_a, ip_b]);
+
+            let cid_a = connections[0].conn_id;
+            let cid_b = connections[1].conn_id;
+            let sock_a = socket_ptr(&connections[0]);
+            let sock_b = socket_ptr(&connections[1]);
+
+            let mut last_selected_idx = Some(0);
+            let mut seq_tracker = SequenceTracker::new();
+
+            rt.block_on(apply_connection_changes(
+                &mut connections,
+                &[ip_b, ip_a],
+                host,
+                port,
+                &mut last_selected_idx,
+                &mut seq_tracker,
+            ));
+
+            assert_eq!(connections.len(), 2, "both uplinks must survive the reorder");
+
+            assert_eq!(
+                connections[0].conn_id, cid_b,
+                "conn_id 0 must track the reordered file (B first)"
+            );
+            assert_eq!(
+                connections[1].conn_id, cid_a,
+                "conn_id 1 must be A after the reorder"
+            );
+
+            assert_eq!(
+                socket_ptr(&connections[0]),
+                sock_b,
+                "index 0's socket must be B's original socket, not a fresh bind"
+            );
+            assert_eq!(
+                socket_ptr(&connections[1]),
+                sock_a,
+                "index 1's socket must be A's original socket, not a fresh bind"
+            );
+
+            assert_eq!(
+                last_selected_idx, None,
+                "a reorder must invalidate the cached selection index"
+            );
+        }
+
+        /// A SIGHUP whose file is byte-for-byte unchanged ([A, B] → [A, B]) must
+        /// not re-handshake any link: each survivor keeps its `conn_id` and the
+        /// same socket Arc (no `connect_from_ip`), and the cached selection index
+        /// is preserved (zero disconnects).
+        #[test]
+        fn sighup_surviving_uplink_no_rehandshake() {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let mut connections = rt.block_on(create_test_connections(2));
+            let host = "127.0.0.1";
+            let port = 9000u16;
+            let ip_a = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+            let ip_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
+            relabel_as_uplinks(&mut connections, host, port, &[ip_a, ip_b]);
+
+            let cid_a = connections[0].conn_id;
+            let cid_b = connections[1].conn_id;
+            let sock_a = socket_ptr(&connections[0]);
+            let sock_b = socket_ptr(&connections[1]);
+
+            let mut last_selected_idx = Some(1);
+            let mut seq_tracker = SequenceTracker::new();
+
+            rt.block_on(apply_connection_changes(
+                &mut connections,
+                &[ip_a, ip_b],
+                host,
+                port,
+                &mut last_selected_idx,
+                &mut seq_tracker,
+            ));
+
+            assert_eq!(connections.len(), 2);
+
+            assert_eq!(connections[0].conn_id, cid_a, "A keeps its conn_id");
+            assert_eq!(connections[1].conn_id, cid_b, "B keeps its conn_id");
+            assert_eq!(
+                socket_ptr(&connections[0]),
+                sock_a,
+                "A keeps its socket (no re-handshake)"
+            );
+            assert_eq!(
+                socket_ptr(&connections[1]),
+                sock_b,
+                "B keeps its socket (no re-handshake)"
+            );
+
+            assert_eq!(
+                last_selected_idx,
+                Some(1),
+                "an unchanged reload must not disturb the selection (zero disconnects)"
+            );
+        }
+    }
+
     /// Build a minimal 16-byte SRT control packet carrying `srt_type` in the
     /// first two bytes (big-endian), mirroring `make_control_packet` in
     /// `srtla/tests/test_broadcast_ack.cpp`.

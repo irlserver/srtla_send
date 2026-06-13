@@ -1,0 +1,2 @@
+   Compiling srtla_send v3.0.0 (/mnt/development/ceralive/srtla-send-rs)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1.53s
