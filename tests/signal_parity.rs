@@ -22,6 +22,11 @@ const BIN: &str = env!("CARGO_BIN_EXE_srtla_send");
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const LOG_TIMEOUT: Duration = Duration::from_secs(5);
 const KILL_WINDOW: Duration = Duration::from_secs(10);
+/// Clean shutdown must be *prompt* (the contract says "well within" CeraUI's 10s
+/// SIGKILL window). T9 pins the tighter ~1s bound the device expects: we still
+/// poll up to `KILL_WINDOW` so a slow exit is reported as a too-slow failure
+/// rather than a flaky `None`.
+const PROMPT_EXIT: Duration = Duration::from_millis(1500);
 
 /// Grab an ephemeral UDP port for the local SRT listener, then release it so the
 /// spawned binary can bind it (a small TOCTOU race is acceptable for a test).
@@ -309,5 +314,81 @@ fn sigint_exits_cleanly_within_the_kill_window() {
     assert!(
         t0.elapsed() < KILL_WINDOW,
         "must exit within the 10s window"
+    );
+}
+
+#[test]
+fn sigterm_unlinks_telemetry_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let stats = dir.path().join("t9.json");
+    let tmp = dir.path().join("t9.json.tmp");
+    // Pre-seed both the live snapshot and a leftover temp sibling (as a crashed
+    // atomic write would leave). Clean shutdown must unlink BOTH so no stale or
+    // half-written telemetry outlives the process.
+    std::fs::write(&stats, "{}").unwrap();
+    std::fs::write(&tmp, "partial").unwrap();
+    let (mut proc, _ips) = spawn_with_ips(
+        dir.path(),
+        "127.0.0.1\n",
+        &["--stats-file", stats.to_str().unwrap()],
+    );
+
+    assert!(
+        proc.wait_for_log("listening for SRT", START_TIMEOUT),
+        "sender never started; logs:\n{}",
+        proc.logs()
+    );
+
+    let t0 = Instant::now();
+    proc.signal("TERM");
+    let code = proc.wait_exit(KILL_WINDOW);
+    let elapsed = t0.elapsed();
+
+    assert_eq!(code, Some(0), "SIGTERM must exit 0; logs:\n{}", proc.logs());
+    assert!(
+        elapsed < PROMPT_EXIT,
+        "SIGTERM must exit promptly (~1s); took {elapsed:?}"
+    );
+    assert!(
+        !stats.exists(),
+        "the live telemetry stats file must be unlinked on shutdown"
+    );
+    assert!(
+        !tmp.exists(),
+        "the telemetry .tmp sibling must be unlinked on shutdown"
+    );
+}
+
+#[test]
+fn empty_ip_file_at_startup_not_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    // The file exists but resolves to zero valid IPs (blank lines only) — the
+    // empty-content sibling of the missing-file case covered above.
+    let (mut proc, _ips) = spawn_with_ips(dir.path(), "\n   \n\n", &[]);
+
+    assert!(
+        proc.wait_for_log("empty uplink pool", START_TIMEOUT),
+        "an empty ips file should yield an empty pool; logs:\n{}",
+        proc.logs()
+    );
+    assert!(
+        proc.wait_for_log("listening for SRT", START_TIMEOUT),
+        "sender must bind the listener with no uplinks; logs:\n{}",
+        proc.logs()
+    );
+
+    thread::sleep(Duration::from_secs(1));
+    assert!(
+        proc.is_alive(),
+        "empty-start must keep running (no crash-loop); logs:\n{}",
+        proc.logs()
+    );
+
+    proc.signal("TERM");
+    assert_eq!(
+        proc.wait_exit(KILL_WINDOW),
+        Some(0),
+        "SIGTERM after an empty start must still exit 0; logs:\n{}",
+        proc.logs()
     );
 }
