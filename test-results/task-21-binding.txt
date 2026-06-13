@@ -1,0 +1,65 @@
+bun test v1.3.14 (0d9b296a)
+
+dist/sender/index.test.js:
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_positional_order [1.62ms]
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_minimal [0.02ms]
+
+dist/telemetry/index.test.js:
+(pass) telemetrySchema > readTelemetry_valid_snapshot_parses [0.99ms]
+(pass) telemetrySchema > requires window and in_flight (frozen contract) [0.69ms]
+(pass) readTelemetry > readTelemetry_schema_version_2_rejected [0.32ms]
+(pass) readTelemetry > missing schema_version is rejected (no silent strip) [0.21ms]
+(pass) readTelemetry > readTelemetry_absent_file_returns_null [0.08ms]
+(pass) readTelemetry > invalid JSON returns null (no throw) [0.18ms]
+(pass) readTelemetry > idle snapshot (connections: []) returns the object, not null [0.16ms]
+(pass) readTelemetry > old-but-valid snapshot still parses (staleness is the watcher's concern) [0.19ms]
+(pass) watchTelemetry > reports stale=true for an absent file [51.02ms]
+(pass) watchTelemetry > reports stale=false for a fresh snapshot, stale=true past the threshold [41.45ms]
+(pass) watchTelemetry > stop() halts further callbacks [131.24ms]
+(pass) senderTelemetryPath > builds the well-known path for a listen port [0.19ms]
+(pass) round-trip golden fixture (T21) > round_trip_golden_fixture [0.31ms]
+(pass) round-trip golden fixture (T21) > bitrate_x8_invariant [0.15ms]
+(pass) round-trip golden fixture (T21) > golden fixture is newline-free single object (atomic-publish shape) [0.11ms]
+(pass) watch states (T21) > watch_state_fresh [20.38ms]
+(pass) watch states (T21) > watch_state_stale [20.48ms]
+(pass) watch states (T21) > watch_state_null [50.59ms]
+(pass) schema edge cases (T21) > schema_version_2_rejected [0.57ms]
+(pass) schema edge cases (T21) > missing_required_field_rejected [0.57ms]
+(pass) schema edge cases (T21) > extra_fields_stripped_or_rejected [0.47ms]
+
+src/sender/index.test.ts:
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_positional_order [0.29ms]
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_minimal [0.04ms]
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_applies_defaults [0.09ms]
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_verbose_only [0.03ms]
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_stats_file_emitted [0.03ms]
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_stats_file_omitted_when_unset [0.03ms]
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_stats_file_interval_emitted [0.05ms]
+
+src/telemetry/index.test.ts:
+(pass) telemetrySchema > readTelemetry_valid_snapshot_parses [0.53ms]
+(pass) telemetrySchema > requires window and in_flight (frozen contract) [0.13ms]
+(pass) readTelemetry > readTelemetry_schema_version_2_rejected [0.15ms]
+(pass) readTelemetry > missing schema_version is rejected (no silent strip) [0.10ms]
+(pass) readTelemetry > readTelemetry_absent_file_returns_null [0.04ms]
+(pass) readTelemetry > invalid JSON returns null (no throw) [0.09ms]
+(pass) readTelemetry > idle snapshot (connections: []) returns the object, not null [0.10ms]
+(pass) readTelemetry > old-but-valid snapshot still parses (staleness is the watcher's concern) [0.07ms]
+(pass) watchTelemetry > reports stale=true for an absent file [50.68ms]
+(pass) watchTelemetry > reports stale=false for a fresh snapshot, stale=true past the threshold [41.94ms]
+(pass) watchTelemetry > stop() halts further callbacks [130.75ms]
+(pass) senderTelemetryPath > builds the well-known path for a listen port [0.19ms]
+(pass) round-trip golden fixture (T21) > round_trip_golden_fixture [0.32ms]
+(pass) round-trip golden fixture (T21) > bitrate_x8_invariant [0.22ms]
+(pass) round-trip golden fixture (T21) > golden fixture is newline-free single object (atomic-publish shape) [0.12ms]
+(pass) watch states (T21) > watch_state_fresh [20.95ms]
+(pass) watch states (T21) > watch_state_stale [21.02ms]
+(pass) watch states (T21) > watch_state_null [50.77ms]
+(pass) schema edge cases (T21) > schema_version_2_rejected [0.39ms]
+(pass) schema edge cases (T21) > missing_required_field_rejected [0.58ms]
+(pass) schema edge cases (T21) > extra_fields_stripped_or_rejected [0.27ms]
+
+ 51 pass
+ 0 fail
+ 118 expect() calls
+Ran 51 tests across 4 files. [673.00ms]
