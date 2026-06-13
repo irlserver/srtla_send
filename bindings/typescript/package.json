@@ -1,6 +1,6 @@
 {
   "name": "@ceralive/srtla-send",
-  "version": "1.0.0",
+  "version": "2026.6.0",
   "description": "Type-safe helpers for the srtla-send-rs sender (args, validation, telemetry reader).",
   "type": "module",
   "main": "dist/index.js",
@@ -33,8 +33,8 @@
     "typescript": "^5.9.3"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
-    "access": "restricted"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "license": "AGPL-3.0",
   "keywords": [
