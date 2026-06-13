@@ -4,7 +4,7 @@ members = ["crates/network-sim"]
 [package]
 resolver = "3"
 name = "srtla_send"
-version = "3.0.0"
+version = "2026.6.1"
 edition = "2024"
 description = "SRT transport proxy with link aggregation for connection bonding (sender-side)"
 license = "MIT"
