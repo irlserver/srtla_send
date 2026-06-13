@@ -104,7 +104,9 @@ impl BatchSender {
         let packet_count = self.queue.len();
         let mut sent_count = 0;
 
-        // Send all packets
+        // Send DATA packets verbatim. Unlike control frames (keepalive/REG,
+        // see packet_io.rs `send_control_padded`), DATA is NEVER padded to a
+        // 32-byte minimum — padding here would corrupt the SRT byte stream.
         // TODO: On Linux, could use sendmmsg for even better performance
         for packet in &self.queue {
             match socket.send(packet).await {

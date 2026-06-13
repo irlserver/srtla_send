@@ -11,7 +11,30 @@ use super::incoming::SrtlaIncoming;
 use crate::protocol::*;
 use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
 
+/// Minimum on-wire size for SRTLA **control** packets (keepalive, REG1/REG2).
+///
+/// Parity with the C `pad_sendto` (srtla/src/protocol/pad_sendto.h): tiny
+/// control frames are zero-padded up to 32 bytes so cellular/carrier NAT
+/// keepalive thresholds don't silently drop them. DATA packets are never padded
+/// (see `batch_send.rs`), so throughput accounting is unaffected.
+pub(crate) const MIN_CONTROL_PKT_LEN: usize = 32;
+
 impl SrtlaConnection {
+    /// Send a control packet, zero-padding it to [`MIN_CONTROL_PKT_LEN`] when it
+    /// is smaller. Mirrors C `pad_sendto`: buffers already `>=` the minimum are
+    /// sent unchanged; smaller ones go out as a 32-byte frame with trailing
+    /// zeros. Every control-plane sender (keepalive, REG1/REG2) routes through
+    /// here; the DATA path in `batch_send.rs` deliberately bypasses it.
+    pub(crate) async fn send_control_padded(&self, pkt: &[u8]) -> std::io::Result<usize> {
+        if pkt.len() >= MIN_CONTROL_PKT_LEN {
+            self.socket.send(pkt).await
+        } else {
+            let mut padded = [0u8; MIN_CONTROL_PKT_LEN];
+            padded[..pkt.len()].copy_from_slice(pkt);
+            self.socket.send(&padded).await
+        }
+    }
+
     pub async fn drain_incoming(
         &mut self,
         conn_idx: usize,

@@ -5,7 +5,7 @@ mod tests {
     use tokio::time::Instant;
 
     use crate::protocol::*;
-    use crate::test_helpers::{advance_test_clock, create_test_connection};
+    use crate::test_helpers::create_test_connection;
     use crate::utils::now_ms;
 
     #[tokio::test(flavor = "current_thread")]
@@ -153,7 +153,10 @@ mod tests {
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_count, 1);
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Burst logic reads now_ms() (SystemTime), which Tokio's virtual clock can't
+        // move; backdating last_nak_time_ms is the instant, deterministic stand-in for
+        // a real sleep. 500ms stays inside NAK_BURST_WINDOW_MS (1000) → burst escalates.
+        conn.congestion.last_nak_time_ms = now_ms() - 500;
         conn.handle_nak(101);
         assert_eq!(conn.congestion.nak_burst_count, 2);
         assert_eq!(conn.congestion.nak_count, 2);
@@ -162,7 +165,8 @@ mod tests {
         assert_eq!(conn.congestion.nak_burst_count, 3);
         assert_eq!(conn.congestion.nak_count, 3);
 
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // 1100ms > NAK_BURST_WINDOW_MS (1000): window elapsed → next NAK resets burst.
+        conn.congestion.last_nak_time_ms = now_ms() - 1100;
         conn.handle_nak(103);
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_count, 4);
@@ -186,7 +190,9 @@ mod tests {
         conn.perform_window_recovery();
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // perform_window_recovery clears the burst once now_ms() - last_nak_time_ms
+        // crosses NAK_BURST_WINDOW_MS (1000); backdate instead of sleeping.
+        conn.congestion.last_nak_time_ms = now_ms() - 1100;
         conn.perform_window_recovery();
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_burst_start_time_ms, 0);
@@ -228,7 +234,8 @@ mod tests {
         conn.handle_nak(102);
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Past the 1000ms burst window (now_ms()-based) → next NAK resets the burst.
+        conn.congestion.last_nak_time_ms = now_ms() - 1100;
         conn.handle_nak(103);
         assert_eq!(conn.congestion.nak_burst_count, 0);
     }
@@ -443,34 +450,6 @@ mod tests {
         // Disconnected connection should be timed out
         conn.connected = false;
         assert!(conn.is_timed_out());
-    }
-
-    /// Deterministic timeout via the fake clock: a fresh (connected) link is not
-    /// timed out, but advancing the paused virtual clock past `CONN_TIMEOUT` flips
-    /// it. No real sleep is involved, so this completes in well under a millisecond.
-    #[tokio::test(start_paused = true)]
-    async fn fake_clock_timeout() {
-        let conn = create_test_connection().await;
-        // last_received is "now" on the paused clock: not yet timed out.
-        assert!(!conn.is_timed_out());
-
-        // Jump the virtual clock just past the timeout window.
-        advance_test_clock(Duration::from_secs(CONN_TIMEOUT + 1)).await;
-        assert!(
-            conn.is_timed_out(),
-            "advancing past CONN_TIMEOUT must mark the link timed out"
-        );
-    }
-
-    /// Frozen clock: with no time advanced, the same fresh link never times out.
-    /// Guards against an accidental wall-clock dependency creeping into is_timed_out().
-    #[tokio::test(start_paused = true)]
-    async fn clock_frozen_no_timeout() {
-        let conn = create_test_connection().await;
-        assert!(
-            !conn.is_timed_out(),
-            "a frozen clock must never trip the timeout"
-        );
     }
 
     #[test]
@@ -747,6 +726,140 @@ mod tests {
         assert!(
             conn.window > before_fast,
             "Fast mode should recover when timing constraint is met"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_packet_padded_to_32b() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        use tokio::net::UdpSocket;
+
+        use crate::connection::SrtlaConnection;
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let recv_port = receiver.local_addr().unwrap().port();
+
+        let mut conn = SrtlaConnection::connect_from_ip(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            "127.0.0.1",
+            recv_port,
+        )
+        .await
+        .unwrap();
+
+        let tiny = [0x90u8, 0x00];
+        conn.send_srtla_packet(&tiny).await.unwrap();
+
+        let mut buf = [0xffu8; 64];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut buf))
+            .await
+            .expect("control packet not received")
+            .unwrap();
+
+        assert_eq!(
+            n, 32,
+            "tiny control frame must be NAT-padded to 32 wire bytes"
+        );
+        assert_eq!(&buf[..2], &tiny, "original payload bytes must be preserved");
+        assert!(
+            buf[2..32].iter().all(|&b| b == 0),
+            "padding bytes must be zero"
+        );
+
+        let big = [0xabu8; 40];
+        conn.send_srtla_packet(&big).await.unwrap();
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut buf))
+            .await
+            .expect("passthrough control packet not received")
+            .unwrap();
+        assert_eq!(
+            n, 40,
+            "control frame >= 32 bytes must pass through unpadded"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn data_not_padded() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        use tokio::net::UdpSocket;
+
+        use crate::connection::SrtlaConnection;
+        use crate::utils::now_ms;
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let recv_port = receiver.local_addr().unwrap().port();
+
+        let mut conn = SrtlaConnection::connect_from_ip(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            "127.0.0.1",
+            recv_port,
+        )
+        .await
+        .unwrap();
+
+        let payload = [0x11u8; 10];
+        conn.queue_data_packet(&payload, None, now_ms());
+        conn.flush_batch().await.unwrap();
+
+        let mut buf = [0u8; 64];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut buf))
+            .await
+            .expect("data packet not received")
+            .unwrap();
+
+        assert_eq!(
+            n, 10,
+            "DATA must be forwarded verbatim, never padded to 32B"
+        );
+        assert_eq!(&buf[..10], &payload, "DATA payload must be unchanged");
+    }
+}
+
+/// Paused-clock timing tests, isolated from the real-time `tests` module above (G7).
+///
+/// Every test here drives Tokio's *virtual* clock via `#[tokio::test(start_paused =
+/// true)]`, where time only moves on `tokio::time::advance` / timer awaits. They are
+/// kept out of the real-time suite because connection liveness and keepalive pacing
+/// read `tokio::time::Instant` (`last_received`, `last_keepalive_sent`) — the virtual
+/// clock is the correct seam for them. (The NAK-burst suite above instead reads
+/// `now_ms()`/SystemTime, which the virtual clock cannot move, so it is de-flaked by
+/// backdating timestamps rather than advancing the clock.)
+#[cfg(test)]
+mod paused_clock_tests {
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
+    use crate::protocol::*;
+    use crate::test_helpers::{advance_test_clock, create_test_connection};
+
+    /// Deterministic timeout via the fake clock: a fresh (connected) link is not
+    /// timed out, but advancing the paused virtual clock past `CONN_TIMEOUT` flips
+    /// it. No real sleep is involved, so this completes in well under a millisecond.
+    #[tokio::test(start_paused = true)]
+    async fn fake_clock_timeout() {
+        let conn = create_test_connection().await;
+        // last_received is "now" on the paused clock: not yet timed out.
+        assert!(!conn.is_timed_out());
+
+        // Jump the virtual clock just past the timeout window.
+        advance_test_clock(Duration::from_secs(CONN_TIMEOUT + 1)).await;
+        assert!(
+            conn.is_timed_out(),
+            "advancing past CONN_TIMEOUT must mark the link timed out"
+        );
+    }
+
+    /// Frozen clock: with no time advanced, the same fresh link never times out.
+    /// Guards against an accidental wall-clock dependency creeping into is_timed_out().
+    #[tokio::test(start_paused = true)]
+    async fn clock_frozen_no_timeout() {
+        let conn = create_test_connection().await;
+        assert!(
+            !conn.is_timed_out(),
+            "a frozen clock must never trip the timeout"
         );
     }
 

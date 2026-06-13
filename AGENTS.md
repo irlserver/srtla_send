@@ -122,6 +122,17 @@ CeraUI and the device integration depend on these staying stable:
 - **Clean shutdown (`SIGTERM`/`SIGINT`, Unix):** exit `0` well within CeraUI's
   10s SIGKILL window; the `--stats-file` telemetry file (and its `.tmp` sibling)
   is unlinked so no stale snapshot outlives the process.
+- **NAT-keepalive control padding (`MIN_CONTROL_PKT_LEN = 32`,
+  `src/connection/packet_io.rs`):** every control-plane send (keepalive,
+  REG1/REG2) routes through `send_control_padded`, which zero-pads frames
+  smaller than 32 bytes up to a 32-byte wire frame — parity with the C
+  `pad_sendto` (`srtla/src/protocol/pad_sendto.h`) so cellular/carrier NAT
+  keepalive thresholds don't silently drop tiny control frames. **DATA is never
+  padded** — the batch DATA path (`src/connection/batch_send.rs`) deliberately
+  bypasses it; padding DATA would corrupt the SRT byte stream. Current control
+  frames are already ≥32 B (extended keepalive 38 B, REG1/REG2 258 B) so this is
+  a passthrough today, but the floor is now enforced. Pinned by
+  `control_packet_padded_to_32b` + `data_not_padded` (`src/tests/connection_tests.rs`).
 - **Link-liveness timeout (`CONN_TIMEOUT = 15`, `src/protocol/constants.rs`):**
   seconds of inbound silence before an established uplink is declared failed and
   re-registered. It is deliberately set to **15**, matching the bonding receiver's

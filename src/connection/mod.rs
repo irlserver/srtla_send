@@ -238,7 +238,7 @@ impl SrtlaConnection {
             bitrate_bytes_per_sec: (self.bitrate.current_bitrate_bps / 8.0) as u32,
         };
         let pkt = create_keepalive_packet_ext(info);
-        self.socket.send(&pkt).await?;
+        self.send_control_padded(&pkt).await?;
         let now_instant = Instant::now();
         let now = now_ms();
         self.last_sent = Some(now_instant);
@@ -254,7 +254,7 @@ impl SrtlaConnection {
     }
 
     pub async fn send_srtla_packet(&mut self, pkt: &[u8]) -> Result<()> {
-        self.socket.send(pkt).await?;
+        self.send_control_padded(pkt).await?;
         self.last_sent = Some(Instant::now());
         Ok(())
     }
@@ -262,7 +262,7 @@ impl SrtlaConnection {
     pub async fn send_probe_reg2(&mut self, probe_id: &[u8; SRTLA_ID_LEN]) -> Result<u64> {
         let pkt = create_reg2_packet(probe_id);
         let sent_at = now_ms();
-        self.socket.send(&pkt).await?;
+        self.send_control_padded(&pkt).await?;
         self.reconnection.startup_grace_deadline_ms = sent_at + STARTUP_GRACE_MS;
         Ok(sent_at)
     }
