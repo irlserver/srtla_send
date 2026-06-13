@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 
 use crate::connection::{
     BatchSender, BatchUdpSocket, BitrateTracker, CachedQuality, CongestionControl,
@@ -89,4 +89,16 @@ pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 
     }
 
     connections
+}
+
+/// Advance the paused Tokio virtual clock by `by`.
+///
+/// Only meaningful inside `#[tokio::test(start_paused = true)]`. Connection timing
+/// (`last_received`, `last_keepalive_sent`, the housekeeping `all_failed_at` timer)
+/// reads `tokio::time::Instant`, so jumping the virtual clock makes timeout/keepalive
+/// logic fire deterministically with no real sleep. This is the test seam: timing
+/// tests advance the clock through here rather than calling `tokio::time::advance`
+/// inline, keeping the dependency on the virtual clock explicit.
+pub async fn advance_test_clock(by: Duration) {
+    tokio::time::advance(by).await;
 }
