@@ -25,9 +25,10 @@ RTT). On the device it is driven by CeraUI and feeds the bonded path into
 `srtla/` repo holds the C `srtla_send`/`srtla_rec` pair plus the bonding receiver and
 its own **TypeScript bindings** (`@ceralive/srtla`, consumed by CeraUI via the sibling
 `link:`). This repo additionally ships its **own** pure-TS sender binding,
-`@ceralive/srtla-send`, under `bindings/typescript/` — published to GitHub Packages
-(`@ceralive` scope) and consumed **registry-only**: **no sibling `link:`, no `.tgz`
-vendoring**. It is a thin, registry-distributed helper layer over this repo's binary
+`@ceralive/srtla-send`, under `bindings/typescript/` — published to the **public npm
+registry** (`@ceralive` scope) via npm **OIDC trusted publishing** and consumed
+**registry-only**: **no sibling `link:`, no `.tgz` vendoring**. It is a thin,
+registry-distributed helper layer over this repo's binary
 (args/validation/telemetry reader); the binary itself remains the primary artifact.
 The `@ceralive/srtla-send` sender/telemetry exports mirror `@ceralive/srtla`'s
 `./sender` + `./telemetry` subpaths and must not import or share types with
@@ -194,18 +195,23 @@ binding-publish workflow is Node/Bun and shares no triggers with them:
 - **`release.yml`** (tag push `v*`) — rebuilds both arches, packages, runs the glob
   gate, and attaches both `.deb`s + `.sha256`s to the GitHub release for the tag.
   No crates.io publish; no scheduled upstream-sync.
-- **`publish-bindings.yml`** (tag push **`bindings/v*`**) — publishes
-  `@ceralive/srtla-send` to GitHub Packages (`@ceralive` scope,
-  `registry-url: https://npm.pkg.github.com`, auth via `NODE_AUTH_TOKEN ←
-  secrets.GITHUB_TOKEN`). Gated by `bun tsc --noEmit && bun test` then `bun run build`
-  before `npm publish`. **Binding version source:** the binding ships on its **own**
-  tag namespace `bindings/vX.Y.Z`, deliberately distinct from the Rust crate's `v*`
-  release tags — the two namespaces keep the `.deb` release and the binding publish
-  fully decoupled (no shared trigger). The published version **is** the committed
+- **`publish-bindings.yml`** (tag push **`bindings-v*`**) — publishes
+  `@ceralive/srtla-send` to the **public npm registry** (`@ceralive` scope,
+  `registry-url: https://registry.npmjs.org/`) via npm **OIDC trusted publishing**
+  (`permissions: id-token: write`, `npm publish --access public` — **no `NODE_AUTH_TOKEN`**;
+  requires npm ≥ 11.5.1 / Node ≥ 22.14). Mirrors `@ceralive/cerastream`'s publish flow.
+  Gated by `bun run typecheck && bun test` then `bun run build` (+ a tarball guard that
+  only compiled `dist/` ships) before publish. A `workflow_dispatch` run with
+  `dry_run=true` performs a registry dry-run. **Binding version source:** the binding
+  ships on its **own** tag namespace `bindings-vYYYY.M.P` (CalVer, matching
+  `@ceralive/cerastream`), deliberately distinct from the Rust crate's `v*` release tags
+  — the two namespaces keep the `.deb` release and the binding publish fully decoupled
+  (no shared trigger). A `-rc.N` suffix publishes under the `next` dist-tag; a plain
+  version under `latest`. The published version **is** the committed
   `bindings/typescript/package.json` `version`; the tag does not mint it. A guard step
-  refuses to publish unless the tag's `X.Y.Z` equals `package.json` `version`, so a tag
+  refuses to publish unless the tag's version equals `package.json` `version`, so a tag
   can never ship a stale/mismatched version. Cut a binding release: bump `package.json`
-  `version` → commit → `git tag bindings/vX.Y.Z && git push --tags`.
+  `version` → commit → `git tag bindings-vYYYY.M.P && git push --tags`.
 
 **`ci/build-deb.sh` is the single source of truth** for the `.deb` and is called by both
 workflows. It pins the contract the device image depends on:
@@ -254,7 +260,7 @@ reference (modes, runtime commands, tuning constants).
 ## ANTI-PATTERNS
 
 - **Bindings are registry-only.** This repo ships its own pure-TS sender binding
-  `@ceralive/srtla-send` under `bindings/typescript/` (GitHub Packages, `@ceralive`
+  `@ceralive/srtla-send` under `bindings/typescript/` (public npm, `@ceralive`
   scope). It is consumed **registry-only** — **never add a sibling `link:` for it and
   never vendor a `.tgz`** (that is the `srtla/` → CeraUI pattern, not this one).
   `@ceralive/srtla` (the C-pair bindings) still lives in `srtla/`; do not duplicate it

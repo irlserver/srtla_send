@@ -1,78 +1,125 @@
-name: Publish bindings
+name: Publish @ceralive/srtla-send
 
-# Publishes the pure-TS sender binding @ceralive/srtla-send to GitHub Packages.
+# Publishes the pure-TS sender binding @ceralive/srtla-send to the PUBLIC npm
+# registry via OIDC trusted publishing — no NPM_TOKEN. Two trigger shapes:
+#   bindings-vYYYY.M.P        → stable release    → npm dist-tag `latest`
+#   bindings-vYYYY.M.P-rc.N   → release candidate → npm dist-tag `next`
+# Auth is the GitHub Actions OIDC identity (id-token: write) exchanged against
+# the trusted publisher configured on the npm package; requires npm >= 11.5.1.
+# A workflow_dispatch run with dry_run=true performs a registry dry-run instead.
 #
 # VERSION SOURCE (decision): the binding versions on its OWN tag namespace,
-# `bindings/vX.Y.Z`, deliberately distinct from the Rust crate's `vX.Y.Z`
-# release tags (release.yml). The binding is a thin registry-distributed helper
-# over the binary, not the binary itself, so it ships on its own cadence. The
-# published version is the committed `bindings/typescript/package.json` "version";
-# the tag does not mint it. The guard below refuses to publish unless the tag's
-# X.Y.Z matches package.json exactly, so a tag can never publish a stale or
-# mismatched version. To cut a binding release: bump package.json "version",
-# commit, then `git tag bindings/vX.Y.Z && git push --tags`.
+# `bindings-vYYYY.M.P` (CalVer, matching @ceralive/cerastream), deliberately
+# distinct from the Rust crate's `v*` release tags (release.yml). The binding is
+# a thin registry-distributed helper over the binary, not the binary itself, so
+# it ships on its own cadence. The published version is the committed
+# `bindings/typescript/package.json` "version"; the tag does not mint it. The
+# guard below refuses to publish unless the tag's version matches package.json
+# exactly. To cut a binding release: bump package.json "version", commit, then
+# `git tag bindings-vYYYY.M.P && git push --tags`.
 #
 # This workflow is intentionally separate from ci.yml / release.yml (Rust .deb)
 # and shares no triggers with them — `v*` tags drive the .deb release untouched,
-# `bindings/v*` tags drive this one.
+# `bindings-v*` tags drive this one.
 on:
   push:
     tags:
-      - "bindings/v*"
+      - "bindings-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Force a registry dry-run (no publish)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
-  packages: write
+  id-token: write # OIDC identity for npm trusted publishing (+ provenance when public)
 
 jobs:
   publish:
-    name: Publish @ceralive/srtla-send
+    name: Build, test, publish
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: bindings/typescript
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # registry-url + scope wire npm to GitHub Packages and inject the
-      # @ceralive:registry mapping; auth is read from NODE_AUTH_TOKEN at publish.
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: "22"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@ceralive"
+          bun-version: latest
 
-      - name: Install bun
-        run: npm install -g bun
+      # npm (not bun) performs the publish: it speaks OIDC trusted publishing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # trusted publishing needs Node >= 22.14
+          registry-url: https://registry.npmjs.org/
 
-      - name: Install dependencies
-        run: bun install
+      - name: Upgrade npm to a trusted-publishing-capable version
+        run: npm install -g npm@latest # OIDC trusted publishing needs npm >= 11.5.1
 
-      # Refuse to publish unless package.json "version" == the tag's X.Y.Z, so a
-      # `bindings/v*` tag can only ship the version committed in the repo.
-      - name: Verify package version matches tag
+      # Refuse to publish unless package.json "version" == the tag's version, so a
+      # `bindings-v*` tag can only ship the version committed in the repo.
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/bindings-v')
         run: |
-          tag_version="${GITHUB_REF_NAME#bindings/v}"
-          pkg_version="$(node -p "require('./package.json').version")"
-          echo "tag=${tag_version} package.json=${pkg_version}"
-          if [ "${tag_version}" != "${pkg_version}" ]; then
-            echo "::error::tag bindings/v${tag_version} does not match package.json version ${pkg_version}"
+          TAG="${GITHUB_REF#refs/tags/bindings-v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG package=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag bindings-v$TAG does not match package.json version $PKG"
             exit 1
           fi
 
-      # Publish gate — same gate as the binding's local dev loop (AGENTS.md).
+      - name: Install
+        run: bun install --frozen-lockfile
+
       - name: Typecheck
-        run: bun tsc --noEmit
+        run: bun run typecheck
 
       - name: Test
         run: bun test
 
-      - name: Build
+      - name: Build dist
         run: bun run build
 
-      - name: Publish to GitHub Packages
-        run: npm publish
+      - name: Tarball guard — only compiled dist/ ships
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          FILES="$(node -e 'const j=require("/tmp/pack.json"); for (const f of j[0].files) console.log(f.path)')"
+          echo "$FILES"
+          if echo "$FILES" | grep -E '\.ts$' | grep -vE '\.d\.ts$'; then
+            echo "::error::tarball contains TypeScript source — only compiled dist/ may ship"
+            exit 1
+          fi
+
+      - name: Select npm dist-tag
+        id: tag
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          if echo "$PKG" | grep -q -- '-rc'; then
+            echo "dist_tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm via OIDC trusted publishing (or dry-run)
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          # Auth is the GitHub OIDC token (id-token: write) exchanged against the
+          # trusted publisher on the npm package — no NPM_TOKEN. npm auto-generates
+          # provenance for public repos but cannot for a private source repo, so
+          # disable it explicitly while private (re-enables when the repo is public).
+          if [ "${REPO_PRIVATE}" = "true" ]; then
+            export NPM_CONFIG_PROVENANCE=false
+            echo "Private source repo — provenance disabled."
+          fi
+          if [ "${FORCE_DRY_RUN}" = "true" ]; then
+            echo "Dry-run forced — no publish."
+            npm publish --access public --dry-run --tag "${{ steps.tag.outputs.dist_tag }}"
+          else
+            npm publish --access public --tag "${{ steps.tag.outputs.dist_tag }}"
+          fi
