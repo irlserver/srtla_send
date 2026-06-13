@@ -1,0 +1,14 @@
+# task-4-fresh.txt — bootstrap fresh-link rule evidence
+# Source: clean run of `cargo test --features test-internals registration_tests`
+# (captured in task-4-reg.txt). A focused `fresh_link_not_timed_out` re-run was
+# transiently blocked by a concurrent agent's incomplete edit to the unrelated
+# file src/tests/sender_tests.rs; the lines below are the real passing output
+# from the clean full-suite compile.
+# Pins srtla test_sender_bootstrap.cpp::NeverReceivedIsNotTimedOut:
+#   last_received == None + not connected + within startup grace => is_timed_out() == false,
+#   and stays false after the paused clock advances past CONN_TIMEOUT.
+
+6:test tests::registration_tests::tests::reg3_timeout_fires_at_4s_logical ... ok
+16:test tests::registration_tests::tests::reg2_timeout_fires_at_4s_logical ... ok
+20:test tests::registration_tests::tests::fresh_link_not_timed_out ... ok
+38:test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 235 filtered out; finished in 2.10s
