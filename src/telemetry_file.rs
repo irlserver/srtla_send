@@ -560,4 +560,155 @@ mod tests {
         assert!(!path.exists(), "live file must be gone");
         assert!(!tmp_path(&path).exists(), "temp sibling must be gone");
     }
+
+    // ---- ADR-001 contract pins (T10) -------------------------------------
+    //
+    // These three tests pin the producer side of the ADR-001 stats-file
+    // contract in one place, named to mirror the task spec: full JSON shape +
+    // the mandated x8 bitrate, the "running but idle" empty-connections case,
+    // and the temp-sibling -> rename atomic publish. They consolidate the
+    // assertions the focused tests above make piecemeal.
+
+    #[test]
+    fn telemetry_json_shape_and_bitrate_x8() {
+        // One snapshot with the ADR-001 canonical 312500 B/s link asserts the
+        // whole shape at once: the schema tag, every field the frozen
+        // `@ceralive/srtla` Zod reader requires, the x8 bitrate, and the
+        // single-line invariant the atomic publish depends on.
+        let json = build_telemetry_json(GOLDEN_LAST_UPDATED_MS, &[sample_conn()]);
+
+        assert!(json.starts_with("{\"schema_version\":1,"), "got {json}");
+        assert!(!json.contains("\"schema_version\":\"1\""));
+
+        // 312500 B/s x 8 == 2_500_000 bps; the raw bytes/s must never leak.
+        assert!(json.contains("\"bitrate_bps\":2500000"), "got {json}");
+        assert!(!json.contains("312500"), "raw bytes/s leaked: {json}");
+
+        for needle in [
+            "\"last_updated_ms\":1749556546000",
+            "\"conn_id\":\"0\"",
+            "\"rtt_ms\":42",
+            "\"nak_count\":3",
+            "\"weight_percent\":85",
+            "\"window\":8192",
+            "\"in_flight\":100",
+            "\"bitrate_bps\":2500000",
+        ] {
+            assert!(json.contains(needle), "missing {needle} in {json}");
+        }
+
+        assert!(!json.contains('\n'), "telemetry must be one line: {json}");
+    }
+
+    #[test]
+    fn telemetry_idle_connections_empty() {
+        // "running but idle": a live process with no active uplinks still
+        // serializes an empty array (distinct from an absent file), keeping the
+        // schema tag and timestamp so a reader can tell idle from stale.
+        let json = build_telemetry_json(GOLDEN_LAST_UPDATED_MS, &[]);
+        assert!(json.contains("\"connections\":[]"), "got {json}");
+        assert!(json.contains("\"schema_version\":1"), "got {json}");
+        assert!(
+            json.contains("\"last_updated_ms\":1749556546000"),
+            "got {json}"
+        );
+        assert!(!json.contains('\n'), "telemetry must be one line: {json}");
+    }
+
+    #[test]
+    fn telemetry_atomic_publish() {
+        // The publish path is temp-sibling -> rename: the full document lands at
+        // `<path>.tmp` first, then a single rename(2) moves it onto the live
+        // path so a concurrent reader only ever sees a complete file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stats.json");
+        let tmp = tmp_path(&path);
+        let json = build_telemetry_json(GOLDEN_LAST_UPDATED_MS, &[sample_conn()]);
+
+        assert_eq!(tmp.file_name().unwrap(), "stats.json.tmp");
+
+        write_tmp(&tmp, &json).unwrap();
+        assert!(tmp.exists(), "temp sibling must exist before the rename");
+        assert_eq!(fs::read_to_string(&tmp).unwrap(), json);
+        assert!(!path.exists(), "live path must not exist until the rename");
+
+        fs::rename(&tmp, &path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), json);
+        assert!(
+            !tmp.exists(),
+            "the `.tmp` sibling is consumed by the rename"
+        );
+
+        write_atomic(&path, &json).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), json);
+        assert!(!tmp.exists(), "write_atomic must not leave a temp sibling");
+    }
+
+    // ---- Golden fixture: round-trip source for the T21 binding tests ------
+
+    /// Fixed publish timestamp baked into the committed golden, matching the
+    /// `@ceralive/srtla` reference fixture so both bindings round-trip the same ms.
+    const GOLDEN_LAST_UPDATED_MS: u64 = 1_749_556_546_000;
+
+    /// The exact connection set serialized into `tests/fixtures/telemetry-golden.json`.
+    /// conn 0 is the ADR-001 canonical 312500 B/s -> 2_500_000 bps example; conn 1
+    /// mirrors the `@ceralive/srtla` golden's second link (150000 B/s -> 1_200_000).
+    fn golden_conns() -> Vec<TelemetryConn> {
+        vec![
+            sample_conn(),
+            TelemetryConn {
+                conn_id: 1,
+                rtt_ms: 73,
+                nak_count: 11,
+                weight_percent: 55,
+                window: 4096,
+                in_flight: 240,
+                bitrate_bytes_per_sec: 150_000,
+            },
+        ]
+    }
+
+    /// Absolute path to the committed golden, anchored at the crate root so the
+    /// test never reaches above its own checkout (Rule D).
+    fn golden_path() -> PathBuf {
+        PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/telemetry-golden.json"
+        ))
+    }
+
+    #[test]
+    fn golden_fixture_matches_producer_output() {
+        // The committed fixture is the byte-for-byte producer document
+        // (newline-free, single line) the `@ceralive/srtla-send` binding
+        // round-trips in T21. Regenerate deliberately with UPDATE_GOLDEN=1 when
+        // the schema changes — a silent drift fails this assertion.
+        let json = build_telemetry_json(GOLDEN_LAST_UPDATED_MS, &golden_conns());
+        let path = golden_path();
+
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &json).unwrap();
+        }
+
+        let committed = fs::read_to_string(&path)
+            .expect("golden fixture missing; regenerate with UPDATE_GOLDEN=1");
+        assert_eq!(
+            committed, json,
+            "producer output drifted from the committed golden fixture"
+        );
+        // The on-disk fixture must itself be the single-line producer document.
+        assert!(
+            !committed.contains('\n'),
+            "golden fixture must be newline-free"
+        );
+        assert!(
+            committed.contains("\"schema_version\":1"),
+            "got {committed}"
+        );
+        assert!(
+            committed.contains("\"bitrate_bps\":2500000"),
+            "got {committed}"
+        );
+    }
 }

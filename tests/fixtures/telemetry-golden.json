@@ -1,0 +1,1 @@
+{"schema_version":1,"last_updated_ms":1749556546000,"connections":[{"conn_id":"0","rtt_ms":42,"nak_count":3,"weight_percent":85,"window":8192,"in_flight":100,"bitrate_bps":2500000},{"conn_id":"1","rtt_ms":73,"nak_count":11,"weight_percent":55,"window":4096,"in_flight":240,"bitrate_bps":1200000}]}
