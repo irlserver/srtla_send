@@ -1,0 +1,52 @@
+# Task 14: Dead Code Analysis for srtla-send-rs Protocol Constants
+
+## Analysis Summary
+
+### SRTLA_TYPE_REG_NAK (0x9212)
+- **Status:** Retained with targeted allow
+- **Justification:** Reference constant — receiver never sends REG_NAK to sender per srtla protocol
+- **Evidence:** Verified in srtla/src/protocol/srtla_handler.cpp:
+  - Receiver sends: REG_ERR (0x9210), REG_NGP (0x9211), REG3 (0x9202), KEEPALIVE (0x9000)
+  - REG_NAK is defined in srtla/src/common.h but never used in sender/receiver logic
+- **Decision:** Keep as protocol reference constant with justified allow
+
+### SRT_TYPE_HANDSHAKE (0x8000)
+- **Status:** Retained with targeted allow
+- **Justification:** Used in integration_tests.rs for protocol validation
+- **Evidence:** integration_tests.rs line 99: `assert!((SRT_TYPE_HANDSHAKE & 0xf000) == 0x8000);`
+- **Decision:** Keep; test-only usage is valid for protocol completeness
+
+### SRT_TYPE_SHUTDOWN (0x8005)
+- **Status:** Retained with targeted allow
+- **Justification:** Used in integration_tests.rs for protocol validation
+- **Evidence:** integration_tests.rs line 102: `assert!((SRT_TYPE_SHUTDOWN & 0xf000) == 0x8000);`
+- **Decision:** Keep; test-only usage is valid for protocol completeness
+
+### SRT_TYPE_DATA (0x0000)
+- **Status:** Retained with targeted allow
+- **Justification:** Used in integration_tests.rs for protocol validation
+- **Evidence:** integration_tests.rs line 105: `assert_eq!(SRT_TYPE_DATA, 0x0000);`
+- **Decision:** Keep; test-only usage is valid for protocol completeness
+
+### SRTLA_TYPE_REG3_LEN (2 bytes)
+- **Status:** Retained with targeted allow
+- **Justification:** Used in integration_tests.rs for protocol validation
+- **Evidence:** Packet size constant used in test assertions
+- **Decision:** Keep; test-only usage is valid for protocol completeness
+
+## Blanket Allow Removal
+
+All blanket `#[allow(dead_code)]` annotations have been replaced with targeted, per-item allows with inline comments explaining the justification.
+
+## Build Status
+
+- `cargo build --release`: ✓ PASS
+- `cargo clippy --lib -- -D warnings`: ✓ PASS (no dead_code warnings)
+- No dead_code warnings remain in the codebase
+
+## Conclusion
+
+All dead_code suppressions are now explicitly justified. Each constant is either:
+1. Used in production code (SRT_TYPE_ACK, SRT_TYPE_NAK)
+2. Used in test code with protocol validation purpose (HANDSHAKE, SHUTDOWN, DATA, REG3_LEN)
+3. Retained as a reference constant with documented protocol rationale (REG_NAK)

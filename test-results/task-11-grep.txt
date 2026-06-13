@@ -1,0 +1,8 @@
+# T11 evidence: no thread::sleep / real-time waits remain in converted suites
+# command: grep -rn 'thread::sleep\|sleep_ms\|tokio::time::sleep' src/tests/connection_tests.rs src/tests/registration_tests.rs
+# generated: 2026-06-13T17:20:09Z
+---
+---
+RESULT: CLEAN (0 matches, grep exit=1)
+# paused-clock isolation (G7):
+830:mod paused_clock_tests {

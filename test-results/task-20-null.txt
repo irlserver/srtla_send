@@ -1,0 +1,8 @@
+readTelemetry null-path evidence (never throws -> returns null):
+path helper: /tmp/srtla-send-stats-5000.json
+
+absent file                    -> null
+malformed JSON                 -> null
+schema_version:2 (mismatch)    -> null
+missing schema_version         -> null
+missing window+in_flight       -> null

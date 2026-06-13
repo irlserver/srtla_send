@@ -1,0 +1,53 @@
+### Task 1 — fake-clock paused-time tests (deterministic, no real sleep)
+### cmd: cargo test --features test-internals clock -- --report-time -Z unstable-options --nocapture
+
+     Running unittests src/lib.rs (target/debug/deps/srtla_send-4f42dda8460ff0fa)
+
+running 2 tests
+test tests::connection_tests::tests::clock_frozen_no_timeout ... ok <0.000s>
+test tests::connection_tests::tests::fake_clock_timeout ... ok <0.000s>
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 238 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/srtla_send-9d8a530cf821747a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 117 filtered out; finished in 0.00s
+
+     Running tests/netns_basic.rs (target/debug/deps/netns_basic-e6c90b094e57e740)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/netns_failure.rs (target/debug/deps/netns_failure-c5279dc88999d32f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/netns_impairment.rs (target/debug/deps/netns_impairment-b623ddc72367f473)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/netns_pr19_parity.rs (target/debug/deps/netns_pr19_parity-5c196b79dafd5e2a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/netns_scenario.rs (target/debug/deps/netns_scenario-f282647f043850cb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/signal_parity.rs (target/debug/deps/signal_parity-7bebb94a85262546)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+

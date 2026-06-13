@@ -1,0 +1,30 @@
+=== Task 18: @ceralive/srtla-send scaffold ===
+date: 2026-06-13T16:50:31Z
+
+--- tree (tracked sources, excl node_modules/dist) ---
+./bun.lock
+./.gitignore
+./.npmrc
+./package.json
+./src/index.ts
+./src/sender/index.ts
+./src/telemetry/index.ts
+./tsconfig.json
+
+--- package name / exports / publishConfig ---
+  "name": "@ceralive/srtla-send",
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    "./sender": {
+      "import": "./dist/sender/index.js",
+      "types": "./dist/sender/index.d.ts"
+    "./telemetry": {
+      "import": "./dist/telemetry/index.js",
+      "types": "./dist/telemetry/index.d.ts"
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+
+--- bun install + bun tsc --noEmit ---
+bun install: OK
+bun tsc --noEmit: OK (empty modules compile)

@@ -1,0 +1,10 @@
+bun test v1.3.14 (0d9b296a)
+
+src/sender/index.test.ts:
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_positional_order [2.48ms]
+(pass) buildSrtlaSendArgs > buildSrtlaSendArgs_minimal [0.03ms]
+
+ 2 pass
+ 0 fail
+ 2 expect() calls
+Ran 2 tests across 1 file. [29.00ms]

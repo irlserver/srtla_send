@@ -1,0 +1,14 @@
+# T19 sender module exports — @ceralive/srtla-send/sender
+# file: src/sender/index.ts
+
+13:export const srtlaSendOptionsSchema = z.object({
+24:export type SrtlaSendOptionsInput = z.input<typeof srtlaSendOptionsSchema>;
+25:export type SrtlaSendOptions = z.output<typeof srtlaSendOptionsSchema>;
+30:export function buildSrtlaSendArgs(input: SrtlaSendOptionsInput): Array<string> {
+50:export function getSrtlaSendExec(execPath?: string): string {
+72:export function spawnSrtlaSend(options: SrtlaSendOptionsInput): Bun.Subprocess {
+79:export function sendSrtlaSendHup(): void {
+84:export function isSrtlaSendRunning(): boolean {
+
+# Re-export chain (root barrel):
+1:export * from "./sender/index.js";

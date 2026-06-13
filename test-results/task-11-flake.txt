@@ -1,0 +1,26 @@
+# T11 evidence: 20x repeat of converted timing suites (paused-clock / deterministic backdating)
+# command: cargo test --features test-internals -- connection_tests registration_tests
+# generated: 2026-06-13T17:21:08Z
+---
+run 1: PASS (62 passed)
+run 2: PASS (62 passed)
+run 3: PASS (62 passed)
+run 4: PASS (62 passed)
+run 5: PASS (62 passed)
+run 6: PASS (62 passed)
+run 7: PASS (62 passed)
+run 8: PASS (62 passed)
+run 9: PASS (62 passed)
+run 10: PASS (62 passed)
+run 11: PASS (62 passed)
+run 12: PASS (62 passed)
+run 13: PASS (62 passed)
+run 14: PASS (62 passed)
+run 15: PASS (62 passed)
+run 16: PASS (62 passed)
+run 17: PASS (62 passed)
+run 18: PASS (62 passed)
+run 19: PASS (62 passed)
+run 20: PASS (62 passed)
+---
+SUMMARY: 20 runs, 0 flake(s)

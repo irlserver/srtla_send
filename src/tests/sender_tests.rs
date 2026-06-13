@@ -771,7 +771,11 @@ mod tests {
                 &mut seq_tracker,
             ));
 
-            assert_eq!(connections.len(), 2, "both uplinks must survive the reorder");
+            assert_eq!(
+                connections.len(),
+                2,
+                "both uplinks must survive the reorder"
+            );
 
             assert_eq!(
                 connections[0].conn_id, cid_b,
@@ -1091,7 +1095,10 @@ mod tests {
         // First sighting inside the window: counted once on the sending uplink.
         let first = attribute_nak(&mut connections, &seq_tracker, seq, base);
         assert_eq!(first, Some(0));
-        assert_eq!(connections[0].congestion.nak_count, 1, "first NAK is counted");
+        assert_eq!(
+            connections[0].congestion.nak_count, 1,
+            "first NAK is counted"
+        );
         assert_eq!(
             connections[0].in_flight_packets, 0,
             "first NAK clears the in-flight packet"
@@ -1114,7 +1121,10 @@ mod tests {
         // packet_log no longer holds the sequence → not re-counted, and the
         // short-circuit keeps the other uplink clean.
         let dup = attribute_nak(&mut connections, &seq_tracker, seq, within);
-        assert_eq!(dup, None, "the duplicate NAK is a no-op (single accounting)");
+        assert_eq!(
+            dup, None,
+            "the duplicate NAK is a no-op (single accounting)"
+        );
         assert_eq!(
             connections[0].congestion.nak_count, 1,
             "duplicate NAK within the window is NOT double-counted"

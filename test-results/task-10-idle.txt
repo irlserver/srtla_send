@@ -1,0 +1,20 @@
+# T10 — 'running but idle' connections:[] + atomic publish + golden round-trip
+# Isolated worktree at HEAD f3df62c; Date: 2026-06-13T17:04:23Z
+
+=== the four T10 contract-pin tests (verbose, --nocapture) ===
+   Compiling srtla_send v3.0.0 (/tmp/opencode/t10-verify)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.42s
+     Running unittests src/lib.rs (target/debug/deps/srtla_send-eb1e202a7824b38d)
+
+running 4 tests
+test telemetry_file::tests::telemetry_idle_connections_empty ... ok
+test telemetry_file::tests::telemetry_json_shape_and_bitrate_x8 ... ok
+test telemetry_file::tests::golden_fixture_matches_producer_output ... ok
+test telemetry_file::tests::telemetry_atomic_publish ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 245 filtered out; finished in 0.00s
+
+
+=== committed golden fixture (must be one newline-free line) ===
+{"schema_version":1,"last_updated_ms":1749556546000,"connections":[{"conn_id":"0","rtt_ms":42,"nak_count":3,"weight_percent":85,"window":8192,"in_flight":100,"bitrate_bps":2500000},{"conn_id":"1","rtt_ms":73,"nak_count":11,"weight_percent":55,"window":4096,"in_flight":240,"bitrate_bps":1200000}]}
+lines=0 bytes=297

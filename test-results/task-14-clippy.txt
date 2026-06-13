@@ -1,0 +1,304 @@
+    Checking srtla_send v3.0.0 (/mnt/development/ceralive/srtla-send-rs)
+error: this assertion has a constant value
+   --> src/tests/sender_tests.rs:547:9
+    |
+547 |         assert!(SEQ_TRACKING_SIZE > 0);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+    = note: `-D clippy::assertions-on-constants` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::assertions_on_constants)]`
+
+error: this assertion has a constant value
+   --> src/tests/sender_tests.rs:548:9
+    |
+548 |         assert!(GLOBAL_TIMEOUT_MS > 0);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/sender_tests.rs:551:9
+    |
+551 |         assert!(SEQ_TRACKING_SIZE >= 1000);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/sender_tests.rs:553:9
+    |
+553 |         assert!(GLOBAL_TIMEOUT_MS >= 5000);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/protocol_tests.rs:260:9
+    |
+260 |         assert!(WINDOW_MIN < WINDOW_DEF);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/protocol_tests.rs:261:9
+    |
+261 |         assert!(WINDOW_DEF < WINDOW_MAX);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/protocol_tests.rs:262:9
+    |
+262 |         assert!(WINDOW_INCR > 0);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/protocol_tests.rs:263:9
+    |
+263 |         assert!(WINDOW_DECR > 0);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/protocol_tests.rs:264:9
+    |
+264 |         assert!(WINDOW_MULT > 0);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+  --> src/tests/integration_tests.rs:92:5
+   |
+92 |     assert!((SRTLA_TYPE_KEEPALIVE & 0xf000) == 0x9000);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider moving this into a const block: `const { assert!(..) }`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+  --> src/tests/integration_tests.rs:93:5
+   |
+93 |     assert!((SRTLA_TYPE_ACK & 0xf000) == 0x9000);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider moving this into a const block: `const { assert!(..) }`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+  --> src/tests/integration_tests.rs:94:5
+   |
+94 |     assert!((SRTLA_TYPE_REG1 & 0xf000) == 0x9000);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider moving this into a const block: `const { assert!(..) }`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+  --> src/tests/integration_tests.rs:95:5
+   |
+95 |     assert!((SRTLA_TYPE_REG2 & 0xf000) == 0x9000);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider moving this into a const block: `const { assert!(..) }`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+  --> src/tests/integration_tests.rs:96:5
+   |
+96 |     assert!((SRTLA_TYPE_REG3 & 0xf000) == 0x9000);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider moving this into a const block: `const { assert!(..) }`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+  --> src/tests/integration_tests.rs:99:5
+   |
+99 |     assert!((SRT_TYPE_HANDSHAKE & 0xf000) == 0x8000);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider moving this into a const block: `const { assert!(..) }`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:100:5
+    |
+100 |     assert!((SRT_TYPE_ACK & 0xf000) == 0x8000);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:101:5
+    |
+101 |     assert!((SRT_TYPE_NAK & 0xf000) == 0x8000);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:102:5
+    |
+102 |     assert!((SRT_TYPE_SHUTDOWN & 0xf000) == 0x8000);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:116:5
+    |
+116 |     assert!(WINDOW_MIN > 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:117:5
+    |
+117 |     assert!(WINDOW_DEF > WINDOW_MIN);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:118:5
+    |
+118 |     assert!(WINDOW_MAX > WINDOW_DEF);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:119:5
+    |
+119 |     assert!(WINDOW_MULT > 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:120:5
+    |
+120 |     assert!(WINDOW_INCR > 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:121:5
+    |
+121 |     assert!(WINDOW_DECR > 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:124:5
+    |
+124 |     assert!(CONN_TIMEOUT > 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:125:5
+    |
+125 |     assert!(REG2_TIMEOUT > 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:126:5
+    |
+126 |     assert!(REG3_TIMEOUT > 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:127:5
+    |
+127 |     assert!(IDLE_TIME > 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: the loop variable `i` is only used to index `max_keepalive`
+   --> src/tests/integration_tests.rs:178:14
+    |
+178 |     for i in 2..10 {
+    |              ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_range_loop
+    = note: `-D clippy::needless-range-loop` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_range_loop)]`
+help: consider using an iterator
+    |
+178 -     for i in 2..10 {
+178 +     for <item> in max_keepalive.iter_mut().take(10).skip(2) {
+    |
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:252:5
+    |
+252 | /     assert!(
+253 | |         SRTLA_ID_LEN >= 32,
+254 | |         "ID should be at least 32 bytes for security"
+255 | |     );
+    | |_____^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: this assertion has a constant value
+   --> src/tests/integration_tests.rs:256:5
+    |
+256 |     assert!(SRTLA_ID_LEN <= 1024, "ID should not be excessively large");
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider moving this into a const block: `const { assert!(..) }`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+
+error: useless use of `vec!`
+  --> src/sender/selection/iods.rs:67:24
+   |
+67 |         let arrivals = vec![0.1, 0.05, 0.2, 0.15];
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: you can use an array directly: `[0.1, 0.05, 0.2, 0.15]`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#useless_vec
+   = note: `-D clippy::useless-vec` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::useless_vec)]`
+
+error: could not compile `srtla_send` (lib test) due to 32 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `srtla_send` (bin "srtla_send" test) due to 1 previous error

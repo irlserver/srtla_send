@@ -1,0 +1,20 @@
+bun test v1.3.14 (0d9b296a)
+
+src/telemetry/index.test.ts:
+(pass) telemetrySchema > readTelemetry_valid_snapshot_parses [3.54ms]
+(pass) telemetrySchema > requires window and in_flight (frozen contract) [0.40ms]
+(pass) readTelemetry > readTelemetry_schema_version_2_rejected [0.19ms]
+(pass) readTelemetry > missing schema_version is rejected (no silent strip) [0.51ms]
+(pass) readTelemetry > readTelemetry_absent_file_returns_null [0.09ms]
+(pass) readTelemetry > invalid JSON returns null (no throw) [0.51ms]
+(pass) readTelemetry > idle snapshot (connections: []) returns the object, not null [0.14ms]
+(pass) readTelemetry > old-but-valid snapshot still parses (staleness is the watcher's concern) [0.10ms]
+(pass) watchTelemetry > reports stale=true for an absent file [51.75ms]
+(pass) watchTelemetry > reports stale=false for a fresh snapshot, stale=true past the threshold [43.82ms]
+(pass) watchTelemetry > stop() halts further callbacks [132.98ms]
+(pass) senderTelemetryPath > builds the well-known path for a listen port [0.39ms]
+
+ 12 pass
+ 0 fail
+ 27 expect() calls
+Ran 12 tests across 1 file. [256.00ms]
