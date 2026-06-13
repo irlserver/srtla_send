@@ -11,6 +11,7 @@ This application is experimental. Be prepared to troubleshoot it and experiment 
 
 This Rust implementation builds upon several open source projects and ideas:
 
+- **[irlserver/srtla_send](https://github.com/irlserver/srtla_send)** - This project is a fork of irlserver/srtla_send (fork point `80cd0c4`). Thank you to the irlserver team for the original implementation.
 - **[Moblin](https://github.com/eerimoq/moblin)** - Inspired by ideas and algorithms
 - **[Original SRTLA](https://github.com/BELABOX/srtla)** - The foundational SRTLA protocol and reference implementation by Belabox
 
@@ -148,8 +149,6 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 
 - `--verbose`: Enable verbose (debug-level) logging
 - `--dry-run`: Validate the IP list and resolve the receiver, print them, then exit without binding any socket (non-zero exit if the IP list is unusable)
-- `--stats-file <PATH>`: Write per-uplink telemetry JSON to this path (flag accepted; the telemetry sink is not yet wired)
-- `--stats-file-interval <MS>`: Telemetry write cadence in milliseconds (default: 1000)
 - `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default), `rtt-threshold`
 - `--no-quality`: Disable quality scoring (enhanced/rtt-threshold only)
 - `--exploration`: Enable connection exploration (enhanced only)
