@@ -1,0 +1,11 @@
+# Only dist/ + package metadata ship to GitHub Packages (mirrors package.json
+# "files": ["dist"]). This complement keeps source, tests, build config, and
+# repo scaffolding out of the @ceralive/srtla-send tarball (G6).
+src/
+*.test.ts
+tests/
+node_modules/
+tsconfig.json
+bun.lock
+.npmrc
+.gitignore

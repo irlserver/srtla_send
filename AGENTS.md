@@ -171,10 +171,19 @@ The `@ceralive/srtla-send` TS binding (`bindings/typescript/`) has its own gate:
 cd bindings/typescript && bun install && bun tsc --noEmit && bun test
 ```
 
+`tsc --noEmit` typechecks **everything** via `tsconfig.json` (tests included). The
+shipped build, however, emits via `tsconfig.build.json` (`extends tsconfig.json`,
+`exclude: ["src/**/*.test.ts"]`) so compiled tests never land in `dist/` — the
+published tarball is `dist/` non-test output + `package.json` only. Control tarball
+contents at the **build-emit** layer, not `.npmignore`: with `files: ["dist"]` an
+allowlist, `.npmignore`'s test-source pattern can't strip already-compiled
+`dist/**/*.test.js`.
+
 ## CI / PACKAGING
 
-Two workflows; both build on the **pinned nightly** (`setup-rust-toolchain` with no
-`toolchain` input reads `rust-toolchain.toml`):
+Three workflows. The two Rust `.deb` workflows build on the **pinned nightly**
+(`setup-rust-toolchain` with no `toolchain` input reads `rust-toolchain.toml`); the
+binding-publish workflow is Node/Bun and shares no triggers with them:
 
 - **`ci.yml`** (push/PR) — the gate (`fmt`, `clippy -D warnings` lib+bin, `check`,
   the full test fan-out, `cargo audit`) **plus** a `build-deb` matrix that
@@ -185,6 +194,18 @@ Two workflows; both build on the **pinned nightly** (`setup-rust-toolchain` with
 - **`release.yml`** (tag push `v*`) — rebuilds both arches, packages, runs the glob
   gate, and attaches both `.deb`s + `.sha256`s to the GitHub release for the tag.
   No crates.io publish; no scheduled upstream-sync.
+- **`publish-bindings.yml`** (tag push **`bindings/v*`**) — publishes
+  `@ceralive/srtla-send` to GitHub Packages (`@ceralive` scope,
+  `registry-url: https://npm.pkg.github.com`, auth via `NODE_AUTH_TOKEN ←
+  secrets.GITHUB_TOKEN`). Gated by `bun tsc --noEmit && bun test` then `bun run build`
+  before `npm publish`. **Binding version source:** the binding ships on its **own**
+  tag namespace `bindings/vX.Y.Z`, deliberately distinct from the Rust crate's `v*`
+  release tags — the two namespaces keep the `.deb` release and the binding publish
+  fully decoupled (no shared trigger). The published version **is** the committed
+  `bindings/typescript/package.json` `version`; the tag does not mint it. A guard step
+  refuses to publish unless the tag's `X.Y.Z` equals `package.json` `version`, so a tag
+  can never ship a stale/mismatched version. Cut a binding release: bump `package.json`
+  `version` → commit → `git tag bindings/vX.Y.Z && git push --tags`.
 
 **`ci/build-deb.sh` is the single source of truth** for the `.deb` and is called by both
 workflows. It pins the contract the device image depends on:

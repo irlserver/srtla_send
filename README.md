@@ -132,6 +132,17 @@ package still ships the C `srtla_send`. Pushing a `v*` tag runs
 `.github/workflows/release.yml`, which rebuilds both architectures and attaches the
 `.deb`s to the GitHub release. See `AGENTS.md` → CI / PACKAGING for the full contract.
 
+### TypeScript binding package
+
+The `bindings/typescript/` helper publishes to GitHub Packages as
+`@ceralive/srtla-send` (`@ceralive` scope) via `.github/workflows/publish-bindings.yml`.
+It is a **separate** release track from the Rust `.deb`s: pushing a `bindings/vX.Y.Z`
+tag runs the typecheck + test gate, builds `dist/`, and `npm publish`es the package.
+The published version is the committed `bindings/typescript/package.json` `version`
+(the workflow refuses to publish if the tag's `X.Y.Z` doesn't match it). To cut a
+binding release: bump `package.json` `version`, commit, then
+`git tag bindings/vX.Y.Z && git push --tags`. See `AGENTS.md` → CI / PACKAGING.
+
 ## Usage
 
 ```bash

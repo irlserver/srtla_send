@@ -1,0 +1,78 @@
+name: Publish bindings
+
+# Publishes the pure-TS sender binding @ceralive/srtla-send to GitHub Packages.
+#
+# VERSION SOURCE (decision): the binding versions on its OWN tag namespace,
+# `bindings/vX.Y.Z`, deliberately distinct from the Rust crate's `vX.Y.Z`
+# release tags (release.yml). The binding is a thin registry-distributed helper
+# over the binary, not the binary itself, so it ships on its own cadence. The
+# published version is the committed `bindings/typescript/package.json` "version";
+# the tag does not mint it. The guard below refuses to publish unless the tag's
+# X.Y.Z matches package.json exactly, so a tag can never publish a stale or
+# mismatched version. To cut a binding release: bump package.json "version",
+# commit, then `git tag bindings/vX.Y.Z && git push --tags`.
+#
+# This workflow is intentionally separate from ci.yml / release.yml (Rust .deb)
+# and shares no triggers with them — `v*` tags drive the .deb release untouched,
+# `bindings/v*` tags drive this one.
+on:
+  push:
+    tags:
+      - "bindings/v*"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish @ceralive/srtla-send
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bindings/typescript
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # registry-url + scope wire npm to GitHub Packages and inject the
+      # @ceralive:registry mapping; auth is read from NODE_AUTH_TOKEN at publish.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@ceralive"
+
+      - name: Install bun
+        run: npm install -g bun
+
+      - name: Install dependencies
+        run: bun install
+
+      # Refuse to publish unless package.json "version" == the tag's X.Y.Z, so a
+      # `bindings/v*` tag can only ship the version committed in the repo.
+      - name: Verify package version matches tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#bindings/v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          echo "tag=${tag_version} package.json=${pkg_version}"
+          if [ "${tag_version}" != "${pkg_version}" ]; then
+            echo "::error::tag bindings/v${tag_version} does not match package.json version ${pkg_version}"
+            exit 1
+          fi
+
+      # Publish gate — same gate as the binding's local dev loop (AGENTS.md).
+      - name: Typecheck
+        run: bun tsc --noEmit
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+      - name: Publish to GitHub Packages
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
