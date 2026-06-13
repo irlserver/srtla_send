@@ -23,9 +23,15 @@ RTT). On the device it is driven by CeraUI and feeds the bonded path into
 
 **Relationship to `srtla/`:** this is the **sender** engine (Rust). The existing
 `srtla/` repo holds the C `srtla_send`/`srtla_rec` pair plus the bonding receiver and
-the **TypeScript bindings** (`@ceralive/srtla`, consumed by CeraUI via the sibling
-`link:`). **The TS bindings stay in `srtla/`.** This repo ships a binary only — it has
-**no `bindings/` directory** and must never grow one.
+its own **TypeScript bindings** (`@ceralive/srtla`, consumed by CeraUI via the sibling
+`link:`). This repo additionally ships its **own** pure-TS sender binding,
+`@ceralive/srtla-send`, under `bindings/typescript/` — published to GitHub Packages
+(`@ceralive` scope) and consumed **registry-only**: **no sibling `link:`, no `.tgz`
+vendoring**. It is a thin, registry-distributed helper layer over this repo's binary
+(args/validation/telemetry reader); the binary itself remains the primary artifact.
+The `@ceralive/srtla-send` sender/telemetry exports mirror `@ceralive/srtla`'s
+`./sender` + `./telemetry` subpaths and must not import or share types with
+`@ceralive/cerastream`.
 
 ## UPSTREAM RELATIONSHIP
 
@@ -148,6 +154,12 @@ cargo test --features test-internals # upstream's full-coverage suite
 The whole sender test corpus runs in-process over loopback UDP — **no root / netns /
 CAP_NET_ADMIN required** (0 tests are gated/ignored).
 
+The `@ceralive/srtla-send` TS binding (`bindings/typescript/`) has its own gate:
+
+```bash
+cd bindings/typescript && bun install && bun tsc --noEmit && bun test
+```
+
 ## CI / PACKAGING
 
 Two workflows; both build on the **pinned nightly** (`setup-rust-toolchain` with no
@@ -209,8 +221,12 @@ reference (modes, runtime commands, tuning constants).
 
 ## ANTI-PATTERNS
 
-- **No `bindings/` directory.** TS bindings live in `srtla/` (`@ceralive/srtla`). This
-  repo is a binary; do not add a bindings tree or a sibling `link:` for it.
+- **Bindings are registry-only.** This repo ships its own pure-TS sender binding
+  `@ceralive/srtla-send` under `bindings/typescript/` (GitHub Packages, `@ceralive`
+  scope). It is consumed **registry-only** — **never add a sibling `link:` for it and
+  never vendor a `.tgz`** (that is the `srtla/` → CeraUI pattern, not this one).
+  `@ceralive/srtla` (the C-pair bindings) still lives in `srtla/`; do not duplicate it
+  here.
 - **No auto-sync with upstream.** Merges are manual + compat-gated (see policy above).
 - **Don't unpin / silently bump the toolchain.** The exact nightly is load-bearing for a
   reproducible device build.

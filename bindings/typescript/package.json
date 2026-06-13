@@ -1,0 +1,49 @@
+{
+  "name": "@ceralive/srtla-send",
+  "version": "1.0.0",
+  "description": "Type-safe helpers for the srtla-send-rs sender (args, validation, telemetry reader).",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./sender": {
+      "import": "./dist/sender/index.js",
+      "types": "./dist/sender/index.d.ts"
+    },
+    "./telemetry": {
+      "import": "./dist/telemetry/index.js",
+      "types": "./dist/telemetry/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.5",
+    "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "license": "AGPL-3.0",
+  "keywords": [
+    "srtla",
+    "srt",
+    "ceralive",
+    "link-aggregation",
+    "sender",
+    "cli",
+    "bindings"
+  ]
+}
