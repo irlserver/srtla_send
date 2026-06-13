@@ -116,6 +116,19 @@ CeraUI and the device integration depend on these staying stable:
 - **Clean shutdown (`SIGTERM`/`SIGINT`, Unix):** exit `0` well within CeraUI's
   10s SIGKILL window; the `--stats-file` telemetry file (and its `.tmp` sibling)
   is unlinked so no stale snapshot outlives the process.
+- **Link-liveness timeout (`CONN_TIMEOUT = 15`, `src/protocol/constants.rs`):**
+  seconds of inbound silence before an established uplink is declared failed and
+  re-registered. It is deliberately set to **15**, matching the bonding receiver's
+  `CONN_TIMEOUT` (`srtla/src/receiver_config.h:28`) and the C sender's
+  `SENDER_CONN_TIMEOUT` (`srtla/src/sender_logic.h:66`). **Upstream irlserver ships
+  5 s** — that value was inherited verbatim at fork time and is the accidental drift
+  T12 reconciled (the receiver holds a link for 15 s while echoing keepalives, so a
+  sender that gives up at 5 s falsely re-registers and resets the window on a link
+  that is merely mid radio-stall). Real dead-link detection is unaffected — the
+  send-failure path (`sender/packet_handler.rs` → `mark_for_recovery`) and quality
+  scoring drop a dead/struggling link in ~1 s. **Do not let an upstream merge revert
+  15 → 5**; the value (and the sender == receiver relationship) is pinned by
+  `conn_timeout_value_pinned` (`src/tests/integration_tests.rs`).
 
 ## BUILD / GATE
 

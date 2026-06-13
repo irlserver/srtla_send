@@ -10,6 +10,7 @@ mod tests {
     use crate::config::{ConfigSnapshot, DynamicConfig};
     use crate::connection::SrtlaConnection;
     use crate::mode::SchedulingMode;
+    use crate::protocol::CONN_TIMEOUT;
     use crate::sender::*;
     use crate::test_helpers::create_test_connections;
     use crate::utils::now_ms;
@@ -175,8 +176,8 @@ mod tests {
 
         // Setup: Connection 0 is currently selected but becomes timed out
         connections[0].in_flight_packets = 5;
-        // Simulate timeout by setting last_received to 6 seconds ago (CONN_TIMEOUT is 5 seconds)
-        connections[0].last_received = Some(Instant::now() - Duration::from_secs(6));
+        // Simulate timeout by setting last_received past CONN_TIMEOUT
+        connections[0].last_received = Some(Instant::now() - Duration::from_secs(CONN_TIMEOUT + 1));
         connections[1].in_flight_packets = 0; // Best score
         connections[2].in_flight_packets = 10;
 

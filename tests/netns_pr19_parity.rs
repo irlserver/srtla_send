@@ -367,7 +367,7 @@ fn keepalive_cadence_approx_1s_per_conn() {
         // The sender targets 1 s (IDLE_TIME) but, like the C sender's whole-second
         // keepalive_due, the integer-second floor against the 1 s housekeeping tick
         // makes the effective cadence oscillate between ~1 s and ~2 s. What matters
-        // for NAT/telemetry liveness is that it stays well under CONN_TIMEOUT (5 s).
+        // for NAT/telemetry liveness is that it stays well under CONN_TIMEOUT (15 s).
         assert!(
             n >= 8,
             "{label}: too few keepalives captured ({n}) — link likely not established"
@@ -382,7 +382,7 @@ fn keepalive_cadence_approx_1s_per_conn() {
         );
         assert!(
             max_gap < 3.5,
-            "{label}: max keepalive gap {max_gap:.3}s too close to CONN_TIMEOUT (5s)"
+            "{label}: max keepalive gap {max_gap:.3}s too close to CONN_TIMEOUT (15s)"
         );
     }
 }

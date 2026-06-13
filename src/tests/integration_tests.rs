@@ -128,6 +128,32 @@ fn test_protocol_constants_consistency() {
 }
 
 #[test]
+fn conn_timeout_value_pinned() {
+    // Mirror of the C single source of truth (this crate cannot link the C consts):
+    //   srtla/src/receiver_config.h:28  CONN_TIMEOUT         = 15
+    //   srtla/src/sender_logic.h:66     SENDER_CONN_TIMEOUT  = 15  (== receiver)
+    const RECEIVER_CONN_TIMEOUT_SECS: u64 = 15;
+
+    assert_eq!(
+        CONN_TIMEOUT, 15,
+        "CONN_TIMEOUT is pinned at 15 s (T12). The upstream irlserver value is 5 s; if an \
+         upstream merge sets it back to 5, that is the accidental drift T12 reconciled — keep 15 \
+         to stay aligned with the receiver. See AGENTS.md PARITY CONTRACT and the WHY note on the \
+         constant."
+    );
+    assert_eq!(
+        CONN_TIMEOUT, RECEIVER_CONN_TIMEOUT_SECS,
+        "sender CONN_TIMEOUT must equal the receiver's CONN_TIMEOUT so both ends agree on link \
+         liveness; a shorter sender timeout re-registers (resets the window) a link the receiver \
+         still holds during a radio stall (false link-down)."
+    );
+    assert!(
+        CONN_TIMEOUT > IDLE_TIME,
+        "keepalive cadence (IDLE_TIME) must stay well under the liveness timeout"
+    );
+}
+
+#[test]
 fn test_large_nak_range_limit() {
     // Test that NAK parsing limits range size to prevent memory exhaustion
     let mut large_range_packet = vec![0u8; 12];
