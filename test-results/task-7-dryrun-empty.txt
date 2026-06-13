@@ -1,0 +1,28 @@
+# T7 --dry-run FAILURE evidence (fixed non-zero exit = 1)
+# date: 2026-06-13T16:59:49Z
+
+## scenario: empty IP file
+$ srtla_send 6000 127.0.0.1 5000 /tmp/t7_empty.txt --dry-run
+exit: 1 (expect 1)
+stderr: Error: no valid source IPs in /tmp/t7_empty.txt: file is empty
+
+## scenario: missing IP file
+$ srtla_send 6000 127.0.0.1 5000 /tmp/t7_missing_xyz.txt --dry-run
+exit: 1 (expect 1)
+stderr: Error: ips file not found or unreadable: /tmp/t7_missing_xyz.txt
+
+Caused by:
+    No such file or directory (os error 2)
+
+## scenario: all-invalid IP file
+$ srtla_send 6000 127.0.0.1 5000 /tmp/t7_garbage.txt --dry-run
+exit: 1 (expect 1)
+stderr: Error: no valid source IPs in /tmp/t7_garbage.txt: first invalid entry on line 1 ('garbage')
+
+## scenario: unresolvable host (.invalid TLD, RFC 6761)
+$ srtla_send 6000 nope.invalid 5000 /tmp/t7_ips.txt --dry-run
+exit: 1 (expect 1)
+stderr: Error: failed to resolve receiver address nope.invalid:5000
+
+Caused by:
+    failed to lookup address information: Name or service not known
