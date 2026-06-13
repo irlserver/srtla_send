@@ -514,6 +514,15 @@ mod tests {
             }
         }
 
+        // Ensure the writer thread has actually run before stopping it.
+        // Bounded spin-wait to prevent writer starvation under parallel load.
+        for _ in 0..100 {
+            if writes.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
         stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
 
