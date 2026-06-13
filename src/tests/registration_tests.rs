@@ -391,7 +391,9 @@ mod tests {
         reg.set_probing_state_waiting();
         reg.simulate_probe_result(0, 100);
 
-        std::thread::sleep(std::time::Duration::from_millis(2100));
+        // check_probing_complete()'s timeout branch fires when now_ms() reaches the
+        // probe deadline; force the deadline into the past instead of sleeping 2.1s.
+        reg.set_pending_timeout_at_ms(now_ms() - 1);
 
         let completed = reg.check_probing_complete();
 
@@ -406,7 +408,9 @@ mod tests {
 
         reg.set_probing_state_waiting();
 
-        std::thread::sleep(std::time::Duration::from_millis(2100));
+        // Force the probe deadline into the past (deterministic stand-in for the 2.1s
+        // sleep) so the timeout branch picks the fallback target.
+        reg.set_pending_timeout_at_ms(now_ms() - 1);
 
         let completed = reg.check_probing_complete();
 
@@ -423,10 +427,7 @@ mod tests {
         reg.simulate_probe_result(0, 0);
         reg.simulate_probe_result(1, 0);
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
         reg.handle_probe_response(0);
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
         reg.handle_probe_response(1);
 
         let completed = reg.check_probing_complete();
@@ -443,8 +444,6 @@ mod tests {
         reg.simulate_probe_result(0, 0);
 
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
         reg.process_registration_packet(0, &ngp_packet);
 
         assert!(reg.is_probing());
