@@ -721,4 +721,91 @@ mod tests {
             "Fast mode should recover when timing constraint is met"
         );
     }
+
+    /// Mirror the keepalive arm of `handle_housekeeping` (`sender/housekeeping.rs`):
+    /// the loop is gated on `needs_keepalive()`, and a send stamps
+    /// `last_keepalive_sent = Instant::now()` (see `send_keepalive`). The stamp is
+    /// the per-connection pacing that PR #19 relies on so a fast-polling
+    /// housekeeping tick can't spam probes. We replicate exactly those two lines
+    /// (predicate + stamp) and drive a paused tokio clock for determinism — no
+    /// socket I/O, no real sleeps.
+    fn poll_keepalive(conn: &mut crate::connection::SrtlaConnection) -> bool {
+        if conn.needs_keepalive() {
+            conn.last_keepalive_sent = Some(Instant::now());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// PR #19: per-connection keepalive cadence is ~1 s (IDLE_TIME). Polling the
+    /// housekeeping gate repeatedly inside the window emits nothing; advancing one
+    /// IDLE_TIME second releases exactly one keepalive.
+    #[tokio::test(start_paused = true)]
+    async fn keepalive_cadence() {
+        let mut conn = create_test_connection().await;
+
+        assert!(
+            poll_keepalive(&mut conn),
+            "first housekeeping tick must emit the initial keepalive"
+        );
+
+        let mut extra = 0;
+        for _ in 0..100 {
+            if poll_keepalive(&mut conn) {
+                extra += 1;
+            }
+        }
+        assert_eq!(extra, 0, "no keepalive spam within the {IDLE_TIME}s window");
+
+        tokio::time::advance(Duration::from_secs(IDLE_TIME)).await;
+        let mut emitted = 0;
+        for _ in 0..100 {
+            if poll_keepalive(&mut conn) {
+                emitted += 1;
+            }
+        }
+        assert_eq!(
+            emitted, 1,
+            "exactly one keepalive after {IDLE_TIME}s, even when polled repeatedly"
+        );
+    }
+
+    /// PR #19: a busy housekeeping loop polling many times per second within the
+    /// sub-IDLE_TIME window must not emit a second keepalive; the boundary crossing
+    /// then yields exactly one.
+    #[tokio::test(start_paused = true)]
+    async fn keepalive_no_spam() {
+        let mut conn = create_test_connection().await;
+
+        assert!(poll_keepalive(&mut conn), "initial keepalive expected");
+
+        // 9 * 100ms = 900ms keeps the cumulative clock strictly under IDLE_TIME (1s)
+        // while polling ~100x/s, so every poll below must be suppressed by the stamp.
+        let mut emitted = 0;
+        for _ in 0..9 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            for _ in 0..10 {
+                if poll_keepalive(&mut conn) {
+                    emitted += 1;
+                }
+            }
+        }
+        assert_eq!(
+            emitted, 0,
+            "no keepalive within the sub-{IDLE_TIME}s window despite rapid polling"
+        );
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let mut crossed = 0;
+        for _ in 0..10 {
+            if poll_keepalive(&mut conn) {
+                crossed += 1;
+            }
+        }
+        assert_eq!(
+            crossed, 1,
+            "exactly one keepalive once the {IDLE_TIME}s cadence elapses"
+        );
+    }
 }
