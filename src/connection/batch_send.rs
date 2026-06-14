@@ -107,7 +107,14 @@ impl BatchSender {
         // Send DATA packets verbatim. Unlike control frames (keepalive/REG,
         // see packet_io.rs `send_control_padded`), DATA is NEVER padded to a
         // 32-byte minimum — padding here would corrupt the SRT byte stream.
-        // TODO: On Linux, could use sendmmsg for even better performance
+        //
+        // DEFERRED: sendmmsg(2) batch send -- Linux-only syscall that submits
+        // multiple UDP datagrams in one kernel entry, reducing per-packet
+        // overhead. Not implemented: adds OS-specific unsafe code and
+        // significant complexity for marginal gain at current packet rates
+        // (~60-67 batch flushes/s at 10 Mbps). Revisit if profiling shows
+        // syscall overhead is a bottleneck on the Jetson Nano target.
+        // Tracked in openspec/changes/rust-sender-adoption/sendmmsg-deferred.md
         for packet in &self.queue {
             match socket.send(packet).await {
                 Ok(_) => sent_count += 1,

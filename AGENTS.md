@@ -17,8 +17,11 @@ RTT). On the device it is driven by CeraUI and feeds the bonded path into
 > (Task 9: `--verbose`/`--dry-run`/`--stats-file`/`--stats-file-interval`), the opt-in
 > ADR-001 telemetry sink (Task 10: `src/telemetry_file.rs`), signal/startup parity
 > (Task 11: SIGHUP reload guard, empty-start, clean SIGTERM/SIGINT), PR#19 behavior
-> verification (Task 12: keepalive cadence + jitter demotion), and CI/packaging (Task 13:
-> aarch64 + x86_64 cross-build producing pipeline-compatible `.deb`s — see CI / PACKAGING).
+> verification (Task 12: keepalive cadence + jitter demotion), CI/packaging (Task 13:
+> aarch64 + x86_64 cross-build producing pipeline-compatible `.deb`s -- see CI / PACKAGING),
+> telemetry test hardening (Task 7: `tests/telemetry_edge_cases.rs` + `tests/telemetry_fixture_parity.rs`),
+> TS binding test hardening (Task 8: `bindings/typescript/tests/telemetry-reader.test.ts`, 52 tests total),
+> and sendmmsg triage (Task 25: TODO converted to tracked DEFERRED note).
 > CeraUI integration lands in follow-up tasks.
 
 **Relationship to `srtla/`:** this is the **sender** engine (Rust). The existing
@@ -276,6 +279,65 @@ reference (modes, runtime commands, tuning constants).
   releases **standalone** in CI; the workspace parent does not exist there. The local
   orchestration scratch dir is gitignored and must appear in no other tracked file
   (Rule D).
+
+## TEST HARDENING (Tasks 7-8, 25)
+
+### Task 7 — Telemetry Rust test hardening
+
+Two new integration-level test files complement the in-module unit tests in
+`src/telemetry_file.rs`:
+
+- **`tests/telemetry_edge_cases.rs`** (9 tests): zero connections (`connections:[]`
+  idle-not-absent), active link with zero traffic (`bitrate_bps:0` present not absent),
+  very-high RTT 5000 ms verbatim, `schema_version==1` pinned (constant + JSON,
+  number-not-string, leads the document), `bitrate_bps == wire_bytes*8` on fixed
+  inputs (0, 1, 150k, 312.5k, 1M bytes/s).
+- **`tests/telemetry_fixture_parity.rs`** (3 tests): Rust golden
+  `tests/fixtures/telemetry-golden.json` vs TS-binding golden
+  `bindings/typescript/tests/fixtures/telemetry-golden.json` asserted byte-identical
+  + structural (top-level keys, `schema_version==constant`, frozen 7-key per-conn set).
+  Both anchored at `CARGO_MANIFEST_DIR` -- inside the repo, Rule D clean.
+
+Key seam: `build_telemetry_json(last_updated_ms, conns)` takes an explicit ms arg.
+Tests call it with a fixed timestamp (`1_749_556_546_000`) -- never `publish()` --
+to stay non-flaky. Do not conflate with the tokio virtual-clock seam
+(`advance_test_clock`), which is for timeout/keepalive tests only.
+
+Gate note: `cargo clippy --features test-internals` is NOT a gate command (fails on
+a pre-existing `tokio::time::advance` issue in `src/test_helpers.rs`). The real gate
+is `cargo clippy -- -D warnings` (lib+bin only, matches `ci.yml:32`).
+
+### Task 8 -- TS binding test hardening
+
+New `bindings/typescript/tests/telemetry-reader.test.ts` (24 tests, 52 total after
+adding to the existing 28):
+
+- Valid golden fixture: full ADR-001 typed shape (both uplinks, all 7 per-link fields),
+  `bitrate_bps` x8 invariant.
+- Malformed input: non-JSON, truncated, empty string, non-object, absent file, each
+  missing required field via `test.each`, wrong types, out-of-domain numerics -- all
+  return graceful `null`.
+- Schema version: `schema_version` 2/0/missing/non-numeric all return `null`.
+
+`tsconfig.json` fix: added `tests/**/*` to `include`; moved `rootDir: "src"` into
+`tsconfig.build.json` only. This ensures `bun tsc --noEmit` typechecks tests (not
+just `src/`), while `bun run build` still emits only `dist/{index,sender/index,
+telemetry/index}.js` with no test files. Tarball stays clean (`files: ["dist"]`
+allowlist + build-emit excludes `*.test.ts`).
+
+### Task 25 -- sendmmsg triage
+
+The `// TODO: On Linux, could use sendmmsg ...` in `src/connection/batch_send.rs`
+`flush()` has been converted to a tracked DEFERRED note. The note captures:
+
+- What `sendmmsg(2)` would do (multi-datagram single syscall)
+- Why it is deferred: marginal gain at current rates (~60-67 flushes/s at 10 Mbps,
+  already a ~15x reduction from raw per-packet sends), Linux-only unsafe FFI, and
+  complexity not justified without profiling evidence on the Jetson Nano target
+- When to revisit: profiling shows syscall overhead, or Tokio adds native support
+
+Full rationale in `openspec/changes/rust-sender-adoption/sendmmsg-deferred.md`.
+**Do not implement sendmmsg** without profiling evidence and a deliberate PR.
 
 ## DOCS DISCIPLINE (Rule A)
 

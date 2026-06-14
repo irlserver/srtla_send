@@ -145,6 +145,24 @@ the workflow refuses to publish if the tag's version doesn't match it). To cut a
 binding release: bump `package.json` `version`, commit, then
 `git tag bindings-vYYYY.M.P && git push --tags`. See `AGENTS.md` → CI / PACKAGING.
 
+### Test hardening (Tasks 7-8)
+
+The telemetry layer has hardened integration tests:
+
+- **`tests/telemetry_edge_cases.rs`** (9 tests): zero connections, zero-traffic active
+  links, very-high RTT, `schema_version` pinned as a number, `bitrate_bps` x8 invariant
+  across a range of wire byte rates.
+- **`tests/telemetry_fixture_parity.rs`** (3 tests): Rust golden fixture vs TS-binding
+  golden fixture asserted byte-identical, confirming the two consumers stay in sync.
+- **`bindings/typescript/tests/telemetry-reader.test.ts`** (24 tests, 52 total): valid
+  ADR-001 shape, `bitrate_bps` x8 invariant, malformed input returns `null` (non-JSON,
+  truncated, empty, non-object, absent file, missing required fields, wrong types,
+  out-of-domain numerics, schema version mismatch).
+
+The binding's `tsconfig.json` was updated to include `tests/**/*` so `bun tsc --noEmit`
+typechecks test files. `rootDir: "src"` moved to `tsconfig.build.json` only, keeping
+the published `dist/` free of compiled test output.
+
 ## Usage
 
 ```bash
