@@ -494,6 +494,13 @@ impl SrtlaConnection {
         self.phase.is_schedulable()
     }
 
+    /// Whether this link has gone silent past `CONN_TIMEOUT`.
+    ///
+    /// `last_received` is a `tokio::time::Instant`, so every `elapsed()` read below
+    /// honors `tokio::time::pause()`/`advance()`: the timeout is deterministically
+    /// testable under `#[tokio::test(start_paused = true)]` with no wall-clock sleep.
+    /// Keep these reads on `tokio::time::Instant` (never `std::time::Instant`) or the
+    /// fake-clock tests silently regress to real time.
     #[inline(always)]
     pub fn is_timed_out(&self) -> bool {
         // During initial registration (not yet connected), allow grace period

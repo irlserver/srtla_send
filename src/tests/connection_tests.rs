@@ -5,7 +5,7 @@ mod tests {
     use tokio::time::Instant;
 
     use crate::protocol::*;
-    use crate::test_helpers::create_test_connection;
+    use crate::test_helpers::{advance_test_clock, create_test_connection};
     use crate::utils::now_ms;
 
     #[tokio::test(flavor = "current_thread")]
@@ -443,6 +443,34 @@ mod tests {
         // Disconnected connection should be timed out
         conn.connected = false;
         assert!(conn.is_timed_out());
+    }
+
+    /// Deterministic timeout via the fake clock: a fresh (connected) link is not
+    /// timed out, but advancing the paused virtual clock past `CONN_TIMEOUT` flips
+    /// it. No real sleep is involved, so this completes in well under a millisecond.
+    #[tokio::test(start_paused = true)]
+    async fn fake_clock_timeout() {
+        let conn = create_test_connection().await;
+        // last_received is "now" on the paused clock: not yet timed out.
+        assert!(!conn.is_timed_out());
+
+        // Jump the virtual clock just past the timeout window.
+        advance_test_clock(Duration::from_secs(CONN_TIMEOUT + 1)).await;
+        assert!(
+            conn.is_timed_out(),
+            "advancing past CONN_TIMEOUT must mark the link timed out"
+        );
+    }
+
+    /// Frozen clock: with no time advanced, the same fresh link never times out.
+    /// Guards against an accidental wall-clock dependency creeping into is_timed_out().
+    #[tokio::test(start_paused = true)]
+    async fn clock_frozen_no_timeout() {
+        let conn = create_test_connection().await;
+        assert!(
+            !conn.is_timed_out(),
+            "a frozen clock must never trip the timeout"
+        );
     }
 
     #[test]

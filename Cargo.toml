@@ -47,7 +47,11 @@ mimalloc = { version = "0.1", default-features = false, features = [
 libc = "0.2"
 
 [features]
-test-internals = []
+# test_helpers exposes advance_test_clock(), which calls tokio::time::advance —
+# only available with tokio's test-util. Pull it here so the test-internals
+# surface compiles standalone (e.g. `cargo build --all-features`), not just under
+# `cargo test` where dev-deps happen to unify test-util in.
+test-internals = ["tokio/test-util"]
 
 [lib]
 name = "srtla_send"

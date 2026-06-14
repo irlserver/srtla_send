@@ -120,6 +120,8 @@ pub async fn handle_housekeeping(
 
     if active_connections == 0 {
         if all_failed_at.is_none() {
+            // tokio::time::Instant (not std) so the all-links-failed timeout below is
+            // driven by the same virtual clock the fake-clock tests advance.
             *all_failed_at = Some(Instant::now());
         }
 
