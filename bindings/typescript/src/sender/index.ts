@@ -2,19 +2,19 @@
 // Export names MUST match @ceralive/srtla's ./sender subpath exactly (B2 lock)
 // so the CeraUI migration is a mechanical import-source swap. Unlike the srtla
 // bindings (node:child_process), this layer is Bun-native (Bun.spawn / Bun.which).
-import { existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
-import { z } from "zod";
+import { z } from 'zod';
 
-const DEFAULT_BINARY = "srtla_send";
-const DEFAULT_SYSTEM_PATH = "/usr/bin/srtla_send";
+const DEFAULT_BINARY = 'srtla_send';
+const DEFAULT_SYSTEM_PATH = '/usr/bin/srtla_send';
 
 export const srtlaSendOptionsSchema = z.object({
 	listenPort: z.number().int().min(1).max(65535).default(5000),
 	srtlaHost: z.string().min(1),
 	srtlaPort: z.number().int().min(1).max(65535).default(5001),
-	ipsFile: z.string().min(1).default("/tmp/srtla_ips"),
+	ipsFile: z.string().min(1).default('/tmp/srtla_ips'),
 	verbose: z.boolean().optional(),
 	statsFile: z.string().min(1).optional(),
 	statsFileInterval: z.number().int().min(1).optional(),
@@ -36,13 +36,13 @@ export function buildSrtlaSendArgs(input: SrtlaSendOptionsInput): Array<string> 
 		options.ipsFile,
 	];
 	if (options.verbose) {
-		args.push("--verbose");
+		args.push('--verbose');
 	}
 	if (options.statsFile) {
-		args.push("--stats-file", options.statsFile);
+		args.push('--stats-file', options.statsFile);
 	}
 	if (options.statsFileInterval !== undefined) {
-		args.push("--stats-file-interval", String(options.statsFileInterval));
+		args.push('--stats-file-interval', String(options.statsFileInterval));
 	}
 	return args;
 }
@@ -78,10 +78,10 @@ export function spawnSrtlaSend(options: SrtlaSendOptionsInput): Bun.Subprocess {
 
 export function sendSrtlaSendHup(): void {
 	// killall exits non-zero when no process matches; that is an acceptable no-op.
-	Bun.spawnSync(["killall", "-HUP", DEFAULT_BINARY]);
+	Bun.spawnSync(['killall', '-HUP', DEFAULT_BINARY]);
 }
 
 export function isSrtlaSendRunning(): boolean {
-	const result = Bun.spawnSync(["pgrep", "-x", DEFAULT_BINARY]);
+	const result = Bun.spawnSync(['pgrep', '-x', DEFAULT_BINARY]);
 	return result.exitCode === 0;
 }

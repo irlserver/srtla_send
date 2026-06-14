@@ -1,2 +1,2 @@
-export * from "./sender/index.js";
-export * from "./telemetry/index.js";
+export * from './sender/index.js';
+export * from './telemetry/index.js';

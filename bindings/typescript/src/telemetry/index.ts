@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from 'zod';
 
 /**
  * Sender telemetry reader for `srtla-send-rs` (ADR-001, Option A — JSON stats file).
@@ -31,7 +31,7 @@ export const SENDER_TELEMETRY_STALE_MS = 5000;
  * `@ceralive/srtla`'s `SENDER_TELEMETRY_PATH_PREFIX`. The live file is
  * `<prefix><listen_port>.json`.
  */
-export const SENDER_TELEMETRY_PATH_PREFIX = "/tmp/srtla-send-stats-";
+export const SENDER_TELEMETRY_PATH_PREFIX = '/tmp/srtla-send-stats-';
 
 /** Default live stats path for a listen port (the Rust producer computes the same). */
 export function senderTelemetryPath(listenPort: number): string {
@@ -155,9 +155,7 @@ export function watchTelemetry(
 		if (stopped) {
 			return;
 		}
-		const stale =
-			data === null ||
-			Date.now() - data.last_updated_ms > SENDER_TELEMETRY_STALE_MS;
+		const stale = data === null || Date.now() - data.last_updated_ms > SENDER_TELEMETRY_STALE_MS;
 		cb({ data, stale });
 	};
 

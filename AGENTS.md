@@ -339,6 +339,10 @@ The `// TODO: On Linux, could use sendmmsg ...` in `src/connection/batch_send.rs
 Full rationale in `openspec/changes/rust-sender-adoption/sendmmsg-deferred.md`.
 **Do not implement sendmmsg** without profiling evidence and a deliberate PR.
 
+## TS BINDING TOOLING
+
+The `bindings/typescript/` package uses Biome 2.5 via `@ceralive/biome-config` as its first linter/formatter. The `biome.json` in `bindings/typescript/` extends `@ceralive/biome-config` (`"extends": ["@ceralive/biome-config"]`). ESLint and Prettier are not used. Run `biome check .` from `bindings/typescript/` (check) or `biome check --write .` (apply fixes). The binding gate includes `bun tsc --noEmit && bun test` — Biome is not a separate gate step but is expected clean before PR.
+
 ## DOCS DISCIPLINE (Rule A)
 
 Any behavior/structure change updates this `AGENTS.md` and `README.md` in the SAME PR.
