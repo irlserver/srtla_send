@@ -1,0 +1,21 @@
+deny.toml
+  s_25750ab41681f3::t_b1aea880f56b73 1-21
+.github/workflows/ci.yml
+  s_25750ab41681f3::t_3dc6786fcaa5a1 64-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "f870bdaaa694cbb674f75b4895d68976b249886f",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
