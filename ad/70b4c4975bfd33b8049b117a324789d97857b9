@@ -1,0 +1,29 @@
+Cargo.toml
+  s_25750ab41681f3::t_254b0cc2aeef06 50-54
+src/sender/housekeeping.rs
+  s_25750ab41681f3::t_6db0cce3c509e0 123-124
+src/test_helpers.rs
+  s_25750ab41681f3::t_5d60ca74ba3320 11
+  s_25750ab41681f3::t_13c83fa9a0d69f 99-110
+src/connection/mod.rs
+  s_25750ab41681f3::t_dcf71c43204755 497-503
+src/tests/connection_tests.rs
+  s_25750ab41681f3::t_8fe810204e5007 448-475
+  s_25750ab41681f3::t_a6a77515ce9c2e 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "ad70b4c4975bfd33b8049b117a324789d97857b9",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
