@@ -19,7 +19,9 @@
       "types": "./dist/telemetry/index.d.ts"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
@@ -35,6 +37,10 @@
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CERALIVE/srtla-send-rs.git"
   },
   "license": "AGPL-3.0",
   "keywords": [
