@@ -343,6 +343,8 @@ Full rationale in `openspec/changes/rust-sender-adoption/sendmmsg-deferred.md`.
 
 The `bindings/typescript/` package uses Biome 2.5 via `@ceralive/biome-config` as its first linter/formatter. The `biome.json` in `bindings/typescript/` extends `@ceralive/biome-config` (`"extends": ["@ceralive/biome-config"]`). ESLint and Prettier are not used. Run `biome check .` from `bindings/typescript/` (check) or `biome check --write .` (apply fixes). The binding gate includes `bun tsc --noEmit && bun test` — Biome is not a separate gate step but is expected clean before PR.
 
+**Golden fixtures are excluded from Biome** — `biome.json` sets `files.includes` to `["**", "!**/tests/fixtures/**"]`. `tests/fixtures/telemetry-golden.json` is a deliberately byte-identical copy of the Rust producer golden (`tests/fixtures/telemetry-golden.json` at the crate root): the single-line, newline-free atomic-publish telemetry shape (ADR-001). If Biome pretty-prints it (multi-line + trailing newline), the cross-language parity test (`tests/telemetry_fixture_parity.rs` — `rust_and_ts_goldens_are_byte_identical` plus the newline-free assertion) fails every Rust test job in CI. **Do not remove this exclude, and never `biome check --write` the fixtures** — re-sync the two goldens by editing both byte-for-byte instead.
+
 ## DOCS DISCIPLINE (Rule A)
 
 Any behavior/structure change updates this `AGENTS.md` and `README.md` in the SAME PR.
