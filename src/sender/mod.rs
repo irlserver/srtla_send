@@ -2,6 +2,7 @@ mod connections;
 mod housekeeping;
 mod keyframe;
 mod packet_handler;
+mod reload;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod selection;
 #[cfg(not(any(test, feature = "test-internals")))]
@@ -13,7 +14,6 @@ mod uplink;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -339,14 +339,30 @@ pub async fn run_sender_with_config(
     #[cfg(unix)]
     event_loop! {
         _ = sighup.recv() => {
-            info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
-            if let Ok(new_ips) = read_ip_list(ips_file).await {
-                pending_changes = Some(PendingConnectionChanges {
-                    new_ips: Some(new_ips),
-                    receiver_host: receiver_host.to_string(),
-                    receiver_port,
-                });
-                info!("uplink IP changes queued for next processing cycle");
+            info!("received SIGHUP - evaluating uplink IP reload from {}", ips_file);
+            // Guard against a reload that resolves to zero usable IPs (missing,
+            // empty, or all-garbage file): refuse it and keep the current links
+            // up rather than queuing an empty list, which would tear down every
+            // connection in apply_connection_changes. Mirrors the C sender.
+            match reload::analyze_ip_reload(ips_file) {
+                reload::IpReload::Apply { ips, first_invalid_line } => {
+                    if let Some(line) = first_invalid_line {
+                        warn!(
+                            "ips file has an invalid entry starting at line {line}; applying valid IPs only"
+                        );
+                    }
+                    pending_changes = Some(PendingConnectionChanges {
+                        new_ips: Some(ips),
+                        receiver_host: receiver_host.to_string(),
+                        receiver_port,
+                    });
+                    info!("uplink IP changes queued for next processing cycle");
+                }
+                reload::IpReload::Refuse(reason) => {
+                    warn!(
+                        "refusing SIGHUP reload ({reason:?}); keeping current connections"
+                    );
+                }
             }
             let config_snap = config.snapshot();
             drain_packet_queue(
@@ -369,16 +385,20 @@ pub async fn run_sender_with_config(
 
 pub async fn read_ip_list(path: &str) -> Result<SmallVec<IpAddr, 4>> {
     let text = std::fs::read_to_string(Path::new(path)).context("read IPs file")?;
-    let mut out = SmallVec::new();
-    for line in text.lines() {
-        let l = line.trim();
-        if l.is_empty() {
-            continue;
+    // Shares the SIGHUP reload guard's parser so startup and reload agree on what
+    // counts as a valid IP. At startup an empty or all-invalid file is tolerated
+    // (returns an empty list); the zero-valid-IP refusal only matters on reload,
+    // where dropping every live link would be worse than ignoring a bad edit.
+    match reload::analyze_ip_reload_text(&text) {
+        reload::IpReload::Apply {
+            ips,
+            first_invalid_line,
+        } => {
+            if let Some(line) = first_invalid_line {
+                warn!("ips file has an invalid entry starting at line {line}; skipping it");
+            }
+            Ok(ips)
         }
-        match IpAddr::from_str(l) {
-            Ok(ip) => out.push(ip),
-            Err(e) => warn!("skip invalid IP '{}': {}", l, e),
-        }
+        reload::IpReload::Refuse(_) => Ok(SmallVec::new()),
     }
-    Ok(out)
 }
