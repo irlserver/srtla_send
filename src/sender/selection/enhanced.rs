@@ -39,7 +39,7 @@ const SWITCH_THRESHOLD: f64 = 1.10; // New connection must be 10% better
 const CC_SOFT_CAP_FLOOR: f64 = 0.10;
 
 /// Score multiplier applied to a quality-gated link (`weak` or
-/// `cc_backing_off`) when at least one un-gated link is schedulable.
+/// `loss_degraded`) when at least one un-gated link is schedulable.
 /// The link stays in the ranking at a crushed score instead of being
 /// dropped outright. In steady state a healthy link's full score still
 /// wins decisively, so routing is unchanged; the point is that the
@@ -81,9 +81,9 @@ pub fn in_flight_cap_packets(cc_target_bps: u64, rtt_min_ms: f64) -> Option<i32>
 }
 
 /// Whether the link is currently exceeding its in-flight cap. Used by
-/// the admission gate alongside `weak` and `cc_backing_off`. A capped
+/// the admission gate alongside `weak` and `loss_degraded`. A capped
 /// link is excluded from candidate ranking when at least one
-/// non-capped, non-weak, non-backing-off link is schedulable.
+/// non-capped, non-weak, non-loss-degraded link is schedulable.
 #[inline(always)]
 pub fn in_flight_cap_exceeded(c: &SrtlaConnection) -> bool {
     in_flight_cap_packets(c.cc_target_bps, c.get_rtt_min_ms())
@@ -143,20 +143,24 @@ pub fn select_connection(
 ) -> Option<usize> {
     // First pass: discover whether at least one un-gated connection
     // can carry the packet. The classifier marks links weak when their
-    // RTT busts the chosen delay tier, when they fall below the
-    // entering throughput-share threshold, or (in shadow-mode-promoted
-    // form) when their CC is backing off on observed loss. The
-    // in-flight cap gates a link whose in-flight packets already exceed
-    // its bandwidth-delay product (plus headroom), so the scheduler
-    // doesn't pile more on while the link drains. If any un-gated link
-    // is schedulable, the gated ones are excluded from ranking.
-    // Otherwise we fall back to the full pool — better to send on a
-    // gated link than to drop the packet.
+    // RTT busts the chosen delay tier (sustained, not a single blip),
+    // when a queue is building, or when they fall below the entering
+    // throughput-share threshold. The loss gate uses `loss_degraded` —
+    // the 4s-sustained, hysteretic loss latch — rather than the raw
+    // per-window `cc_backing_off`, so a single noisy loss window doesn't
+    // demote routing weight (cc_backing_off still drives the CC
+    // controller's own bitrate backoff; it just no longer gates routing).
+    // The in-flight cap gates a link whose in-flight packets already
+    // exceed its bandwidth-delay product (plus headroom), so the
+    // scheduler doesn't pile more on while the link drains. If any
+    // un-gated link is schedulable, the gated ones are excluded from
+    // ranking. Otherwise we fall back to the full pool — better to send
+    // on a gated link than to drop the packet.
     let any_unconstrained = conns.iter().any(|c| {
         !c.is_timed_out()
             && c.is_schedulable()
             && !c.weak
-            && !c.cc_backing_off
+            && !c.loss_degraded
             && !in_flight_cap_exceeded(c)
     });
 
@@ -174,12 +178,12 @@ pub fn select_connection(
         // Hard-skip only the in-flight cap: it bounds queueing delay and
         // is transient (self-clears as the link drains), so piling more
         // on is counterproductive. Quality gates (`weak`,
-        // `cc_backing_off`) instead crush the score but keep the link
+        // `loss_degraded`) instead crush the score but keep the link
         // rankable, so it is never starved into a permanent weak lock.
         if any_unconstrained && in_flight_cap_exceeded(c) {
             continue;
         }
-        let quality_gated = any_unconstrained && (c.weak || c.cc_backing_off);
+        let quality_gated = any_unconstrained && (c.weak || c.loss_degraded);
         let gate_mult = if quality_gated {
             GATED_LINK_PENALTY
         } else {

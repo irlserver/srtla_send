@@ -185,9 +185,11 @@ pub struct SrtlaConnection {
     /// tick from `WeakLinkFilter::classify`. Consumed by Enhanced
     /// selection as an admission gate.
     pub(crate) weak: bool,
-    /// Latest CC state from `LinkCcController::tick_all`. Consumed by
-    /// Enhanced selection: `BackingOff` is treated as an additional
-    /// weak signal.
+    /// Latest CC state from `LinkCcController::tick_all`. Drives the CC
+    /// controller's own per-window bitrate backoff. It is intentionally
+    /// *not* a routing-admission gate: `BackingOff` flips on a single
+    /// loss window and would make selection twitchy, so the routing gate
+    /// uses the sustained `loss_degraded` latch instead.
     pub(crate) cc_backing_off: bool,
     /// Latest `target_bps` from `LinkCcController::tick_all`. Consumed
     /// by Enhanced selection as a soft cap: when the link's measured
@@ -198,9 +200,12 @@ pub struct SrtlaConnection {
     pub(crate) cc_target_bps: u64,
     /// Latched verdict from `LinkCongestionState`: the link's
     /// time-decayed loss EWMA has been sustained high (see
-    /// `LOSS_DEGRADE_*`). Drives a graded demotion to `Degraded` in the
-    /// phase machine; it never removes the link from scheduling (a
-    /// genuinely dead link is handled by `is_timed_out`/`CONN_TIMEOUT`).
+    /// `LOSS_DEGRADE_*`, ~4s sustain with hysteresis). Drives a graded
+    /// demotion to `Degraded` in the phase machine *and* the Enhanced
+    /// selection loss-admission gate. It never removes the link from
+    /// scheduling (a genuinely dead link is handled by
+    /// `is_timed_out`/`CONN_TIMEOUT`); a gated link keeps a trickle of
+    /// traffic so the loss EWMA can recover and clear the latch.
     pub(crate) loss_degraded: bool,
     /// Strategy for steering this uplink's socket onto its egress path.
     /// Retained so reconnects re-apply the same binding (source IP on Linux,

@@ -1,11 +1,11 @@
-//! Per-link congestion-control soft cap (shadow mode).
+//! Per-link congestion-control soft cap.
 //!
 //! A small per-connection state machine that produces a `target_bps` —
-//! a soft cap on the rate the scheduler should push down this link. The
-//! cap is **not consumed** by selection yet; it's emitted via stats so
-//! we can compare its decisions against actual selection outcomes
-//! during a soak window. Wire in as an admission gate on Enhanced
-//! selection only after the soak.
+//! a soft cap on the rate the scheduler should push down this link.
+//! `target_bps` is consumed by Enhanced selection (the soft-cap score
+//! multiplier and the BDP in-flight cap), and the sustained `loss_degraded`
+//! latch feeds the routing loss gate. The instantaneous `BackingOff` state
+//! drives this controller's own bitrate backoff but does not gate routing.
 //!
 //! ## State machine
 //!

@@ -79,7 +79,7 @@ pub struct LinkStats {
     /// In classic mode, this is always 1.0 (quality scoring disabled).
     pub quality_multiplier: f64,
 
-    // --- Weak-link classifier (shadow mode) ---
+    // --- Weak-link classifier ---
     //
     // Output of `WeakLinkFilter::classify`. Currently informational only —
     // not consumed by selection. Once we soak the classifier behaviour
@@ -98,11 +98,13 @@ pub struct LinkStats {
 
     // --- Per-link CC soft cap ---
     //
-    // Output of `LinkCcController::tick_all`. Consumed by Enhanced
-    // selection: `cc_backing_off` is a binary admission gate;
-    // `cc_target_bps` scales the score multiplicatively via
-    // `enhanced::cc_soft_cap_multiplier` so the scheduler steers
-    // traffic away from a link before it hits its CC-predicted ceiling.
+    // Output of `LinkCcController::tick_all`. `cc_state`/`cc_backing_off`
+    // are reported for telemetry and drive the CC controller's own
+    // bitrate backoff; the routing-admission gate uses the sustained
+    // `loss_degraded` latch, not the raw per-window backoff. `cc_target_bps`
+    // scales the score multiplicatively via `enhanced::cc_soft_cap_multiplier`
+    // so the scheduler steers traffic away from a link before it hits its
+    // CC-predicted ceiling.
     /// Current state: `bootstrap` / `climbing` / `holding` /
     /// `backing_off` / `drain`.
     pub cc_state: String,
@@ -169,7 +171,7 @@ pub struct StatsSnapshot {
     /// Sum of in_flight across active links
     pub total_in_flight: i32,
 
-    // --- Weak-link classifier output (shadow mode) ---
+    // --- Weak-link classifier output ---
     /// Estimated max delay budget the classifier derived this tick (ms).
     /// Zero when classification was bypassed (e.g. under the throughput floor).
     pub weak_link_estimated_max_delay_ms: u32,

@@ -157,9 +157,11 @@ pub async fn run_sender_with_config(
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Keyframe burst detector for priority scheduling
     let mut keyframe_detector = keyframe::KeyframeDetector::new();
-    // Weak-link classifier (shadow mode — telemetry only, not consumed by selection yet).
+    // Weak-link classifier. Its per-link `weak` verdict is consumed by
+    // Enhanced selection as an admission gate.
     let mut weak_link_filter = selection::classifier::WeakLinkFilter::new();
-    // Per-link CC soft-cap controller (shadow mode — same caveat).
+    // Per-link CC soft-cap controller. `cc_target_bps` feeds the soft-cap
+    // multiplier and in-flight cap; `loss_degraded` feeds the loss gate.
     let mut link_cc_controller = selection::link_cc::LinkCcController::new();
 
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)

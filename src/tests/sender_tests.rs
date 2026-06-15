@@ -146,14 +146,16 @@ mod tests {
     }
 
     #[test]
-    fn test_enhanced_treats_backing_off_as_weak() {
+    fn test_enhanced_treats_loss_degraded_as_weak() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
         let current_time = now_ms();
 
         connections[0].in_flight_packets = 5;
         connections[1].in_flight_packets = 0;
-        connections[1].cc_backing_off = true; // CC says this link is loss-driven
+        // Sustained loss latch (not the raw per-window cc_backing_off) is the
+        // routing-admission gate, so a single noisy loss window can't demote.
+        connections[1].loss_degraded = true;
         connections[2].in_flight_packets = 10;
 
         let config = ConfigSnapshot {
@@ -165,7 +167,35 @@ mod tests {
         assert_eq!(
             selected,
             Some(0),
-            "CC-backing-off link must be skipped when a healthy alternative exists"
+            "loss-degraded link must be skipped when a healthy alternative exists"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_does_not_gate_on_raw_backing_off() {
+        // cc_backing_off drives the CC controller's bitrate backoff but is
+        // intentionally NOT a routing gate (it flips on a single loss window).
+        // A link flagged only cc_backing_off, with the best base score, still
+        // wins selection.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 0; // best base score
+        connections[1].cc_backing_off = true;
+        connections[2].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+        };
+        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "cc_backing_off alone must not demote a link's routing weight"
         );
     }
 

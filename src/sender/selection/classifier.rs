@@ -1,10 +1,9 @@
-//! Weak-link classifier (shadow mode).
+//! Weak-link classifier.
 //!
 //! Computes a per-connection `weak: bool` flag using a three-tier delay
-//! cascade and entering/leaving thresholds with hysteresis. **Currently
-//! shadow mode only** — the result is exposed via stats telemetry but
-//! does not influence selection. Wire into Enhanced selection only after
-//! a soak window confirms the classifier matches operator intuition.
+//! cascade and entering/leaving thresholds with hysteresis. The result is
+//! consumed by Enhanced selection as an admission gate (a weak link's
+//! routing score is crushed but the link stays rankable).
 //!
 //! ## Algorithm
 //!
@@ -17,7 +16,11 @@
 //!    Pick the tightest tier where >=85% of throughput still fits, with
 //!    a 50%/25% cascade fallback for degraded conditions.
 //! 4. Mark a link weak if either:
-//!    - its RTT exceeds the chosen tier (high latency), or
+//!    - its RTT exceeds the chosen tier (high latency) or a standing
+//!      queue is forming, sustained for `WEAK_SUSTAIN_TICKS` consecutive
+//!      housekeeping ticks. Both signals flip on a single evaluation, so
+//!      the streak latch filters one-tick (~1s) blips before the gate
+//!      demotes routing weight, or
 //!    - its share of total throughput falls below the entering
 //!      threshold. Once weak, the link stays weak until its share rises
 //!      above the (much higher) leaving threshold.
@@ -67,6 +70,15 @@ const LEAVE_FAIR_SHARE_NUMERATOR: u64 = 750;
 /// connected link is treated as not-weak (we don't have enough signal).
 const MIN_TOTAL_BPS_FOR_CLASSIFICATION: f64 = 100_000.0;
 
+/// Consecutive housekeeping ticks a delay signal (`HighRtt` /
+/// `QueueBuilding`) must persist before the link is marked weak. The
+/// housekeeping loop runs once per second, so 2 ticks ≈ 2s: long enough
+/// to filter a single one-second RTT/queue blip, short enough to demote a
+/// genuinely congesting link well before it hurts. A real collapse holds
+/// the signal for many seconds, so reaction speed is unaffected. Do not
+/// raise above 3.
+const WEAK_SUSTAIN_TICKS: u32 = 2;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WeakReason {
     /// Link passed all checks. Not weak.
@@ -107,10 +119,13 @@ pub struct ClassificationResult {
 }
 
 /// Stateful filter: tracks `previously_weak` per connection so the
-/// hysteresis pass can use the leaving threshold for those.
+/// hysteresis pass can use the leaving threshold for those, and the
+/// per-connection consecutive-tick streak of an active delay signal so
+/// `HighRtt`/`QueueBuilding` only mark weak once sustained.
 #[derive(Default)]
 pub struct WeakLinkFilter {
     prev_weak: HashMap<u64, bool>,
+    delay_weak_streak: HashMap<u64, u32>,
 }
 
 impl WeakLinkFilter {
@@ -152,6 +167,7 @@ impl WeakLinkFilter {
             // Reset hysteresis history so we don't carry stale weak flags
             // across an idle period.
             self.prev_weak.clear();
+            self.delay_weak_streak.clear();
             return ClassificationResult {
                 selected_delay_ms: 0,
                 estimated_max_delay_ms: 0,
@@ -200,6 +216,7 @@ impl WeakLinkFilter {
         let enter_threshold_permille = (ENTER_FAIR_SHARE_NUMERATOR / n_connected) as u32;
         let leave_threshold_permille = (LEAVE_FAIR_SHARE_NUMERATOR / n_connected) as u32;
         let mut next_prev_weak: HashMap<u64, bool> = HashMap::with_capacity(conns.len());
+        let mut next_delay_streak: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
 
         for conn in conns {
             if !conn.connected {
@@ -228,13 +245,34 @@ impl WeakLinkFilter {
                 enter_threshold_permille
             };
 
-            let (weak, reason) = if rtt_ms > selected_delay {
-                (true, WeakReason::HighRtt)
+            // Delay signals (RTT over tier, or a forming queue) flip on a
+            // single evaluation, so gate them behind a consecutive-tick
+            // streak. Count up while a delay signal is active, reset to 0
+            // the moment it clears; only mark weak once the streak reaches
+            // WEAK_SUSTAIN_TICKS, filtering one-tick blips.
+            let delay_signal = if rtt_ms > selected_delay {
+                Some(WeakReason::HighRtt)
             } else if conn.queue_building_suspected() {
-                // Early warning: RTT under tier but a standing queue is
-                // forming. Mark weak so selection eases off (A2 keeps it
-                // rankable, so this only de-prioritises, never removes).
-                (true, WeakReason::QueueBuilding)
+                Some(WeakReason::QueueBuilding)
+            } else {
+                None
+            };
+            let delay_streak = if delay_signal.is_some() {
+                self.delay_weak_streak
+                    .get(&conn.conn_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            } else {
+                0
+            };
+            next_delay_streak.insert(conn.conn_id, delay_streak);
+            let delay_weak = delay_streak >= WEAK_SUSTAIN_TICKS;
+
+            let (weak, reason) = if delay_weak {
+                // Sustained: keep it rankable (the gate crushes score but
+                // never removes), so this only de-prioritises.
+                (true, delay_signal.unwrap())
             } else if bps == 0.0 {
                 (true, WeakReason::NoTraffic)
             } else if was_weak && share_permille < leave_threshold_permille {
@@ -259,6 +297,7 @@ impl WeakLinkFilter {
         }
 
         self.prev_weak = next_prev_weak;
+        self.delay_weak_streak = next_delay_streak;
         ClassificationResult {
             selected_delay_ms: selected_delay,
             estimated_max_delay_ms,
