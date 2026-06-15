@@ -18,6 +18,35 @@ use crate::registration::SrtlaRegistrationManager;
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
 
+/// Attribute a NAK to the uplink that sent the lost packet and shrink its window.
+///
+/// Prefers the O(1) sequence-tracker mapping (the link that actually sent `nak`);
+/// once that link is found we never fall through, so a duplicate NAK for an
+/// already-cleared sequence can't be re-counted against a different link. Only
+/// when the tracker has no record do we fall back to the first link that still
+/// recognizes the sequence in its own packet log. Returns the index of the link
+/// that counted the NAK, or `None` if none did. Production ignores the return;
+/// it exists so the attribution path is unit-testable directly instead of mirrored.
+pub(crate) fn attribute_nak(
+    connections: &mut [SrtlaConnection],
+    seq_tracker: &SequenceTracker,
+    nak: u32,
+    current_time_ms: u64,
+) -> Option<usize> {
+    if let Some(conn_id) = seq_tracker.get(nak, current_time_ms)
+        && let Some(pos) = connections.iter().position(|c| c.conn_id == conn_id)
+    {
+        return connections[pos].handle_nak(nak as i32).then_some(pos);
+    }
+
+    for (i, conn) in connections.iter_mut().enumerate() {
+        if conn.handle_nak(nak as i32) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn process_connection_events(
     idx: usize,
@@ -71,23 +100,7 @@ pub async fn process_connection_events(
     // Get current time once for all NAK processing
     let current_time_ms = crate::utils::now_ms();
     for nak in incoming.nak_numbers.iter() {
-        let mut handled = false;
-
-        // O(1) lookup in the ring buffer
-        if let Some(conn_id) = seq_tracker.get(*nak, current_time_ms)
-            && let Some(conn) = connections.iter_mut().find(|c| c.conn_id == conn_id)
-        {
-            conn.handle_nak(*nak as i32);
-            handled = true;
-        }
-
-        if !handled {
-            for conn in connections.iter_mut() {
-                if conn.handle_nak(*nak as i32) {
-                    break;
-                }
-            }
-        }
+        attribute_nak(connections, seq_tracker, *nak, current_time_ms);
     }
 
     if let Some(client) = last_client_addr {

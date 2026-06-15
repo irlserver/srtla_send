@@ -26,6 +26,10 @@ pub use connections::{
 #[allow(unused_imports)]
 pub use housekeeping::GLOBAL_TIMEOUT_MS;
 use housekeeping::handle_housekeeping;
+// Re-exported for the NAK-attribution conformance tests so they drive the real
+// production path rather than a mirrored copy.
+#[allow(unused_imports)]
+pub(crate) use packet_handler::attribute_nak;
 use packet_handler::{
     drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
 };
