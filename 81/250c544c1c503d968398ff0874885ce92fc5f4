@@ -1,0 +1,41 @@
+src/tests/protocol_tests.rs
+  s_25750ab41681f3::t_a78ccfbec5c41d 271,275-309,314-479
+  s_25750ab41681f3::t_4c16b33e0e42da 272-274
+  s_25750ab41681f3::t_7da327ccc6393f 310-313
+src/tests/registration_tests.rs
+  s_25750ab41681f3::t_02444eb53ed317 522-523
+  s_25750ab41681f3::t_64c7d39def33ef 622-625
+  s_25750ab41681f3::t_2c2c8187739db3 4-6,9
+  s_25750ab41681f3::t_3ce6a1f2c17ad1 470,473-521,524-621,626-645
+  s_25750ab41681f3::t_53609a01bc06e9 471-472
+src/sender/packet_handler.rs
+  s_25750ab41681f3::t_3dfa40ca931092 21-49
+  s_25750ab41681f3::t_38c7dc6f02bc74 103
+src/tests/connection_tests.rs
+  s_25750ab41681f3::t_ef8e3b5668a697 875-879
+  s_25750ab41681f3::t_bcb02fef297f92 829-832
+  s_25750ab41681f3::t_6cd77fb36f2db5 916-922
+  s_25750ab41681f3::t_23852e19b19965 9-11,755-756,758-763,768-772,774-828,833-874,880-915,923-979
+  s_25750ab41681f3::t_99e68cffcb7313 8
+  s_25750ab41681f3::t_06440f97870b51 757
+  s_25750ab41681f3::t_e9918b9a5d79c5 764-767,773
+src/sender/mod.rs
+  s_25750ab41681f3::t_f173b5590b9a39 29-31
+  s_25750ab41681f3::t_7df6cc5d1e8ea3 32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "81250c544c1c503d968398ff0874885ce92fc5f4",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
