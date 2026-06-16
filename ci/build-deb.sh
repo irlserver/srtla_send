@@ -15,21 +15,23 @@
 # matches that glob. This script re-runs the EXACT glob against the real
 # filename as a self-test so a future rename cannot silently break the fetch.
 #
-# Why Conflicts: srtla — the srtla package currently ships BOTH /usr/bin/srtla_send
-# (C sender) and /usr/bin/srtla_rec. srtla-send-rs installs /usr/bin/srtla_send,
-# so it file-conflicts with every srtla that still ships the C sender. At cutover
-# (ADR-003) srtla drops srtla_send from its .deb; from that release on the two
-# packages coexist (srtla = receiver only, srtla-send-rs = sender). The bound
-# below is that cutover version: srtla (<< cutover) conflicts; srtla (>= cutover)
-# does not. ADJUST SRTLA_CUTOVER_VERSION to the real srtla cutover release when
-# it is cut (current srtla is 2026.6.1, which still ships the C sender).
+# Why Conflicts: srtla — historically the srtla package shipped BOTH
+# /usr/bin/srtla_send (C sender) and /usr/bin/srtla_rec. srtla-send-rs installs
+# /usr/bin/srtla_send, so it file-conflicts with every srtla that still ships the
+# C sender. At cutover (ADR-003) srtla dropped srtla_send from its .deb; from that
+# release on the two packages coexist (srtla = receiver only, srtla-send-rs =
+# sender). The bound below is that cutover version: srtla (<< cutover) conflicts;
+# srtla (>= cutover) does not. The cutover landed in srtla v2026.6.2 (the first
+# receiver-only release — CMakeLists installs srtla_rec only), so the default is
+# 2026.6.2: srtla 2026.6.1 and earlier conflict (they ship the C sender), 2026.6.2
+# and later coexist.
 #
 # Usage:
 #   ci/build-deb.sh <arch> <path-to-srtla_send-binary> [out-dir]
 #     <arch>  arm64 | amd64   (Debian architecture, matches fetch-debs.sh ARCH)
 #
 # Env:
-#   SRTLA_CUTOVER_VERSION   srtla version that retires the C sender (default 2026.7.0)
+#   SRTLA_CUTOVER_VERSION   srtla version that retires the C sender (default 2026.6.2)
 #
 # Without dpkg-deb on PATH (non-Debian dev hosts) the script still assembles the
 # package tree, writes + prints the control file, computes the filename and runs
@@ -62,7 +64,7 @@ CARGO_TOML="${REPO_ROOT}/Cargo.toml"
 VERSION="$(awk -F\" '/^version = /{print $2; exit}' "${CARGO_TOML}")"
 [[ -n "${VERSION}" ]] || die "could not read version from ${CARGO_TOML}"
 
-CUTOVER="${SRTLA_CUTOVER_VERSION:-2026.7.0}"
+CUTOVER="${SRTLA_CUTOVER_VERSION:-2026.6.2}"
 
 OUT="${OUTDIR%/}/srtla-send-rs_${VERSION}_${ARCH}.deb"
 

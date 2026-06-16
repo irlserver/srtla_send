@@ -224,10 +224,11 @@ workflows. It pins the contract the device image depends on:
 - **Filename** `srtla-send-rs_<ver>_<arch>.deb` — matches `image-building-pipeline`
   `fetch-debs.sh`'s `*${ARCH}*.deb` glob; the script re-runs that exact glob as a
   self-test so a rename fails the build, not the image fetch.
-- **`Conflicts: srtla (<< <cutover>)`** (and matching `Replaces:`) — srtla still ships the
-  C `/usr/bin/srtla_send`, so the two packages file-conflict until srtla's cutover release
-  drops the C sender (ADR-003). The bound is `SRTLA_CUTOVER_VERSION` (default `2026.7.0`,
-  current srtla is `2026.6.1`); **set it to the real srtla cutover version when cut.**
+- **`Conflicts: srtla (<< <cutover>)`** (and matching `Replaces:`) — pre-cutover srtla
+  shipped the C `/usr/bin/srtla_send`, so the two packages file-conflict for any srtla
+  release that still ships it. The bound is `SRTLA_CUTOVER_VERSION` (default `2026.6.2`),
+  the first **receiver-only** srtla release (ADR-003 accepted): srtla `<< 2026.6.2`
+  conflicts (C sender present); `2026.6.2` and later coexist (receiver only).
 
 aarch64 cross-build env (mirrors the PINNED TOOLCHAIN note): linker
 `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc`, apt
