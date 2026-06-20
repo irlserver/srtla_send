@@ -33,8 +33,11 @@ pub fn handle_srtla_ack(
     // The only difference from classic is quality scoring in connection selection
     // This prevents thrashing while still avoiding bad connections
 
-    // Use exact classic logic for window increase
-    if in_flight_packets * WINDOW_MULT > *window {
+    // Use exact classic logic for window increase.
+    // saturating_mul: an extreme in-flight count would overflow the i32 product
+    // (debug panic / release wrap to negative); saturating at i32::MAX keeps the
+    // normal-range comparison identical while staying panic/wrap-free.
+    if in_flight_packets.saturating_mul(WINDOW_MULT) > *window {
         let old = *window;
         *window = min(*window + WINDOW_INCR - 1, WINDOW_MAX * WINDOW_MULT);
 
@@ -191,6 +194,20 @@ mod tests {
     fn test_enhanced_ack_increases_window() {
         let mut window = 1500;
         let in_flight = 3;
+        let mut fast_recovery = false;
+
+        handle_srtla_ack(&mut window, in_flight, &mut fast_recovery, 0, "test");
+
+        assert_eq!(window, 1500 + WINDOW_INCR - 1);
+    }
+
+    #[test]
+    fn test_enhanced_ack_no_overflow_at_extreme_in_flight() {
+        // in_flight just past i32::MAX / WINDOW_MULT: a plain `*` overflows i32
+        // (debug panic, release wraps negative). saturating_mul caps at i32::MAX,
+        // so the window still grows by one classic-equivalent step.
+        let mut window = 1500;
+        let in_flight = i32::MAX / WINDOW_MULT + 1;
         let mut fast_recovery = false;
 
         handle_srtla_ack(&mut window, in_flight, &mut fast_recovery, 0, "test");
