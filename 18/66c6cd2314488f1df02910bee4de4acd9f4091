@@ -1,0 +1,21 @@
+src/connection/batch_recv.rs
+  s_25750ab41681f3::t_9bd606ac8ef33a 38-41
+  s_25750ab41681f3::t_8a640366385161 42-46
+  s_25750ab41681f3::t_9ca2372952fbcd 47-57,289,367,383-384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "1866c6cd2314488f1df02910bee4de4acd9f4091",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
