@@ -129,9 +129,11 @@ pub async fn handle_housekeeping(
             error!("warning: no available connections");
         }
 
-        // Timeout when all connections have failed
+        // Timeout when all connections have failed. Measure elapsed-time-since-failure
+        // (`failed_at.elapsed()`) so a transient all-down blip only trips after a full
+        // GLOBAL_TIMEOUT_MS of sustained failure, not the instant uptime exceeds it.
         if let Some(failed_at) = all_failed_at
-            && crate::utils::instant_to_elapsed_ms(*failed_at) > GLOBAL_TIMEOUT_MS
+            && failed_at.elapsed().as_millis() as u64 > GLOBAL_TIMEOUT_MS
         {
             if reg.has_connected {
                 error!("Failed to re-establish any connections");
@@ -149,4 +151,87 @@ pub async fn handle_housekeeping(
     // Old entries are naturally overwritten when the buffer wraps around.
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::time::Duration;
+
+    use super::*;
+    use crate::test_helpers::{advance_test_clock, create_test_connections};
+
+    /// The all-uplinks-failed timeout must measure time *since* the links failed,
+    /// not the uptime captured at the moment of failure. With the buggy
+    /// uptime-at-failure measure, the timer tripped on the first all-down pass as
+    /// soon as total uptime exceeded `GLOBAL_TIMEOUT_MS`, erroring on a transient
+    /// blip. Here uptime already far exceeds the timeout, yet arming and the first
+    /// re-check must not error; only a full `GLOBAL_TIMEOUT_MS` of sustained
+    /// failure may fire it.
+    #[tokio::test(start_paused = true)]
+    async fn all_failed_timeout_measures_elapsed_since_failure() {
+        let mut connections = create_test_connections(2).await;
+        let mut reg = SrtlaRegistrationManager::new();
+        // Models a stream that was established and then lost every link.
+        reg.has_connected = true;
+        let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
+        let (packet_tx, _packet_rx) = tokio::sync::mpsc::unbounded_channel::<UplinkPacket>();
+        let mut all_failed_at: Option<Instant> = None;
+
+        // Long uptime before the failure: the buggy measure would trip on this alone.
+        advance_test_clock(Duration::from_millis(GLOBAL_TIMEOUT_MS + 1000)).await;
+
+        // Drop all uplinks; pin the reconnect backoff so housekeeping reaches the
+        // timeout branch instead of attempting socket reconnection.
+        for conn in connections.iter_mut() {
+            conn.mark_for_recovery();
+            conn.reconnection.last_reconnect_attempt_ms = now_ms();
+        }
+
+        let armed = handle_housekeeping(
+            &mut connections,
+            &mut reg,
+            false,
+            &mut all_failed_at,
+            &mut reader_handles,
+            &packet_tx,
+        )
+        .await;
+        assert!(
+            armed.is_ok(),
+            "arming the all-failed timer must not error on a transient blip \
+             (uptime already exceeds {GLOBAL_TIMEOUT_MS}ms)"
+        );
+        assert!(all_failed_at.is_some(), "the failure timer should be armed");
+
+        advance_test_clock(Duration::from_millis(GLOBAL_TIMEOUT_MS - 1000)).await;
+        let within = handle_housekeeping(
+            &mut connections,
+            &mut reg,
+            false,
+            &mut all_failed_at,
+            &mut reader_handles,
+            &packet_tx,
+        )
+        .await;
+        assert!(
+            within.is_ok(),
+            "no error until a full {GLOBAL_TIMEOUT_MS}ms has elapsed since the links failed"
+        );
+
+        advance_test_clock(Duration::from_millis(2000)).await;
+        let fired = handle_housekeeping(
+            &mut connections,
+            &mut reg,
+            false,
+            &mut all_failed_at,
+            &mut reader_handles,
+            &packet_tx,
+        )
+        .await;
+        assert!(
+            fired.is_err(),
+            "the all-failed timeout must fire once a full {GLOBAL_TIMEOUT_MS}ms has \
+             elapsed since failure"
+        );
+    }
 }
