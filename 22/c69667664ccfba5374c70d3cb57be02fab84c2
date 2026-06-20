@@ -1,0 +1,22 @@
+src/connection/rtt.rs
+  s_25750ab41681f3::t_3e8fe4be302872 235-238
+  s_25750ab41681f3::t_f79d1a62c21ae5 433-468
+src/connection/mod.rs
+  s_25750ab41681f3::t_09c84fffebba44 372-376
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "22c69667664ccfba5374c70d3cb57be02fab84c2",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
