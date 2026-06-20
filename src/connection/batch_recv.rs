@@ -35,6 +35,26 @@ mod unix_impl {
     const SOCKADDR_STORAGE_LENGTH: libc::socklen_t =
         std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
 
+    /// What the read loop should do after `recvmmsg` returns an error.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RecvAction {
+        /// EINTR: interrupted by a signal — re-issue the syscall.
+        Retry,
+        /// EAGAIN/EWOULDBLOCK: no datagram ready — wait for readiness.
+        WouldBlock,
+        /// Any other errno — propagate to the caller.
+        Hard,
+    }
+
+    /// Classify a `recvmmsg` error. Pure so it is unit-testable with no syscall.
+    fn recv_retry_action(err: &std::io::Error) -> RecvAction {
+        match err.kind() {
+            ErrorKind::Interrupted => RecvAction::Retry,
+            ErrorKind::WouldBlock => RecvAction::WouldBlock,
+            _ => RecvAction::Hard,
+        }
+    }
+
     /// Async UDP socket with batch receive support via `recvmmsg`.
     ///
     /// This wraps a `socket2::Socket` in tokio's `AsyncFd` for proper async
@@ -70,11 +90,17 @@ mod unix_impl {
 
                 match buffer.recvmmsg(self.as_raw_fd()) {
                     Ok(count) => return Poll::Ready(Ok(count)),
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                        guard.clear_ready();
-                        continue;
-                    }
-                    Err(e) => return Poll::Ready(Err(e)),
+                    Err(e) => match recv_retry_action(&e) {
+                        // EINTR: re-issue without dropping readiness (the fd is
+                        // still ready, so the next poll returns immediately). A
+                        // signal — e.g. our own SIGHUP — must not kill the reader.
+                        RecvAction::Retry => continue,
+                        RecvAction::WouldBlock => {
+                            guard.clear_ready();
+                            continue;
+                        }
+                        RecvAction::Hard => return Poll::Ready(Err(e)),
+                    },
                 }
             }
         }
@@ -251,6 +277,16 @@ mod unix_impl {
         pub fn is_empty(&self) -> bool {
             self.nrecv == 0
         }
+
+        /// Test seam: forge `nrecv` "received" packets and set message `idx`'s
+        /// reported `msg_len`, so a test can feed an out-of-range length without a
+        /// live socket and prove the iterator clamps the exposed slice to MTU.
+        #[cfg(test)]
+        pub fn test_forge_packet(&mut self, idx: usize, msg_len: u32, nrecv: u32) {
+            self.mmsghdr[idx].msg_hdr.msg_namelen = SOCKADDR_STORAGE_LENGTH;
+            self.mmsghdr[idx].msg_len = msg_len;
+            self.nrecv = nrecv;
+        }
     }
 
     /// Iterator over received packets in a RecvMmsgBuffer.
@@ -277,7 +313,11 @@ mod unix_impl {
             // Convert sockaddr_storage to SocketAddr
             let addr = sockaddr_storage_to_socket_addr(storage);
 
-            let data = &self.buffer.buffers[idx][..msg.msg_len as usize];
+            // The per-message buffer is exactly MTU bytes. No MSG_TRUNC is
+            // requested so msg_len is capped at MTU in practice, but clamp
+            // defensively so a mis-reported length can never index past it.
+            let len = (msg.msg_len as usize).min(MTU);
+            let data = &self.buffer.buffers[idx][..len];
             Some((addr, data))
         }
     }
@@ -305,6 +345,41 @@ mod unix_impl {
                 }
                 _ => None,
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io::{Error, ErrorKind};
+
+        use super::{RecvAction, RecvMmsgBuffer, recv_retry_action};
+        use crate::protocol::MTU;
+
+        #[test]
+        fn iter_clamps_oversized_msg_len_to_mtu() {
+            let mut buffer = RecvMmsgBuffer::new();
+            buffer.test_forge_packet(0, (MTU as u32) * 4, 1);
+
+            let mut iter = buffer.iter();
+            let (_addr, data) = iter.next().expect("one forged packet");
+            assert_eq!(data.len(), MTU, "oversized msg_len must clamp to MTU");
+            assert!(iter.next().is_none(), "only one packet was forged");
+        }
+
+        #[test]
+        fn recv_retry_action_classifies_errors() {
+            assert_eq!(
+                recv_retry_action(&Error::from(ErrorKind::Interrupted)),
+                RecvAction::Retry,
+            );
+            assert_eq!(
+                recv_retry_action(&Error::from(ErrorKind::WouldBlock)),
+                RecvAction::WouldBlock,
+            );
+            assert_eq!(
+                recv_retry_action(&Error::from_raw_os_error(libc::ECONNREFUSED)),
+                RecvAction::Hard,
+            );
         }
     }
 }
