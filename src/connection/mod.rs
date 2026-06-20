@@ -369,7 +369,11 @@ impl SrtlaConnection {
     }
 
     pub fn get_smooth_rtt_ms(&self) -> f64 {
-        self.rtt.kalman_rtt.value()
+        // The 2-state Kalman filter can overshoot negative on a sharp high->low
+        // RTT transition; a negative RTT is meaningless and would leak into the
+        // selection/CC math, so clamp it. Callers that need to tell a never-measured
+        // link from a genuine ~0 already test `smooth_rtt <= 0.0`.
+        self.rtt.kalman_rtt.value().max(0.0)
     }
 
     /// RTT velocity (trend) in ms/sample from the Kalman filter.

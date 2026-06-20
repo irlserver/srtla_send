@@ -232,7 +232,10 @@ impl RttTracker {
         if let Some(ts) = extract_keepalive_timestamp(data) {
             let now = now_ms();
             let rtt = now.saturating_sub(ts);
-            if rtt <= 10_000 {
+            // Reject rtt == 0 (same-ms reply or future timestamp from clock skew):
+            // a 0ms RTT is not a real sample and would seed rtt_min_ms = 0, making
+            // the link look artificially fast. Matches the ACK path (ack_nak.rs).
+            if rtt > 0 && rtt <= 10_000 {
                 self.update_estimate(rtt);
                 self.waiting_for_keepalive_response = false;
                 debug!(
@@ -425,6 +428,42 @@ mod tests {
             "should track rising RTT: est={}, vel={}",
             tracker.estimated_rtt_ms,
             tracker.kalman_rtt.velocity()
+        );
+    }
+
+    #[test]
+    fn test_keepalive_zero_rtt_rejected() {
+        // A keepalive reply whose timestamp is >= now (same-ms reply or future
+        // timestamp from clock skew) yields rtt == 0 via saturating_sub. A 0ms RTT
+        // is not a real sample and must be rejected, or it would initialize the
+        // filter and seed rtt_min_ms = 0, making the link look artificially fast.
+        // Parity with the ACK path (ack_nak.rs).
+        let mut tracker = RttTracker::default();
+        assert!((tracker.rtt_min_ms - 200.0).abs() < f64::EPSILON);
+
+        tracker.record_keepalive_sent();
+        assert!(tracker.waiting_for_keepalive_response);
+
+        let future_ts = now_ms() + 1_000_000;
+        let mut pkt = [0u8; 10];
+        pkt[0..2].copy_from_slice(&crate::protocol::SRTLA_TYPE_KEEPALIVE.to_be_bytes());
+        pkt[2..10].copy_from_slice(&future_ts.to_be_bytes());
+
+        let rtt = tracker.handle_keepalive_response(&pkt, "test");
+
+        assert_eq!(rtt, None, "zero-RTT keepalive must be rejected");
+        assert!(
+            !tracker.kalman_rtt.is_initialized(),
+            "zero-RTT keepalive must not initialize the Kalman filter"
+        );
+        assert!(
+            (tracker.rtt_min_ms - 200.0).abs() < f64::EPSILON,
+            "rtt_min_ms must stay at the default baseline, got {}",
+            tracker.rtt_min_ms
+        );
+        assert!(
+            !tracker.waiting_for_keepalive_response,
+            "the keepalive-wait flag must be cleared after a rejected reply"
         );
     }
 }
