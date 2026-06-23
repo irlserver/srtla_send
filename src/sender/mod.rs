@@ -1,6 +1,5 @@
 mod connections;
 mod housekeeping;
-mod keyframe;
 mod packet_handler;
 mod reload;
 #[cfg(any(test, feature = "test-internals"))]
@@ -155,8 +154,6 @@ pub async fn run_sender_with_config(
     let mut last_switch_time_ms: u64 = 0; // Track time of last connection switch
     let mut all_failed_at: Option<Instant> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
-    // Keyframe burst detector for priority scheduling
-    let mut keyframe_detector = keyframe::KeyframeDetector::new();
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
     // Enhanced selection as an admission gate.
     let mut weak_link_filter = selection::classifier::WeakLinkFilter::new();
@@ -205,7 +202,6 @@ pub async fn run_sender_with_config(
                             reg.has_connected,
                             &config_snap,
                             &critical_window,
-                            &mut keyframe_detector,
                         )
                         .await;
                         drain_packet_queue(

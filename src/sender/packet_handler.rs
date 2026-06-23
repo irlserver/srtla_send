@@ -6,7 +6,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, trace, warn};
 
-use super::keyframe::{self, KeyframeDetector};
 use super::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
 use super::uplink::UplinkPacket;
@@ -251,7 +250,6 @@ pub async fn handle_srt_packet(
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
     critical_window: &crate::priority::CriticalWindow,
-    keyframe_detector: &mut KeyframeDetector,
 ) {
     match res {
         Ok((n, src)) => {
@@ -291,33 +289,25 @@ pub async fn handle_srt_packet(
                 config_snap,
             );
 
-            // Keyframe priority: for SRT data packets, combine two signals —
-            // the packet-size heuristic (runs of 1316-byte packets) and the
-            // priority-sidecar "critical window" set by an encoder that
-            // actually knows a keyframe is in flight. Either signal routes
-            // the packet to the highest-quality link. Hints catch the cases
-            // the heuristic misses (small keyframes, lone parameter sets).
+            // Keyframe priority: route critical packets to the highest-quality
+            // link. The critical time window is opened over the priority
+            // sidecar by the encoder front-end, which parses NAL units and
+            // knows exactly when a keyframe / parameter set is in flight (see
+            // crate::priority). srtla_send sees only opaque SRT payloads, so it
+            // never guesses at keyframes itself.
             //
             // Only data packets have seq != None (control packets have MSB set).
-            if seq.is_some() {
-                let heuristic_keyframe = keyframe_detector.observe(n);
-                let window_critical = critical_window.is_critical_now(packet_time_ms);
-                if (heuristic_keyframe || window_critical)
-                    && let Some(best_idx) = keyframe::select_best_quality_idx(connections)
-                    && sel_idx != Some(best_idx)
-                {
-                    trace!(
-                        "critical override ({}): link {} -> {}",
-                        if window_critical {
-                            "window"
-                        } else {
-                            "heuristic"
-                        },
-                        sel_idx.map_or(-1, |i| i as i64),
-                        best_idx as i64
-                    );
-                    sel_idx = Some(best_idx);
-                }
+            if seq.is_some()
+                && critical_window.is_critical_now(packet_time_ms)
+                && let Some(best_idx) = crate::priority::select_best_quality_idx(connections)
+                && sel_idx != Some(best_idx)
+            {
+                trace!(
+                    "critical override (window): link {} -> {}",
+                    sel_idx.map_or(-1, |i| i as i64),
+                    best_idx as i64
+                );
+                sel_idx = Some(best_idx);
             }
 
             if let Some(sel_idx) = sel_idx {

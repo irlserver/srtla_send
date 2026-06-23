@@ -142,6 +142,29 @@ pub fn spawn_listener(
     })
 }
 
+/// Pick the highest-quality connection for a packet that lands inside a
+/// critical window. Among connected, schedulable links, returns the one with
+/// the best quality multiplier; `None` if none are schedulable (caller falls
+/// back to normal selection). This is the action taken while
+/// [`CriticalWindow::is_critical_now`] is true.
+pub fn select_best_quality_idx(conns: &[crate::connection::SrtlaConnection]) -> Option<usize> {
+    let mut best_idx = None;
+    let mut best_quality = f64::NEG_INFINITY;
+
+    for (i, conn) in conns.iter().enumerate() {
+        if !conn.connected || !conn.is_schedulable() {
+            continue;
+        }
+        let q = conn.quality_cache.multiplier;
+        if q > best_quality {
+            best_quality = q;
+            best_idx = Some(i);
+        }
+    }
+
+    best_idx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +190,40 @@ mod tests {
         assert!(w.is_critical_now(299));
         assert!(!w.is_critical_now(300));
         assert_eq!(w.windows_received(), 3);
+    }
+
+    #[test]
+    fn best_quality_idx_picks_highest() {
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(3));
+
+        conns[0].quality_cache.multiplier = 0.8;
+        conns[1].quality_cache.multiplier = 1.1;
+        conns[2].quality_cache.multiplier = 0.95;
+
+        assert_eq!(select_best_quality_idx(&conns), Some(1));
+    }
+
+    #[test]
+    fn best_quality_idx_skips_disconnected() {
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(3));
+
+        conns[0].quality_cache.multiplier = 0.8;
+        conns[1].quality_cache.multiplier = 1.1;
+        conns[1].connected = false; // best quality but disconnected
+        conns[2].quality_cache.multiplier = 0.95;
+
+        assert_eq!(select_best_quality_idx(&conns), Some(2));
+    }
+
+    #[test]
+    fn best_quality_idx_empty() {
+        let conns: Vec<crate::connection::SrtlaConnection> = vec![];
+        assert_eq!(select_best_quality_idx(&conns), None);
     }
 }
