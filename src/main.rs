@@ -78,17 +78,34 @@ struct Cli {
     #[arg(long = "exploration")]
     exploration: bool,
 
-    /// UDP bind address for the keyframe priority sidecar. Upstream encoders
-    /// send 5-byte datagrams here to open a critical routing window. Omit to
-    /// disable the sidecar and rely solely on the packet-size heuristic.
+    /// UDP bind address for the keyframe priority sidecar. The encoder
+    /// front-end sends 5-byte datagrams here to open a critical routing
+    /// window. Unauthenticated same-device IPC: bind loopback. Omit to
+    /// disable the sidecar (the keyframe-priority override is then inactive).
     /// Example: `127.0.0.1:7000`.
     #[arg(long = "priority-bind")]
     priority_bind: Option<std::net::SocketAddr>,
 
     /// TCP bind address for the Prometheus `/metrics` scrape endpoint.
-    /// Omit to disable. Example: `127.0.0.1:9099`.
+    /// Unauthenticated: bind loopback. Omit to disable.
+    /// Example: `127.0.0.1:9099`.
     #[arg(long = "metrics-bind")]
     metrics_bind: Option<std::net::SocketAddr>,
+}
+
+/// Warn when a sidecar is bound to a non-loopback address. These endpoints
+/// are unauthenticated same-device IPC (encoder front-end and local scrapers),
+/// so a routable bind exposes an open control / scrape surface. We warn rather
+/// than refuse so an operator can still bind elsewhere on a trusted network if
+/// they explicitly choose to.
+fn warn_if_not_loopback(what: &str, addr: std::net::SocketAddr) {
+    if !addr.ip().is_loopback() {
+        tracing::warn!(
+            %addr,
+            "{what} bound to a non-loopback address; it is unauthenticated and \
+             should normally bind 127.0.0.1 / ::1"
+        );
+    }
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -136,6 +153,7 @@ async fn main() -> Result<()> {
 
     let critical_window = priority::CriticalWindow::new();
     if let Some(bind) = args.priority_bind {
+        warn_if_not_loopback("priority sidecar (--priority-bind)", bind);
         priority::spawn_listener(
             bind,
             critical_window.clone(),
@@ -144,6 +162,7 @@ async fn main() -> Result<()> {
     }
 
     if let Some(bind) = args.metrics_bind {
+        warn_if_not_loopback("metrics endpoint (--metrics-bind)", bind);
         metrics::spawn_server(
             bind,
             shared_stats.clone(),
