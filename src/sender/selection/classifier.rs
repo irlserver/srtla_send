@@ -79,6 +79,25 @@ const MIN_TOTAL_BPS_FOR_CLASSIFICATION: f64 = 100_000.0;
 /// raise above 3.
 const WEAK_SUSTAIN_TICKS: u32 = 2;
 
+/// After a link has been continuously share-weak (LowShare/NoTraffic) for
+/// this many housekeeping ticks (~1Hz, so ~15s), force a probation re-test.
+/// Delay- and loss-driven weakness are exempt: those self-clear from live
+/// RTT/loss without needing traffic, so they can't latch.
+const PROBATION_INTERVAL_TICKS: u32 = 15;
+
+/// Length of the probation re-test window in ticks (~3s). The link is
+/// treated as not-weak for this long so selection routes it real traffic and
+/// it can re-prove its throughput share. A link that is genuinely bad still
+/// stays gated by the independent `loss_degraded` / delay gates even inside
+/// this window, so probation only ever re-tests marginal-but-usable links.
+///
+/// NOTE: both probation constants are starting points. Validate the window
+/// length in the network-sim harness before treating them as final: too
+/// short and a recovered link can't accrue enough share to clear the
+/// entering threshold; too long and a genuinely starved link draws traffic
+/// it can't use.
+const PROBATION_WINDOW_TICKS: u32 = 3;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WeakReason {
     /// Link passed all checks. Not weak.
@@ -126,6 +145,13 @@ pub struct ClassificationResult {
 pub struct WeakLinkFilter {
     prev_weak: HashMap<u64, bool>,
     delay_weak_streak: HashMap<u64, u32>,
+    /// Consecutive ticks a link has been share-weak (LowShare/NoTraffic),
+    /// used to trigger a probation re-test once it exceeds
+    /// `PROBATION_INTERVAL_TICKS`.
+    weak_streak: HashMap<u64, u32>,
+    /// Remaining forced not-weak ticks for a link currently inside a
+    /// probation re-test window.
+    probation_ticks: HashMap<u64, u32>,
 }
 
 impl WeakLinkFilter {
@@ -168,6 +194,8 @@ impl WeakLinkFilter {
             // across an idle period.
             self.prev_weak.clear();
             self.delay_weak_streak.clear();
+            self.weak_streak.clear();
+            self.probation_ticks.clear();
             return ClassificationResult {
                 selected_delay_ms: 0,
                 estimated_max_delay_ms: 0,
@@ -217,6 +245,8 @@ impl WeakLinkFilter {
         let leave_threshold_permille = (LEAVE_FAIR_SHARE_NUMERATOR / n_connected) as u32;
         let mut next_prev_weak: HashMap<u64, bool> = HashMap::with_capacity(conns.len());
         let mut next_delay_streak: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
+        let mut next_weak_streak: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
+        let mut next_probation: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
 
         for conn in conns {
             if !conn.connected {
@@ -284,6 +314,43 @@ impl WeakLinkFilter {
                 (false, WeakReason::Healthy)
             };
 
+            // Probation re-test — breaks the share-starvation latch (R1). A
+            // link gated for low share earns a crushed routing score, gets
+            // ~no traffic, so its share stays low and it stays gated: a
+            // self-sustaining lock the GATED_LINK_PENALTY trickle can't escape
+            // (exploration is off by default). After PROBATION_INTERVAL_TICKS
+            // continuously share-weak, force a PROBATION_WINDOW_TICKS window
+            // treating the link as not-weak, so selection routes it real
+            // traffic and it can re-prove its share. Emitting not-weak clears
+            // prev_weak across the window, so the post-window judgement uses
+            // the (lower) entering threshold and a recovered link can actually
+            // win the re-test. Delay weakness is exempt (it self-clears from
+            // live RTT), and `loss_degraded` keeps gating an actually-bad link
+            // mid-window, so probation only ever re-tests marginal links.
+            let share_weak =
+                weak && matches!(reason, WeakReason::LowShare | WeakReason::NoTraffic);
+            let mut probation = self.probation_ticks.get(&conn.conn_id).copied().unwrap_or(0);
+            let mut streak = self.weak_streak.get(&conn.conn_id).copied().unwrap_or(0);
+            let (weak, reason) = if probation > 0 {
+                probation -= 1;
+                streak = 0;
+                (false, WeakReason::Healthy)
+            } else if share_weak {
+                streak = streak.saturating_add(1);
+                if streak >= PROBATION_INTERVAL_TICKS {
+                    // Arm the window; this trigger tick stays gated, the next
+                    // PROBATION_WINDOW_TICKS ticks are forced not-weak.
+                    streak = 0;
+                    probation = PROBATION_WINDOW_TICKS;
+                }
+                (weak, reason)
+            } else {
+                streak = 0;
+                (weak, reason)
+            };
+            next_weak_streak.insert(conn.conn_id, streak);
+            next_probation.insert(conn.conn_id, probation);
+
             next_prev_weak.insert(conn.conn_id, weak);
             per_link.push(LinkClassification {
                 conn_id: conn.conn_id,
@@ -298,6 +365,8 @@ impl WeakLinkFilter {
 
         self.prev_weak = next_prev_weak;
         self.delay_weak_streak = next_delay_streak;
+        self.weak_streak = next_weak_streak;
+        self.probation_ticks = next_probation;
         ClassificationResult {
             selected_delay_ms: selected_delay,
             estimated_max_delay_ms,
