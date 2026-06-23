@@ -1,0 +1,24 @@
+src/sender/selection/classifier.rs
+  s_7429f2e0bcbbce::t_847ec26009140a 82-100
+  s_7429f2e0bcbbce::t_47aa6038b1cdad 248-249
+  s_7429f2e0bcbbce::t_216d69d0f1a491 197-198
+  s_7429f2e0bcbbce::t_98b567de92c6b5 368-369
+  s_7429f2e0bcbbce::t_01aca41721562e 317-352
+  s_7429f2e0bcbbce::t_4c473aefe1388a 148-154
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "cc5e6ed2ff94aad2c7900e6059871947172e217e",
+  "prompts": {},
+  "sessions": {
+    "s_7429f2e0bcbbce": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "652b9de1-3b5f-4c47-a9f3-0dfef71c7d5e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
