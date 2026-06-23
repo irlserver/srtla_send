@@ -449,17 +449,15 @@ impl LinkCongestionState {
         };
 
         // Fast-recovery accounting: arm the timer when leaving
-        // BackingOff or Drain into Climbing. While the timer is
-        // running and we're climbing, use the fast step.
+        // BackingOff or Drain into Climbing. The budget is consumed at the
+        // end of the tick, AFTER `pick_climb_mode` reads it below, so the
+        // arming tick itself counts toward the window and all
+        // FAST_RECOVERY_TICKS climbs use the fast step. Decrementing here
+        // would burn the first tick before it was ever used (the documented
+        // 5-tick window would only fire 4).
         if let (CcState::BackingOff | CcState::Drain, CcState::Climbing) = (prev_state, next_state)
         {
             self.fast_recovery_ticks = FAST_RECOVERY_TICKS;
-        }
-        if next_state == CcState::Climbing && self.fast_recovery_ticks > 0 {
-            self.fast_recovery_ticks = self.fast_recovery_ticks.saturating_sub(1);
-        } else if next_state != CcState::Climbing {
-            // Lose the budget if we drop back out of Climbing.
-            self.fast_recovery_ticks = 0;
         }
 
         self.state = next_state;
@@ -503,7 +501,14 @@ impl LinkCongestionState {
                 if sane_observed > 0 {
                     prev.max(MIN_TARGET_BPS as f64) + step.min(measured_cap - prev).max(0.0)
                 } else {
-                    prev + step
+                    // No measured traffic this tick: hold the target instead of
+                    // ramping into headroom that doesn't exist. A previously-idle
+                    // link must re-justify growth from real throughput, otherwise
+                    // the BDP in-flight cap and the soft-cap multiplier (both
+                    // derived from target_bps) climb to MAX_TARGET_BPS and go
+                    // inert, so the link gets flooded with no brake on its first
+                    // real burst.
+                    prev
                 }
             }
             CcState::Holding => {
@@ -516,11 +521,30 @@ impl LinkCongestionState {
             }
             CcState::Drain => {
                 self.climb_mode = ClimbMode::Normal;
-                (prev * DRAIN_PERMILLE as f64) / 1000.0
+                // One-shot, per DRAIN_PERMILLE's contract: cut hard only on the
+                // transition into Drain, then hold while we stay drained.
+                // Applying the cut every tick compounds it, collapsing
+                // target_bps to the floor within ~11 ticks and producing
+                // saw-tooth oscillation under sustained RTT inflation. Leaving
+                // and re-entering Drain applies a fresh cut.
+                if prev_state != CcState::Drain {
+                    (prev * DRAIN_PERMILLE as f64) / 1000.0
+                } else {
+                    prev
+                }
             }
         };
 
         self.target_bps = (next as u64).clamp(MIN_TARGET_BPS, MAX_TARGET_BPS);
+
+        // Consume one fast-recovery tick now that pick_climb_mode has read
+        // the budget for this tick. Drop the remaining budget if we left
+        // Climbing (a fresh backoff/drain re-arms it).
+        if next_state == CcState::Climbing {
+            self.fast_recovery_ticks = self.fast_recovery_ticks.saturating_sub(1);
+        } else {
+            self.fast_recovery_ticks = 0;
+        }
     }
 
     /// Fold the latest windowed loss permille into the time-decayed
