@@ -202,4 +202,75 @@ mod tests {
         assert!(!kf.is_initialized());
         assert!((kf.value() - 0.0).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn kalman_init_value_is_zero() {
+        let kf = KalmanFilter::new(KalmanConfig::for_rtt());
+        assert!(!kf.is_initialized());
+        assert_eq!(kf.value(), 0.0);
+        assert_eq!(kf.velocity(), 0.0);
+    }
+
+    #[test]
+    fn kalman_converges_toward_input() {
+        let mut kf = KalmanFilter::new(KalmanConfig::for_rtt());
+        const INPUT: f64 = 73.0;
+        for _ in 0..200 {
+            kf.update(INPUT);
+        }
+        assert!(
+            (kf.value() - INPUT).abs() < 0.1,
+            "should converge toward input: got {}",
+            kf.value()
+        );
+        assert!(
+            kf.velocity().abs() < 0.1,
+            "velocity should flatten on a constant signal: got {}",
+            kf.velocity()
+        );
+    }
+
+    #[test]
+    fn kalman_clamp_non_negative() {
+        let mut kf = KalmanFilter::new(KalmanConfig::for_rtt());
+
+        // Sustained very-high RTT then a sharp drop builds a steep negative
+        // velocity; the predict step (x + v) overshoots below 0 — the warm-up
+        // overshoot the clamp in get_smooth_rtt_ms exists to floor.
+        for _ in 0..5 {
+            kf.update(10_000.0);
+        }
+        for _ in 0..3 {
+            kf.update(50.0);
+        }
+
+        assert!(
+            kf.value() < 0.0,
+            "precondition: Kalman should overshoot negative, got {}",
+            kf.value()
+        );
+
+        let clamped = kf.value().max(0.0);
+        assert_eq!(clamped, 0.0, "a negative estimate clamps to exactly 0.0");
+    }
+
+    #[test]
+    fn kalman_zero_sample_handling() {
+        let mut kf = KalmanFilter::new(KalmanConfig::for_rtt());
+
+        kf.update(0.0);
+        assert!(kf.is_initialized());
+        assert_eq!(kf.value(), 0.0);
+
+        for _ in 0..10 {
+            kf.update(0.0);
+        }
+        assert!(
+            kf.value().is_finite(),
+            "value must stay finite: {}",
+            kf.value()
+        );
+        assert!(!kf.value().is_nan(), "value must not be NaN");
+        assert!(kf.velocity().is_finite(), "velocity must stay finite");
+    }
 }

@@ -61,3 +61,68 @@ impl BitrateTracker {
         self.current_bitrate_bps / 1_000_000.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitrate_send_raises_estimate() {
+        let mut t = BitrateTracker::default();
+        assert_eq!(t.current_bitrate_bps, 0.0);
+
+        // Backdate the window so the next calculate() crosses the 2s interval.
+        t.last_rate_update_ms = now_ms().saturating_sub(2_500);
+        t.update_on_send(500_000);
+        assert_eq!(t.bytes_sent_total, 500_000);
+
+        t.calculate();
+        assert!(
+            t.current_bitrate_bps > 0.0,
+            "sending bytes must raise the estimate, got {}",
+            t.current_bitrate_bps
+        );
+    }
+
+    #[test]
+    fn bitrate_idle_decay() {
+        let mut t = BitrateTracker::default();
+
+        // Establish a non-zero estimate.
+        t.last_rate_update_ms = now_ms().saturating_sub(2_500);
+        t.update_on_send(500_000);
+        t.calculate();
+        assert!(t.current_bitrate_bps > 0.0);
+
+        // Next window with no further sends: bytes_diff == 0 -> estimate decays to 0.
+        t.last_rate_update_ms = now_ms().saturating_sub(2_500);
+        t.calculate();
+        assert_eq!(
+            t.current_bitrate_bps, 0.0,
+            "an idle window must decay the estimate to zero"
+        );
+    }
+
+    #[test]
+    fn bitrate_wire_bytes_basis() {
+        let mut t = BitrateTracker::default();
+
+        let before = now_ms().saturating_sub(4_000);
+        t.last_rate_update_ms = before;
+        t.bytes_sent_window = 0;
+        t.update_on_send(1_000_000);
+
+        t.calculate();
+
+        // calculate() stamps last_rate_update_ms with the now_ms() it used, so the
+        // exact elapsed window is recoverable for a precise expectation.
+        let elapsed = t.last_rate_update_ms.saturating_sub(before);
+        let expected = (1_000_000u64 * 8) as f64 * 1000.0 / elapsed as f64;
+        assert!(
+            (t.current_bitrate_bps - expected).abs() < 1.0,
+            "bitrate is wire-bytes/s x8 (bps): got {}, expected {}",
+            t.current_bitrate_bps,
+            expected
+        );
+    }
+}
