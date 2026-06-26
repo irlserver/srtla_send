@@ -19,8 +19,8 @@ fn test_random_walk_stability() {
 
     let mut stack = SrtlaTestStack::start("rw", 2, &[]).expect("start stack");
 
-    // Wait for registration
-    thread::sleep(Duration::from_secs(5));
+    // Wait for registration to complete (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     let scenario_cfg = ScenarioConfig {
         seed: 42,
@@ -123,8 +123,8 @@ fn test_step_change_convergence() {
 
     let mut stack = SrtlaTestStack::start("step", 2, &[]).expect("start stack");
 
-    // Wait for registration
-    thread::sleep(Duration::from_secs(5));
+    // Wait for registration to complete (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     // Phase 1: Stable, good conditions (5s)
     stack

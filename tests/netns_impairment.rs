@@ -40,8 +40,8 @@ fn test_asymmetric_delay() {
         )
         .expect("impair link 1");
 
-    // Wait for registration + RTT measurement
-    thread::sleep(Duration::from_secs(5));
+    // Wait for registration to complete (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     // Inject some data so RTT tracking kicks in
     common::inject_packets(&stack, 200).expect("inject packets");
@@ -66,8 +66,8 @@ fn test_loss_triggers_window_reduction() {
 
     let mut stack = SrtlaTestStack::start("loss", 2, &[]).expect("start stack");
 
-    // Wait for clean registration first
-    thread::sleep(Duration::from_secs(5));
+    // Wait for clean registration first (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     // Apply 10% loss on link 0
     stack
@@ -126,7 +126,8 @@ fn test_tbf_bandwidth_limit() {
         )
         .expect("impair link 1");
 
-    thread::sleep(Duration::from_secs(5));
+    // Wait for registration to complete (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     // Inject a burst of data
     common::inject_packets(&stack, 500).expect("inject packets");

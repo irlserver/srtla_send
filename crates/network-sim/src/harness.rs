@@ -352,6 +352,42 @@ pub fn wait_for_udp_listener(ns: &Namespace, port: u16, timeout: Duration) -> Re
     }
 }
 
+/// Poll `ss -uan` inside `ns` until at least `min_count` UDP sockets are
+/// connected to `peer_ip:peer_port`. The sender `connect()`s one socket per
+/// source IP to the receiver as it brings each uplink online, so a connected
+/// peer entry is the observable readiness signal that replaces a fixed
+/// registration sleep — it returns as soon as the state appears.
+pub fn wait_for_connected_uplinks(
+    ns: &Namespace,
+    peer_ip: &str,
+    peer_port: u16,
+    min_count: usize,
+    timeout: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    let peer = format!("{peer_ip}:{peer_port}");
+    let mut last_ss_output;
+
+    loop {
+        let out = ns.exec("ss", &["-uan"])?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let count = stdout.lines().filter(|line| line.contains(&peer)).count();
+        if count >= min_count {
+            return Ok(());
+        }
+        last_ss_output = stdout.to_string();
+
+        if start.elapsed() > timeout {
+            bail!(
+                "timeout waiting for {min_count} connected uplink(s) to {peer} in ns {} (saw \
+                 {count})\nlast ss -uan output:\n{last_ss_output}",
+                ns.name
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SrtlaTestStack
 // ---------------------------------------------------------------------------
@@ -475,6 +511,11 @@ impl SrtlaTestStack {
     /// The local SRT port that srtla_send listens on (for injecting test data).
     pub fn sender_srt_port(&self) -> u16 {
         SRTLA_SEND_SRT_PORT
+    }
+
+    /// The receiver-side srtla_rec port the sender's uplink sockets connect to.
+    pub fn receiver_srtla_port(&self) -> u16 {
+        SRTLA_REC_PORT
     }
 
     /// Stop all processes and collect their output.

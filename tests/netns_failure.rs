@@ -19,8 +19,8 @@ fn test_link_failure_failover() {
 
     let mut stack = SrtlaTestStack::start("fail", 2, &[]).expect("start stack");
 
-    // Let both links register
-    thread::sleep(Duration::from_secs(5));
+    // Wait for registration to complete (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     // Inject background data
     common::inject_packets(&stack, 100).expect("inject initial data");
@@ -60,8 +60,8 @@ fn test_link_recovery() {
 
     let mut stack = SrtlaTestStack::start("recv", 2, &[]).expect("start stack");
 
-    // Let both links register
-    thread::sleep(Duration::from_secs(5));
+    // Wait for registration to complete (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     // Kill link 0
     stack
