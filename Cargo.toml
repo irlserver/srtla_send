@@ -66,6 +66,7 @@ tokio-test = "0.4"
 tempfile = "3"
 assert_matches = "1"
 network-sim = { path = "crates/network-sim" }
+proptest = "1.11.0"
 
 [profile.dev]
 opt-level = 1
