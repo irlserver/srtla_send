@@ -1,0 +1,23 @@
+src/connection/bitrate.rs
+  s_25750ab41681f3::t_5793f9ea672caa 64-65
+  s_25750ab41681f3::t_1b9ef0a2291ffe 66-68
+  s_25750ab41681f3::t_9e3a4e9af1ea06 69-128
+src/kalman.rs
+  s_25750ab41681f3::t_67b74d650e4ab9 205-275
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "195fe784ced0cdb9c355230e7288d95c51c4705e",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
