@@ -946,10 +946,8 @@ mod tests {
         // Advance the paused clock well within the tracking window (no real sleep).
         advance_test_clock(Duration::from_millis(50)).await;
         let within = base + 50;
-        assert!(
-            50 < SEQUENCE_TRACKING_MAX_AGE_MS,
-            "50ms must be inside the dedup window"
-        );
+        // 50ms must be inside the dedup window (checked at compile time).
+        const { assert!(50 < SEQUENCE_TRACKING_MAX_AGE_MS) };
         assert_eq!(
             seq_tracker.get(seq, within),
             Some(connections[0].conn_id),

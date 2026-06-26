@@ -68,11 +68,13 @@ mod tests {
 
     #[test]
     fn bitrate_send_raises_estimate() {
-        let mut t = BitrateTracker::default();
+        // Backdate the window so the next calculate() crosses the 2s interval.
+        let mut t = BitrateTracker {
+            last_rate_update_ms: now_ms().saturating_sub(2_500),
+            ..Default::default()
+        };
         assert_eq!(t.current_bitrate_bps, 0.0);
 
-        // Backdate the window so the next calculate() crosses the 2s interval.
-        t.last_rate_update_ms = now_ms().saturating_sub(2_500);
         t.update_on_send(500_000);
         assert_eq!(t.bytes_sent_total, 500_000);
 
@@ -86,10 +88,11 @@ mod tests {
 
     #[test]
     fn bitrate_idle_decay() {
-        let mut t = BitrateTracker::default();
-
         // Establish a non-zero estimate.
-        t.last_rate_update_ms = now_ms().saturating_sub(2_500);
+        let mut t = BitrateTracker {
+            last_rate_update_ms: now_ms().saturating_sub(2_500),
+            ..Default::default()
+        };
         t.update_on_send(500_000);
         t.calculate();
         assert!(t.current_bitrate_bps > 0.0);
@@ -105,11 +108,12 @@ mod tests {
 
     #[test]
     fn bitrate_wire_bytes_basis() {
-        let mut t = BitrateTracker::default();
-
         let before = now_ms().saturating_sub(4_000);
-        t.last_rate_update_ms = before;
-        t.bytes_sent_window = 0;
+        let mut t = BitrateTracker {
+            last_rate_update_ms: before,
+            bytes_sent_window: 0,
+            ..Default::default()
+        };
         t.update_on_send(1_000_000);
 
         t.calculate();
