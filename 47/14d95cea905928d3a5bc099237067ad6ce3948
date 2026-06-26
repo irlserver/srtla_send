@@ -1,0 +1,23 @@
+tests/parser_proptest.rs
+  s_25750ab41681f3::t_2a4566478c13fb 1-181
+Cargo.toml
+  s_25750ab41681f3::t_7c8d788d2bc29a 69
+Cargo.lock
+  s_25750ab41681f3::t_10ee3067e9404c 76-96,219-224,408-416,463-487,549-557,594-605,722,927-932,957-965
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "4714d95cea905928d3a5bc099237067ad6ce3948",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
