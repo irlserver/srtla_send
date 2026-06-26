@@ -1,0 +1,23 @@
+src/tests/keepalive_interop_tests.rs
+  s_25750ab41681f3::t_cc0fdc18161a8d 1-166
+tests/srtla_wire_conformance.rs
+  s_25750ab41681f3::t_ee3a816256a066 1-207
+src/tests/mod.rs
+  s_25750ab41681f3::t_0335166a4ac6d2 16-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "38646f7d5c7511634640e3b457d71a7117e08df8",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
