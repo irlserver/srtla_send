@@ -14,6 +14,9 @@ pub mod sender_tests;
 pub mod protocol_tests;
 
 #[cfg(test)]
+pub mod keepalive_interop_tests;
+
+#[cfg(test)]
 pub mod integration_tests;
 
 #[cfg(test)]
