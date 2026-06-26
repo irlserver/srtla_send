@@ -1,0 +1,33 @@
+tests/common/mod.rs
+  s_25750ab41681f3::t_c22ef7a0ed60df 6-24,26-27
+  s_25750ab41681f3::t_f5072e5bc4ff49 25
+  s_25750ab41681f3::t_387f11bda0aae3 28-29
+crates/network-sim/src/harness.rs
+  s_25750ab41681f3::t_ae336f7626f8f3 355-390,516-520
+crates/network-sim/src/lib.rs
+  s_25750ab41681f3::t_95bbdcdbc77262 22
+tests/netns_basic.rs
+  s_25750ab41681f3::t_cf483533d256b5 22-23,48-49,54
+tests/netns_failure.rs
+  s_25750ab41681f3::t_64167fa02ce295 22-23,63-64
+tests/netns_impairment.rs
+  s_25750ab41681f3::t_9661cabd632c07 43-44,69-70,129-130
+tests/netns_scenario.rs
+  s_25750ab41681f3::t_f08e09fc3455cf 22-23,126-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "d041e3f16a25620a890fe88d73a9cd1f92cda106",
+  "prompts": {},
+  "sessions": {
+    "s_25750ab41681f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "994a6ac3-a034-4ee9-98d7-03f39aecc32a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
