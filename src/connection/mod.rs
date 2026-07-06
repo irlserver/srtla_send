@@ -153,6 +153,19 @@ pub struct SrtlaConnection {
     pub(crate) last_sent: Option<Instant>,
     /// Timestamp of the last keepalive sent (for periodic telemetry)
     pub(crate) last_keepalive_sent: Option<Instant>,
+    /// `now_ms()` of this link's last delivery proof: an EARNED ACK (this link
+    /// owned an acked seq) or a keepalive-RTT response. Stamped ONLY at those
+    /// two sites — NEVER on generic inbound bytes (unlike `last_received`), so a
+    /// link that merely echoes traffic while its ACK/RTT path is dead still goes
+    /// stale. `0` = no proof yet. Read only by the `stall_deselect` selection
+    /// guard; never a liveness/timeout signal.
+    pub(crate) last_ack_or_rtt_sample_ms: u64,
+    /// Transient per-select flag: set by `select_connection_idx` when
+    /// `stall_deselect` is on and this link is a stalled black hole while a
+    /// healthier link exists. Recomputed every select call and read only by the
+    /// mode selectors in that same call; it is a selection penalty ONLY and
+    /// never affects `is_timed_out`/re-registration.
+    pub(crate) stall_gated: bool,
     // Sub-structs for organized state management
     #[cfg(feature = "test-internals")]
     pub rtt: RttTracker,
@@ -243,6 +256,8 @@ impl SrtlaConnection {
             last_received: None,
             last_sent: None,
             last_keepalive_sent: None,
+            last_ack_or_rtt_sample_ms: 0,
+            stall_gated: false,
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
             bitrate: BitrateTracker::default(),
@@ -503,6 +518,24 @@ impl SrtlaConnection {
         self.phase.is_schedulable()
     }
 
+    /// `stall_deselect` signal (pure read; never mutates). True for a connected
+    /// link whose in-flight backlog is at or above `min_in_flight` AND whose
+    /// last delivery proof (earned-ACK or keepalive-RTT sample) is older than
+    /// `stale_ms`. `now_ms` is the selection clock.
+    ///
+    /// A link that has produced no proof yet (`last_ack_or_rtt_sample_ms == 0`)
+    /// is never stalled: a fresh burst before its first ACK must not be
+    /// mistaken for a black hole. A genuinely dead-from-birth link is pruned by
+    /// `is_timed_out`/`CONN_TIMEOUT`, not here. This is a selection penalty
+    /// input ONLY — it never affects `is_timed_out`/re-registration/CONN_TIMEOUT.
+    #[inline]
+    pub(crate) fn is_stalled(&self, now_ms: u64, min_in_flight: i32, stale_ms: u64) -> bool {
+        self.connected
+            && self.in_flight_packets >= min_in_flight
+            && self.last_ack_or_rtt_sample_ms != 0
+            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) >= stale_ms
+    }
+
     /// Whether this link has gone silent past `CONN_TIMEOUT`.
     ///
     /// `last_received` is a `tokio::time::Instant`, so every `elapsed()` read below
@@ -579,6 +612,10 @@ impl SrtlaConnection {
         self.highest_acked_seq = i32::MIN;
         self.batch_sender.reset();
         self.phase = LinkPhase::Registering;
+        // A reset link has no delivery proof; clear the stall signal so it is
+        // not classed as stalled the instant it reconnects with a backlog.
+        self.last_ack_or_rtt_sample_ms = 0;
+        self.stall_gated = false;
     }
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1.

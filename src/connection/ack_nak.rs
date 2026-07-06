@@ -79,6 +79,12 @@ impl SrtlaConnection {
         if found {
             self.in_flight_packets = self.packet_log.len() as i32;
 
+            // Delivery proof for `stall_deselect`: this link OWNED the acked seq,
+            // the strongest per-link proof it is still moving data. Stamped here
+            // and at the keepalive-RTT site only (see `packet_io.rs`), never on
+            // generic inbound bytes, so a stalled-but-echoing link stays stale.
+            self.last_ack_or_rtt_sample_ms = now_ms();
+
             if classic_mode {
                 self.congestion.handle_srtla_ack_specific_classic(
                     &mut self.window,

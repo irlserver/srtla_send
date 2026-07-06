@@ -166,6 +166,12 @@ impl SrtlaConnection {
                     .is_some()
                 {
                     self.record_rtt_probe();
+                    // Delivery proof for `stall_deselect`: a completed keepalive
+                    // round-trip proves this link's path is alive even while no
+                    // data ACKs are landing. Pairs with the earned-ACK site
+                    // (see `ack_nak.rs`); together they let a recovered link
+                    // un-gate itself without the scheduler probing blindly.
+                    self.last_ack_or_rtt_sample_ms = crate::utils::now_ms();
                 }
             } else {
                 incoming

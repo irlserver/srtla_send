@@ -52,6 +52,15 @@ The sender supports two mutually exclusive scheduling modes:
 - **Enable via**: `--exploration` flag or the `set_exploration` JSON-RPC method
 - **Use Case**: More aggressive connection testing in unstable network conditions
 
+### Stalled-Link Deselect (On by Default)
+
+- **What it does**: Temporarily excludes a link that is holding a large in-flight backlog while producing no fresh delivery proof (no earned ACK and no keepalive round-trip within the staleness window), as long as a healthier link can carry the traffic.
+- **Independent liveness signal**: The staleness clock is stamped only on an earned ACK or a completed keepalive round-trip, never on generic inbound bytes, so a link that merely echoes traffic while its data path is dead still goes stale.
+- **Self-recovering**: A deselected link keeps sending keepalives. Its next keepalive round-trip clears the stall on its own, so the scheduler never probes a dead link blindly. Genuinely dead links are still pruned by the normal 15 second connection timeout.
+- **Selection penalty only**: It never affects timeouts, re-registration, or connection liveness. It is a routing decision, nothing more.
+- **Disable via**: `--no-stall-deselect`, or the `set_stall_deselect` JSON-RPC method. Thresholds are tunable with `--stall-min-in-flight` and `--stall-ack-stale-ms`.
+- **Use Case**: Satellite links (Starlink) during obstructions or handovers, where a link keeps a backlog but briefly stops delivering.
+
 ## Assumptions and Prerequisites
 
 This tool assumes that data is streamed from a SRT _sender_ in _caller_ mode to a SRT _receiver_ in _listener_ mode. To get any benefit over using SRT directly, the _sender_ should have 2 or more network links to the SRT listener (in the typical application, these would be internet-connected 4G modems). The sender needs to have [source routing](https://tldp.org/HOWTO/Adv-Routing-HOWTO/lartc.rpdb.simple.html) configured, as srtla uses `bind()` to map UDP sockets to a given connection.
@@ -129,6 +138,9 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 - `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default)
 - `--no-quality`: Disable quality scoring (enhanced only)
 - `--exploration`: Enable connection exploration (enhanced only)
+- `--no-stall-deselect`: Disable the stalled-link deselect guard (on by default). The guard skips a link whose in-flight backlog is high while its last delivery proof (an earned ACK or keepalive round-trip) has gone stale, provided a healthier link can carry the traffic. The link recovers automatically on its next keepalive round-trip, so nothing is probed blindly. This mainly helps satellite links (Starlink obstructions and handovers) that keep a large backlog while briefly delivering nothing.
+- `--stall-min-in-flight <N>`: In-flight backlog (packets) at or above which a link becomes a stall candidate (default 32)
+- `--stall-ack-stale-ms <MS>`: Delivery-proof staleness window in milliseconds after which a stall candidate is deselected (default 3000)
 - `--config <PATH>`: Path to a TOML config file (reloaded on SIGHUP)
 - `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `/tmp/srtla.sock`)
 - `--priority-bind <ADDR:PORT>`: UDP sidecar address for encoder keyframe priority hints

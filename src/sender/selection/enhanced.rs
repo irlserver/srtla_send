@@ -161,6 +161,7 @@ pub fn select_connection(
             && c.is_schedulable()
             && !c.weak
             && !c.loss_degraded
+            && !c.stall_gated
             && !in_flight_cap_exceeded(c)
     });
 
@@ -172,7 +173,10 @@ pub fn select_connection(
     let mut current_score: Option<f64> = None;
 
     for (i, c) in conns.iter_mut().enumerate() {
-        if c.is_timed_out() || !c.is_schedulable() {
+        // A stall-gated link is a black hole with a healthier alternative
+        // available (see `apply_stall_gate`); hard-skip it like a timed-out link
+        // rather than crushing its score, since a trickle would only add latency.
+        if c.is_timed_out() || !c.is_schedulable() || c.stall_gated {
             continue;
         }
         // Hard-skip only the in-flight cap: it bounds queueing delay and
@@ -232,7 +236,8 @@ pub fn select_connection(
             let last_still_valid = last < conns.len()
                 && !conns[last].is_timed_out()
                 && conns[last].connected
-                && conns[last].is_schedulable();
+                && conns[last].is_schedulable()
+                && !conns[last].stall_gated;
 
             // If in cooldown period and last connection is still valid, keep it
             if in_switch_cooldown && last_still_valid {

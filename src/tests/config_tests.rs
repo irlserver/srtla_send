@@ -15,17 +15,33 @@ mod tests {
 
     #[test]
     fn test_config_from_cli() {
-        let config = DynamicConfig::from_cli(SchedulingMode::Enhanced, false, false);
+        let config = DynamicConfig::from_cli(
+            SchedulingMode::Enhanced,
+            false,
+            false,
+            false,
+            crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
+            crate::config::STALL_ACK_STALE_MS,
+        );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
         assert!(!snap.exploration_enabled);
+        assert!(snap.stall_deselect);
 
-        let config = DynamicConfig::from_cli(SchedulingMode::Classic, true, true);
+        let config = DynamicConfig::from_cli(
+            SchedulingMode::Classic,
+            true,
+            true,
+            true,
+            crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
+            crate::config::STALL_ACK_STALE_MS,
+        );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);
         assert!(!snap.quality_enabled);
         assert!(snap.exploration_enabled);
+        assert!(!snap.stall_deselect); // no_stall_deselect=true disables it
     }
 
     #[test]
@@ -60,6 +76,7 @@ mod tests {
             mode: SchedulingMode::Classic,
             quality_enabled: true,
             exploration_enabled: true,
+            ..ConfigSnapshot::default()
         };
         assert!(!snap.effective_quality_enabled());
         assert!(!snap.effective_exploration_enabled());
@@ -69,6 +86,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: true,
+            ..ConfigSnapshot::default()
         };
         assert!(snap.effective_quality_enabled());
         assert!(snap.effective_exploration_enabled());

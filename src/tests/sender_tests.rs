@@ -28,6 +28,7 @@ mod tests {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
@@ -51,6 +52,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
         assert_eq!(
@@ -79,6 +81,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
         assert_eq!(
@@ -108,6 +111,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
         assert_eq!(
@@ -136,6 +140,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
         assert_eq!(
@@ -162,6 +167,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
         assert_eq!(
@@ -190,6 +196,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
         assert_eq!(
@@ -224,6 +231,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: true,
+            ..ConfigSnapshot::default()
         };
         // last_idx = 0 (current best), well outside the switch cooldown.
         let selected = select_connection_idx(&mut connections, Some(0), 0, current_time, &config);
@@ -255,6 +263,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
@@ -283,6 +292,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
@@ -308,6 +318,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
@@ -343,6 +354,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         // After cooldown: per-packet selection can now choose the better connection
@@ -382,6 +394,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         // Cooldown is bypassed when current connection is invalid/timed out
@@ -418,6 +431,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: true, // exploration enabled
+            ..ConfigSnapshot::default()
         };
 
         // Enable exploration, but should be blocked by cooldown
@@ -455,6 +469,7 @@ mod tests {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         // Classic mode: per-packet selection ALWAYS picks highest score connection
@@ -672,6 +687,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
@@ -689,6 +705,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: true,
+            ..ConfigSnapshot::default()
         };
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic

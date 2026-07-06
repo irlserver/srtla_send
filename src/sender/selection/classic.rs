@@ -25,7 +25,9 @@ pub fn select_connection(conns: &[SrtlaConnection]) -> Option<usize> {
     let mut best_score: i32 = -1;
 
     for (i, c) in conns.iter().enumerate() {
-        if c.is_timed_out() || !c.is_schedulable() {
+        // `stall_gated` is only ever set when a healthier link exists (see
+        // `apply_stall_gate`), so skipping it here can never starve the pool.
+        if c.is_timed_out() || !c.is_schedulable() || c.stall_gated {
             continue;
         }
         let score = c.get_score();

@@ -399,6 +399,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
         stats.update(&[], &config, None, None);
         let snapshot = stats.get();

@@ -55,6 +55,16 @@ pub fn select_connection_idx(
     current_time_ms: u64,
     config: &ConfigSnapshot,
 ) -> Option<usize> {
+    // Stalled-link deselect (default on). A link is gated only when it is a
+    // stalled black hole AND at least one healthier link can carry the traffic,
+    // so the last usable link is never gated — the mode selectors then skip
+    // `stall_gated` links exactly as they skip timed-out ones. Gating is a pure
+    // selection penalty: a gated link keeps sending keepalives, and its next
+    // keepalive-RTT sample clears the stall on its own (no blind reprobe).
+    // Recomputed for every link on every call so the transient flag can never go
+    // stale; collapses to clearing the flag when the guard is off.
+    apply_stall_gate(conns, current_time_ms, config);
+
     match config.mode {
         SchedulingMode::Classic => {
             // Classic mode: simple capacity-based selection (no dampening, matches original C)
@@ -71,6 +81,34 @@ pub fn select_connection_idx(
                 config.effective_exploration_enabled(),
             )
         }
+    }
+}
+
+/// Recompute the transient `stall_gated` flag on every link.
+///
+/// A link is gated when the guard is on, the link is stalled
+/// ([`SrtlaConnection::is_stalled`]), and at least one non-stalled schedulable
+/// link exists to carry the traffic. That "any healthy" guard guarantees we
+/// never gate the last usable link, so the mode selectors can treat a gated
+/// link as unschedulable without a fallback pass. When the guard is off (or no
+/// link is stalled) every flag is cleared, restoring byte-for-byte baseline
+/// selection.
+#[inline]
+fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config: &ConfigSnapshot) {
+    let min_in_flight = config.stall_min_in_flight;
+    let stale_ms = config.stall_ack_stale_ms;
+
+    let any_healthy = config.stall_deselect
+        && conns.iter().any(|c| {
+            !c.is_timed_out()
+                && c.is_schedulable()
+                && !c.is_stalled(current_time_ms, min_in_flight, stale_ms)
+        });
+
+    for c in conns.iter_mut() {
+        // Short-circuit keeps `is_stalled` off the hot path when the guard is
+        // off or nothing healthy exists to fail over to.
+        c.stall_gated = any_healthy && c.is_stalled(current_time_ms, min_in_flight, stale_ms);
     }
 }
 
@@ -97,6 +135,7 @@ mod tests {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         // Classic mode should pick connection 1 (highest score) even during cooldown
@@ -131,6 +170,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
 
         // Enhanced mode should stay with connection 0 due to cooldown
@@ -170,6 +210,7 @@ mod tests {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
             exploration_enabled: false,
+            ..ConfigSnapshot::default()
         };
         let result = select_connection_idx(&mut conns, None, 0, 0, &config);
         assert_eq!(result, None);

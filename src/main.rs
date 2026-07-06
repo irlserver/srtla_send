@@ -78,6 +78,21 @@ struct Cli {
     #[arg(long = "exploration")]
     exploration: bool,
 
+    /// Disable the stalled-link deselect guard (on by default). The guard skips
+    /// a link whose in-flight backlog is high while its last delivery proof has
+    /// gone stale, provided a healthier link can carry the traffic; it recovers
+    /// the link automatically on its next keepalive round-trip.
+    #[arg(long = "no-stall-deselect")]
+    no_stall_deselect: bool,
+    /// In-flight packet backlog at or above which a link becomes a stall
+    /// candidate for `--no-stall-deselect`.
+    #[arg(long = "stall-min-in-flight", default_value_t = config::STALL_MIN_IN_FLIGHT_PACKETS)]
+    stall_min_in_flight: i32,
+    /// Delivery-proof staleness window (ms) after which a stall-candidate link
+    /// is deselected.
+    #[arg(long = "stall-ack-stale-ms", default_value_t = config::STALL_ACK_STALE_MS)]
+    stall_ack_stale_ms: u64,
+
     /// UDP bind address for the keyframe priority sidecar. The encoder
     /// front-end sends 5-byte datagrams here to open a critical routing
     /// window. Unauthenticated same-device IPC: bind loopback. Omit to
@@ -144,7 +159,14 @@ async fn main() -> Result<()> {
         tracing::debug!("TOML config loaded: {:?}", toml_cfg);
     }
 
-    let config = config::DynamicConfig::from_cli(args.mode, args.no_quality, args.exploration);
+    let config = config::DynamicConfig::from_cli(
+        args.mode,
+        args.no_quality,
+        args.exploration,
+        args.no_stall_deselect,
+        args.stall_min_in_flight,
+        args.stall_ack_stale_ms,
+    );
 
     // Create shared stats for telemetry export
     let shared_stats = stats::SharedStats::new();

@@ -11,6 +11,9 @@ pub mod config_tests;
 pub mod sender_tests;
 
 #[cfg(test)]
+pub mod stall_deselect_tests;
+
+#[cfg(test)]
 pub mod protocol_tests;
 
 #[cfg(test)]
