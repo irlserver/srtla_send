@@ -1,0 +1,77 @@
+src/main.rs
+  s_9192d3e867e86a::t_c5a5e97ae50c30 162-169
+  s_9192d3e867e86a::t_7bfa0fb78d6dae 81-95
+src/tests/config_tests.rs
+  s_9192d3e867e86a::t_da17a7b97e8655 18-25,30,32-39,44
+  s_9192d3e867e86a::t_91e08c400ca5f6 79,89
+src/connection/mod.rs
+  s_9192d3e867e86a::t_29b5b16318321c 156-168
+  s_9192d3e867e86a::t_38d55cb5743486 259-260
+  s_9192d3e867e86a::t_8288e2de0d3786 615-618
+  s_9192d3e867e86a::t_d167dd188e1271 521-538
+src/tests/sender_tests.rs
+  s_9192d3e867e86a::t_93524a4013e214 31,55,84,114,143,170,199,234,266,295,321,357,397,434,472,690,708
+src/control.rs
+  s_9192d3e867e86a::t_71d36b8bd798d5 12
+  s_9192d3e867e86a::t_d72dd130ceddf7 316-324
+  s_9192d3e867e86a::t_6b6311b9361143 334-336
+src/test_helpers.rs
+  s_9192d3e867e86a::t_c2b29c835c7503 56-57
+src/sender/selection/enhanced.rs
+  s_9192d3e867e86a::t_c40e8aff7a1e94 164
+  s_9192d3e867e86a::t_35b30e64a80115 239-240
+  s_9192d3e867e86a::t_1e44ee81088097 176-179
+src/toml_config.rs
+  s_9192d3e867e86a::t_bffaa554dd5452 57-59
+  s_9192d3e867e86a::t_31cbb154bbe25d 21-26
+src/tests/stall_deselect_tests.rs
+  s_9192d3e867e86a::t_986b466737f855 175,177
+  s_9192d3e867e86a::t_05c5be0c988eea 150,152
+  s_9192d3e867e86a::t_ce1a6e976af3d5 11
+  s_9192d3e867e86a::t_d113ff017aa177 17-21,23,25-31
+  s_9192d3e867e86a::t_4dee472f7e7c80 1-10,12-16,22,24,32-47,51,53-149,151,153-174,176,178-206
+  s_9192d3e867e86a::t_43a0794c181dea 48-50,52
+src/connection/packet_io.rs
+  s_9192d3e867e86a::t_a765c2bdf12b71 169-174
+src/config.rs
+  s_9192d3e867e86a::t_1abfc09a371405 53
+  s_9192d3e867e86a::t_5a87d5c9ae58e0 83-85
+  s_9192d3e867e86a::t_3adb325983625d 17
+  s_9192d3e867e86a::t_fad8c44a7e917b 35-38
+  s_9192d3e867e86a::t_ac0124a9c912df 160-164
+  s_9192d3e867e86a::t_ebe54a8f143b24 100-102,107-114,119-121
+  s_9192d3e867e86a::t_a965b94ab89912 9,16,18-26,39-52,54-57
+  s_9192d3e867e86a::t_e3ad185c200d23 134-136
+  s_9192d3e867e86a::t_634e0022b0779b 203-210,215
+  s_9192d3e867e86a::t_f360ad687763d9 225,235
+src/sender/selection/mod.rs
+  s_9192d3e867e86a::t_1e6d26e6928d1d 58-67,87-110
+  s_9192d3e867e86a::t_ce1a6e976af3d5 111
+  s_9192d3e867e86a::t_ee89b862a1c16c 112-114,138,173,213
+README.md
+  s_9192d3e867e86a::t_400d071b513b07 55-63,141-143
+src/connection/ack_nak.rs
+  s_9192d3e867e86a::t_9339cc05924e9e 82-87
+src/sender/selection/classic.rs
+  s_9192d3e867e86a::t_59dddd6da1d027 28-30
+src/stats.rs
+  s_9192d3e867e86a::t_88dc4702830c01 402
+src/tests/mod.rs
+  s_9192d3e867e86a::t_af470e5dbbb920 13-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "598706b27c77c8c94984cd24e595f9b697b109d1",
+  "prompts": {},
+  "sessions": {
+    "s_9192d3e867e86a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "375c6930-36e6-4fe3-a6db-9df8a5ba8321",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
