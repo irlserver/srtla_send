@@ -1,0 +1,24 @@
+src/lib.rs
+  s_993284376eb529::t_66fc090f6da9b9 7-10,12
+src/connection/batch_recv.rs
+  s_993284376eb529::t_b85bea916b8726 354,356-358,361-409
+  s_993284376eb529::t_4468f30aa00929 410
+.github/workflows/ci.yml
+  s_993284376eb529::t_6bb47a26e2a57a 70-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "e3f936f06423c03960b97a013c1e70bd620a6bf1",
+  "prompts": {},
+  "sessions": {
+    "s_993284376eb529": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6c18bc34-4f41-42a0-a672-bcdaf07fa059",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
