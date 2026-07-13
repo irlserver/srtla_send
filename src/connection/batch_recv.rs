@@ -351,9 +351,62 @@ mod unix_impl {
     #[cfg(test)]
     mod tests {
         use std::io::{Error, ErrorKind};
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-        use super::{RecvAction, RecvMmsgBuffer, recv_retry_action};
+        use super::{
+            RecvAction, RecvMmsgBuffer, recv_retry_action, sockaddr_storage_to_socket_addr,
+        };
         use crate::protocol::MTU;
+
+        // Exercises the unsafe sockaddr_storage → SocketAddr pointer casts with
+        // real AF_INET/AF_INET6 payloads (the iterator test only ever feeds
+        // zeroed storage, i.e. the None branch). Runs under miri in CI to vet
+        // the casts and the big-endian field decodes.
+        #[test]
+        fn sockaddr_storage_roundtrip() {
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let v4 = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: 8000u16.to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from(Ipv4Addr::new(192, 168, 1, 2)).to_be(),
+                },
+                sin_zero: [0; 8],
+            };
+            unsafe { std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in, v4) };
+            assert_eq!(
+                sockaddr_storage_to_socket_addr(&storage),
+                Some(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 168, 1, 2),
+                    8000
+                ))),
+            );
+
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let v6 = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: 9000u16.to_be(),
+                sin6_flowinfo: 7,
+                sin6_addr: libc::in6_addr {
+                    s6_addr: Ipv6Addr::LOCALHOST.octets(),
+                },
+                sin6_scope_id: 3,
+            };
+            unsafe { std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in6, v6) };
+            assert_eq!(
+                sockaddr_storage_to_socket_addr(&storage),
+                Some(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::LOCALHOST,
+                    9000,
+                    7,
+                    3
+                ))),
+            );
+
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            storage.ss_family = libc::AF_UNIX as libc::sa_family_t;
+            assert_eq!(sockaddr_storage_to_socket_addr(&storage), None);
+        }
 
         #[test]
         fn iter_clamps_oversized_msg_len_to_mtu() {
