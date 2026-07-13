@@ -3,11 +3,18 @@
 //! This module implements packet batching inspired by Moblin's implementation:
 //! - Buffers up to 16 data packets before sending (default Normal regime)
 //! - Flushes on 15ms timer to ensure low latency
-//! - Reduces syscall overhead significantly under high load
+//! - Flushes each batch with a single `sendmmsg` (one syscall per batch)
 //!
 //! At 10 Mbps with ~1300 byte packets:
 //! - Without batching: ~960 syscalls/second per connection
 //! - With batching: ~60-67 batch sends/second per connection (~15x reduction)
+//!
+//! The syscall saving is the whole point of the queue, and until `sendmmsg`
+//! landed it did not exist: `flush` looped over the queue issuing one `send`
+//! per packet, so batching bought nothing but added up to `FLUSH_INTERVAL_MS`
+//! of latency. Anything that trades scheduling quality for "batch integrity"
+//! (holding the scheduler on one link so batches stay contiguous) is therefore
+//! paying for a benefit that only exists while this stays a real batch syscall.
 //!
 //! ## Adaptive batch regimes
 //!
@@ -32,7 +39,7 @@ use smallvec::SmallVec;
 use tokio::time::Instant;
 use tracing::debug;
 
-use super::batch_recv::BatchUdpSocket;
+use super::batch_recv::{BATCH_SEND_SIZE, BatchUdpSocket};
 
 /// Bitrate above which a connection is treated as high-load.
 pub const HIGH_LOAD_THRESHOLD_BPS: f64 = 5_000_000.0;
@@ -203,16 +210,42 @@ impl BatchSender {
         let packet_count = self.queue.len();
         let mut sent_count = 0;
 
-        // Send all packets
-        // TODO: On Linux, could use sendmmsg for even better performance
-        for packet in &self.queue {
-            match socket.send(packet).await {
-                Ok(_) => sent_count += 1,
+        // One `sendmmsg` per BATCH_SEND_SIZE datagrams. The kernel may accept
+        // fewer than offered (short send) once the socket buffer fills, so loop
+        // until the queue is drained rather than assuming a full batch left.
+        while sent_count < packet_count {
+            let take = (packet_count - sent_count).min(BATCH_SEND_SIZE);
+
+            // Scoped so the borrow of `self.queue` ends before the error path
+            // below mutates it.
+            let result = {
+                let mut bufs: SmallVec<&[u8], BATCH_SEND_SIZE> = SmallVec::new();
+                for packet in &self.queue[sent_count..sent_count + take] {
+                    bufs.push(&packet[..]);
+                }
+                socket.send_batch(&bufs).await
+            };
+
+            match result {
+                // Ok(0) would spin forever; treat a no-progress send as an error
+                // so the link is retried rather than livelocked.
+                Ok(0) => {
+                    self.queue.drain(..sent_count);
+                    self.sequences.drain(..sent_count);
+                    self.queue_times.drain(..sent_count);
+                    self.last_flush_time = Instant::now();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "sendmmsg accepted no datagrams",
+                    ));
+                }
+                Ok(n) => sent_count += n,
                 Err(e) => {
                     // Partial failure: remove already-sent packets to avoid duplicates
                     self.queue.drain(..sent_count);
                     self.sequences.drain(..sent_count);
                     self.queue_times.drain(..sent_count);
+                    self.last_flush_time = Instant::now();
                     return Err(e);
                 }
             }

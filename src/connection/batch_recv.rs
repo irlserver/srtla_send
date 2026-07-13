@@ -15,6 +15,13 @@ use crate::protocol::MTU;
 #[cfg(target_os = "linux")]
 pub const BATCH_RECV_SIZE: usize = 32;
 
+/// Maximum datagrams per `sendmmsg` call. Matches the largest batch the
+/// send-side regime will accumulate (`BATCH_SIZE_HIGH_LOAD`), so a full
+/// batch always leaves in a single syscall. Defined on every platform, since
+/// `BatchSender::flush` chunks by it before calling `send_batch` and must
+/// compile identically on the non-Linux fallback path.
+pub const BATCH_SEND_SIZE: usize = 32;
+
 // ============================================================================
 // Linux implementation with recvmmsg
 // ============================================================================
@@ -30,7 +37,7 @@ mod unix_impl {
     use tokio::io::Interest;
     use tokio::io::unix::AsyncFd;
 
-    use super::{BATCH_RECV_SIZE, MTU};
+    use super::{BATCH_RECV_SIZE, BATCH_SEND_SIZE, MTU};
 
     const SOCKADDR_STORAGE_LENGTH: libc::socklen_t =
         std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
@@ -135,6 +142,78 @@ mod unix_impl {
         #[allow(dead_code)]
         pub fn try_send(&self, buf: &[u8]) -> std::io::Result<usize> {
             self.inner.get_ref().send(buf)
+        }
+
+        /// Send several datagrams to the connected peer in one `sendmmsg` syscall.
+        ///
+        /// Returns the number of datagrams the kernel accepted, which may be
+        /// fewer than requested: `sendmmsg` reports a short send rather than
+        /// blocking once the socket buffer fills. The caller must resend the
+        /// remainder (see `BatchSender::flush`).
+        pub async fn send_batch(&self, bufs: &[&[u8]]) -> std::io::Result<usize> {
+            if bufs.is_empty() {
+                return Ok(0);
+            }
+            loop {
+                let mut guard = self.inner.ready(Interest::WRITABLE).await?;
+
+                match self.try_send_batch(bufs) {
+                    Ok(n) => return Ok(n),
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        guard.clear_ready();
+                        continue;
+                    }
+                    // A signal can interrupt the syscall before any datagram is
+                    // queued; that is not a send failure, so retry rather than
+                    // tearing the link down.
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        /// Non-blocking `sendmmsg`. Sends at most [`BATCH_SEND_SIZE`] datagrams.
+        pub fn try_send_batch(&self, bufs: &[&[u8]]) -> std::io::Result<usize> {
+            let n = bufs.len().min(BATCH_SEND_SIZE);
+            if n == 0 {
+                return Ok(0);
+            }
+
+            // SAFETY: `mmsghdr` and `iovec` are plain C structs whose all-zero
+            // bit pattern is a valid (empty) message; every field we rely on is
+            // overwritten below before the syscall reads it.
+            let mut iov: [libc::iovec; BATCH_SEND_SIZE] = unsafe { std::mem::zeroed() };
+            let mut msgs: [libc::mmsghdr; BATCH_SEND_SIZE] = unsafe { std::mem::zeroed() };
+
+            for i in 0..n {
+                iov[i] = libc::iovec {
+                    // sendmmsg only reads through this pointer; the cast to
+                    // *mut is required by the C signature, not by us.
+                    iov_base: bufs[i].as_ptr() as *mut libc::c_void,
+                    iov_len: bufs[i].len(),
+                };
+                // The socket is connected, so the destination is implicit and
+                // msg_name stays null.
+                msgs[i].msg_hdr.msg_iov = std::ptr::addr_of_mut!(iov[i]);
+                msgs[i].msg_hdr.msg_iovlen = 1;
+            }
+
+            // SAFETY: `msgs[..n]` is initialised above and each `msg_iov` points
+            // at the matching live entry of `iov`, which outlives the call. The
+            // buffers in `bufs` are borrowed for the duration of the call.
+            let ret = unsafe {
+                libc::sendmmsg(
+                    self.as_raw_fd(),
+                    msgs.as_mut_ptr(),
+                    n as libc::c_uint,
+                    0, // no flags: match the semantics of the old per-packet send()
+                )
+            };
+
+            if ret < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(ret as usize)
         }
 
         /// Try to receive data without blocking.
@@ -488,6 +567,28 @@ mod fallback_impl {
         /// Send data to the connected peer.
         pub async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
             self.inner.send(buf).await
+        }
+
+        /// Send several datagrams to the connected peer.
+        ///
+        /// There is no `sendmmsg` off Linux, so this sends one at a time and
+        /// exists only to keep [`BatchSender::flush`] platform-agnostic. It
+        /// reports how many datagrams were accepted before the first error, so
+        /// the caller's resend bookkeeping is identical on both paths.
+        pub async fn send_batch(&self, bufs: &[&[u8]]) -> std::io::Result<usize> {
+            let mut sent = 0;
+            for buf in bufs {
+                match self.inner.send(buf).await {
+                    Ok(_) => sent += 1,
+                    // Mirror `sendmmsg`: once at least one datagram is away, a
+                    // failure is reported as a short send, not an error. The
+                    // caller retries the remainder and will surface the error
+                    // then if it persists.
+                    Err(_) if sent > 0 => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(sent)
         }
 
         /// Try to send data without blocking.
