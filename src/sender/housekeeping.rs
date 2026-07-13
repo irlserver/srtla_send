@@ -171,7 +171,9 @@ mod tests {
 
     use super::*;
     use crate::sender::uplink::{create_uplink_channel, sync_readers};
-    use crate::test_helpers::{advance_test_clock, create_test_connection, create_test_connections};
+    use crate::test_helpers::{
+        advance_test_clock, create_test_connection, create_test_connections,
+    };
 
     #[tokio::test]
     async fn dead_reader_is_restarted_for_active_connection() {
@@ -255,8 +257,8 @@ mod tests {
         .await;
         assert!(
             armed.is_ok(),
-            "arming the all-failed timer must not error on a transient blip \
-             (uptime already exceeds {GLOBAL_TIMEOUT_MS}ms)"
+            "arming the all-failed timer must not error on a transient blip (uptime already \
+             exceeds {GLOBAL_TIMEOUT_MS}ms)"
         );
         assert!(all_failed_at.is_some(), "the failure timer should be armed");
 
@@ -287,8 +289,8 @@ mod tests {
         .await;
         assert!(
             fired.is_err(),
-            "the all-failed timeout must fire once a full {GLOBAL_TIMEOUT_MS}ms has \
-             elapsed since failure"
+            "the all-failed timeout must fire once a full {GLOBAL_TIMEOUT_MS}ms has elapsed since \
+             failure"
         );
     }
 }

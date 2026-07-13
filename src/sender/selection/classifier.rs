@@ -327,9 +327,12 @@ impl WeakLinkFilter {
             // win the re-test. Delay weakness is exempt (it self-clears from
             // live RTT), and `loss_degraded` keeps gating an actually-bad link
             // mid-window, so probation only ever re-tests marginal links.
-            let share_weak =
-                weak && matches!(reason, WeakReason::LowShare | WeakReason::NoTraffic);
-            let mut probation = self.probation_ticks.get(&conn.conn_id).copied().unwrap_or(0);
+            let share_weak = weak && matches!(reason, WeakReason::LowShare | WeakReason::NoTraffic);
+            let mut probation = self
+                .probation_ticks
+                .get(&conn.conn_id)
+                .copied()
+                .unwrap_or(0);
             let mut streak = self.weak_streak.get(&conn.conn_id).copied().unwrap_or(0);
             let (weak, reason) = if probation > 0 {
                 probation -= 1;
