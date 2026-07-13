@@ -348,15 +348,20 @@ pub async fn forward_via_connection(
     if *last_selected_idx != Some(sel_idx) {
         if let Some(prev_idx) = *last_selected_idx {
             if prev_idx < connections.len() {
-                // Flush the previous connection's batch before switching
-                if connections[prev_idx].has_queued_packets()
-                    && let Err(e) = connections[prev_idx].flush_batch().await
-                {
-                    warn!(
-                        "{}: batch flush on switch failed: {}",
-                        connections[prev_idx].label, e
-                    );
-                }
+                // Deliberately does not flush the previous link's batch. Each
+                // connection owns its BatchSender and drains it with a single
+                // `sendmmsg` on its own size threshold or 15ms timer, so
+                // interleaved routing just fills several per-link batches
+                // concurrently instead of one serially — no syscall is lost.
+                //
+                // Flushing here emitted a one-packet batch on every switch,
+                // which made per-packet scheduling expensive and is what the
+                // `MIN_SWITCH_INTERVAL_MS` cooldown existed to suppress. That
+                // cooldown freezes the selector for ~15ms, and since
+                // `get_score()` counts queued packets as in-flight precisely so
+                // routing a packet immediately de-prioritises its link, freezing
+                // it opens that feedback loop and lets in-flight run away on one
+                // link.
                 debug!(
                     "Connection switch: {} → {} (seq: {:?})",
                     connections[prev_idx].label, connections[sel_idx].label, seq
