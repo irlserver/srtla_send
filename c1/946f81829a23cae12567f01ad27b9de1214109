@@ -1,0 +1,21 @@
+src/sender/housekeeping.rs
+  s_993284376eb529::t_a48b13f1e6a267 174-176,260-261,292-293
+src/sender/selection/classifier.rs
+  s_993284376eb529::t_a48b13f1e6a267 330-335
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "c1946f81829a23cae12567f01ad27b9de1214109",
+  "prompts": {},
+  "sessions": {
+    "s_993284376eb529": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6c18bc34-4f41-42a0-a672-bcdaf07fa059",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
