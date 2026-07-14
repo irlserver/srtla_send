@@ -11,8 +11,7 @@
 
 use tracing::debug;
 
-use super::MIN_SWITCH_INTERVAL_MS;
-use super::exploration::should_explore_now;
+use super::exploration::pick_probe_target;
 use super::link_cc::ASSUMED_SRT_PAYLOAD_BYTES;
 use crate::connection::SrtlaConnection;
 
@@ -116,30 +115,32 @@ fn cc_soft_cap_multiplier(conn: &SrtlaConnection) -> f64 {
 /// Select best connection using enhanced algorithm with quality awareness
 ///
 /// Returns the index of the connection with the best quality-adjusted score.
-/// Implements time-based switch dampening to prevent rapid thrashing.
 ///
-/// IMPORTANT: This function is called for EACH incoming SRT packet. The returned
-/// connection index determines where that packet (and subsequent packets) will be routed.
-/// Time-based dampening prevents changing the routing decision too frequently, ensuring
-/// all packets continue flowing through the same connection during the cooldown period.
-/// This is NOT a per-packet round-robin - it's a per-packet "best connection" selection
-/// with dampening to prevent rapid switching under bursty network conditions.
+/// IMPORTANT: This function is called for EACH incoming SRT packet, and it is
+/// meant to be: `get_score()` counts a link's queued-but-unflushed packets as
+/// in-flight, so routing a packet immediately lowers that link's own score.
+/// Selection is therefore a closed feedback loop that bounds queue depth per
+/// link — re-deciding on every packet is the mechanism, not thrashing.
+///
+/// Score hysteresis ([`SWITCH_THRESHOLD`]) still resists flip-flopping between
+/// links whose scores are within noise of each other.
 ///
 /// # Arguments
 /// * `conns` - Mutable slice of available connections (for quality cache updates)
 /// * `last_idx` - Previously selected connection index (for hysteresis)
-/// * `last_switch_time_ms` - Timestamp of last connection switch
 /// * `current_time_ms` - Current timestamp in milliseconds
 /// * `enable_quality` - Whether to apply quality scoring
-/// * `enable_explore` - Whether to enable smart exploration
+/// * `enable_explore` - Whether to allow probing starved links
+/// * `is_data` - Whether this packet carries an SRT sequence number (only data
+///   packets can earn the ACK/NAK a probe exists to collect)
 #[inline(always)]
 pub fn select_connection(
     conns: &mut [SrtlaConnection],
     last_idx: Option<usize>,
-    last_switch_time_ms: u64,
     current_time_ms: u64,
     enable_quality: bool,
     enable_explore: bool,
+    is_data: bool,
 ) -> Option<usize> {
     // First pass: discover whether at least one un-gated connection
     // can carry the packet. The classifier marks links weak when their
@@ -165,11 +166,14 @@ pub fn select_connection(
             && !in_flight_cap_exceeded(c)
     });
 
-    // Score connections by base score; apply quality multiplier if enabled
+    // Score connections by base score; apply quality multiplier if enabled.
+    //
+    // Only the best link is tracked. The runner-up used to matter because
+    // exploration probed *second-best*; probing now targets starved links
+    // instead (a healthy runner-up is already earning its own ACKs and needs no
+    // probe), so its rank is no longer interesting.
     let mut best_idx: Option<usize> = None;
-    let mut second_idx: Option<usize> = None;
     let mut best_score: f64 = -1.0;
-    let mut second_score: f64 = -1.0;
     let mut current_score: Option<f64> = None;
 
     for (i, c) in conns.iter_mut().enumerate() {
@@ -214,42 +218,34 @@ pub fn select_connection(
         }
 
         if score > best_score {
-            second_score = best_score;
-            second_idx = best_idx;
             best_score = score;
             best_idx = Some(i);
-        } else if score > second_score {
-            second_score = score;
-            second_idx = Some(i);
         }
     }
 
-    // Time-based switch dampening: prevent rapid thrashing under bursty scores
-    // Check if we're within the minimum switch interval
-    let time_since_last_switch_ms = current_time_ms.saturating_sub(last_switch_time_ms);
-    let in_switch_cooldown = time_since_last_switch_ms < MIN_SWITCH_INTERVAL_MS;
-
+    // No time-based switch cooldown.
+    //
+    // There used to be one (`MIN_SWITCH_INTERVAL_MS`, 15ms), which pinned the
+    // selector to the previously chosen link regardless of score. Its purpose was
+    // not scheduling: `forward_via_connection` flushed the previous link's batch
+    // on every switch, so per-packet switching emitted a one-packet batch each
+    // time, and the cooldown suppressed that. Batches are per-connection and now
+    // leave in a single `sendmmsg` on their own threshold/timer, so the flush is
+    // gone and switching is free.
+    //
+    // Keeping the cooldown would be actively harmful: `get_score()` counts queued
+    // packets as in-flight so that routing a packet immediately de-prioritises its
+    // link. Holding the decision fixed for 15ms (~24 packets at the rate this
+    // sender actually pushes) opens that feedback loop, and in-flight runs away on
+    // whichever link the timer happened to park on.
+    //
+    // Score hysteresis below still damps flip-flopping between links whose scores
+    // differ only by noise — that is a score-space guard, and costs no syscalls.
     if let Some(last) = last_idx {
         // If proposing a different connection
         if best_idx != Some(last) {
-            // Check if last connection is still valid
-            let last_still_valid = last < conns.len()
-                && !conns[last].is_timed_out()
-                && conns[last].connected
-                && conns[last].is_schedulable()
-                && !conns[last].stall_gated;
-
-            // If in cooldown period and last connection is still valid, keep it
-            if in_switch_cooldown && last_still_valid {
-                debug!(
-                    "Switch dampening: staying with current connection (cooldown: {}ms remaining)",
-                    MIN_SWITCH_INTERVAL_MS.saturating_sub(time_since_last_switch_ms)
-                );
-                return Some(last);
-            }
-
-            // Apply score-based hysteresis if not in cooldown
-            // If current connection is still valid and new best isn't significantly better
+            // Apply score-based hysteresis: only move off the current link when
+            // the new best is meaningfully better.
             if let Some(current) = current_score
                 && best_score < current * SWITCH_THRESHOLD
             {
@@ -268,26 +264,26 @@ pub fn select_connection(
         }
     }
 
-    // Apply exploration if enabled (but respect cooldown to avoid rapid switching)
-    let explore_now = if enable_explore && !in_switch_cooldown {
-        should_explore_now(conns, best_idx, second_idx)
-    } else {
-        false
-    };
-
-    if explore_now {
-        // Exploration wants to try second-best, but only if different from current
-        if let (Some(second), Some(last)) = (second_idx, last_idx)
-            && second != last
-        {
-            debug!("Exploration: trying second-best connection");
-            return second_idx.or(best_idx);
-        }
-        // If second is same as current, just use best
-        best_idx
-    } else {
-        best_idx
+    // Probe a starved link with a single data packet, if one is due.
+    //
+    // Gated by `any_unconstrained`: the probe is paid for out of a healthy
+    // link's capacity, so if nothing healthy is schedulable every packet is
+    // needed for the stream and we never divert. Gated on `is_data` because a
+    // probe exists to earn an ACK or NAK, and only data packets carry a
+    // sequence number the receiver will acknowledge — diverting an SRT control
+    // packet to a degraded link would delay SRT's own control loop and teach us
+    // nothing.
+    if enable_explore
+        && is_data
+        && any_unconstrained
+        && let Some(best) = best_idx
+        && let Some(probe) = pick_probe_target(conns, best, current_time_ms)
+    {
+        conns[probe].last_probe_ms = current_time_ms;
+        return Some(probe);
     }
+
+    best_idx
 }
 
 /// Log quality state for debugging (cold path, marked for optimizer hints)

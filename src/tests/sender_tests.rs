@@ -31,7 +31,7 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
+        let selected = select_connection_idx(&mut connections, None, 0, &config, true);
         assert_eq!(selected, Some(1));
     }
 
@@ -54,7 +54,7 @@ mod tests {
             exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
         assert_eq!(
             selected,
             Some(0),
@@ -83,7 +83,7 @@ mod tests {
             exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
         assert_eq!(
             selected,
             Some(1),
@@ -113,7 +113,7 @@ mod tests {
             exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
         assert_eq!(
             selected,
             Some(0),
@@ -142,7 +142,7 @@ mod tests {
             exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
         assert_eq!(
             selected,
             Some(1),
@@ -169,7 +169,7 @@ mod tests {
             exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
         assert_eq!(
             selected,
             Some(0),
@@ -198,7 +198,7 @@ mod tests {
             exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
         assert_eq!(
             selected,
             Some(1),
@@ -234,7 +234,7 @@ mod tests {
             ..ConfigSnapshot::default()
         };
         // last_idx = 0 (current best), well outside the switch cooldown.
-        let selected = select_connection_idx(&mut connections, Some(0), 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, Some(0), current_time, &config, true);
         assert_eq!(
             selected,
             Some(1),
@@ -266,7 +266,7 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -295,14 +295,14 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
     }
 
     #[test]
-    fn test_time_based_switch_dampening_blocks_within_cooldown() {
+    fn test_enhanced_reselects_immediately_no_time_lock() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
@@ -311,9 +311,6 @@ mod tests {
         connections[1].in_flight_packets = 0; // Best score
         connections[2].in_flight_packets = 10; // Worst score
 
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 5; // 5ms after last switch (within 15ms cooldown)
-
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
@@ -321,24 +318,20 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
-        // This prevents rapid thrashing between connections under bursty score changes
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
+        // There is no switch cooldown: selection must re-decide on every packet.
+        // `get_score()` counts queued packets as in-flight, so routing a packet
+        // lowers its own link's score -- that feedback loop is what bounds
+        // per-link queue depth, and a time lock would open it.
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
         assert_eq!(
             selected,
-            Some(0),
-            "Should continue routing all packets via current connection during cooldown period"
+            Some(1),
+            "Enhanced mode must be free to switch to a better link on the very next packet"
         );
     }
 
     #[test]
-    fn test_time_based_switch_dampening_allows_after_cooldown() {
+    fn test_enhanced_switches_to_clearly_better_connection() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
@@ -347,9 +340,6 @@ mod tests {
         connections[1].in_flight_packets = 0; // Best score (significantly better, exceeds 2% hysteresis)
         connections[2].in_flight_packets = 10; // Worst score
 
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 20; // 20ms after last switch (past 15ms cooldown)
-
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
@@ -357,24 +347,17 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        // After cooldown: per-packet selection can now choose the better connection
-        // From this point forward, all subsequent packets will route via connection 1
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
+        // A link better by more than SWITCH_THRESHOLD wins the packet.
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
         assert_eq!(
             selected,
             Some(1),
-            "Should switch per-packet routing to better connection after cooldown expires"
+            "Should route to the better connection"
         );
     }
 
     #[test]
-    fn test_time_based_switch_dampening_allows_if_current_invalid() {
+    fn test_enhanced_switches_away_from_timed_out_connection() {
         use tokio::time::{Duration, Instant};
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -387,9 +370,6 @@ mod tests {
         connections[1].in_flight_packets = 0; // Best score
         connections[2].in_flight_packets = 10;
 
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 5; // Within 15ms cooldown
-
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
@@ -397,63 +377,16 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        // Cooldown is bypassed when current connection is invalid/timed out
-        // Per-packet selection immediately switches to valid connection
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
         assert_eq!(
             selected,
             Some(1),
-            "Should immediately route packets via valid connection if current is timed out, \
-             bypassing cooldown"
+            "Should route via a valid connection when the current one has timed out"
         );
     }
 
     #[test]
-    fn test_exploration_blocked_during_cooldown() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-
-        // Setup connections with distinct scores
-        connections[0].in_flight_packets = 2; // Currently selected
-        connections[1].in_flight_packets = 0; // Best
-        connections[2].in_flight_packets = 1; // Second-best
-
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 5; // Within 15ms cooldown
-
-        let config = ConfigSnapshot {
-            mode: SchedulingMode::Enhanced,
-            quality_enabled: true,
-            exploration_enabled: true, // exploration enabled
-            ..ConfigSnapshot::default()
-        };
-
-        // Enable exploration, but should be blocked by cooldown
-        // This prevents exploration from causing rapid per-packet routing changes
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
-
-        // Should continue routing packets via connection 0, not explore during cooldown
-        assert_eq!(
-            selected,
-            Some(0),
-            "Exploration-triggered per-packet routing changes should be blocked during cooldown"
-        );
-    }
-
-    #[test]
-    fn test_classic_mode_ignores_time_dampening() {
+    fn test_classic_mode_picks_highest_score() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
@@ -461,9 +394,6 @@ mod tests {
         connections[0].in_flight_packets = 5; // Lower score
         connections[1].in_flight_packets = 0; // Best score
         connections[2].in_flight_packets = 10; // Worst score
-
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within cooldown)
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Classic,
@@ -473,14 +403,8 @@ mod tests {
         };
 
         // Classic mode: per-packet selection ALWAYS picks highest score connection
-        // No dampening, no hysteresis - matches original C implementation
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
+        // No hysteresis - matches original C implementation
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
 
         // Per-packet routing immediately uses connection 1 (best score)
         assert_eq!(
@@ -690,7 +614,7 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
+        let selected = select_connection_idx(&mut connections, None, 0, &config, true);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
@@ -709,7 +633,7 @@ mod tests {
         };
 
         // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&mut connections, None, 0, 0, &config);
+        let _selected = select_connection_idx(&mut connections, None, 0, &config, true);
 
         // The result depends on timing, but should not panic
     }
@@ -796,6 +720,157 @@ mod tests {
             (mult_burst - 0.571).abs() < 0.02,
             "Expected ~0.571, got {}",
             mult_burst
+        );
+    }
+
+    // ---- starved-link probing (exploration) --------------------------------
+    //
+    // The probe exists to break the starvation lock: a gated link wins no
+    // packets, so it earns no ACKs, so the signal that gated it never clears.
+    // These tests pin the properties that keep it from being harmful.
+
+    fn exploring() -> ConfigSnapshot {
+        ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: true,
+            ..ConfigSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn test_probe_targets_the_starved_link_not_second_best() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let now = now_ms();
+
+        // 0 is the healthy best. 2 is healthy but merely second-best -- it is
+        // already earning ACKs and needs no probe. 1 is starved.
+        connections[0].in_flight_packets = 0;
+        connections[2].in_flight_packets = 5;
+        connections[1].in_flight_packets = 1;
+        connections[1].weak = true;
+
+        let selected = select_connection_idx(&mut connections, Some(0), now, &exploring(), true);
+        assert_eq!(
+            selected,
+            Some(1),
+            "probe must go to the starved link, not the healthy second-best"
+        );
+    }
+
+    #[test]
+    fn test_probe_is_rate_limited_per_link() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let now = now_ms();
+
+        connections[0].in_flight_packets = 0;
+        connections[2].in_flight_packets = 5;
+        connections[1].in_flight_packets = 1;
+        connections[1].weak = true;
+
+        // First packet probes the starved link and stamps it.
+        let first = select_connection_idx(&mut connections, Some(0), now, &exploring(), true);
+        assert_eq!(first, Some(1));
+
+        // The very next packet must go back to the healthy link: a probe is one
+        // packet, not a mode. Without the budget this alternates every packet.
+        let second = select_connection_idx(&mut connections, Some(1), now + 1, &exploring(), true);
+        assert_eq!(
+            second,
+            Some(0),
+            "a second probe must not fire inside PROBE_INTERVAL_MS"
+        );
+
+        // Still suppressed just before the interval elapses.
+        let during = select_connection_idx(
+            &mut connections,
+            Some(0),
+            now + PROBE_INTERVAL_MS - 1,
+            &exploring(),
+            true,
+        );
+        assert_eq!(during, Some(0), "probe budget must hold for the full interval");
+
+        // Due again once the interval has passed.
+        let after = select_connection_idx(
+            &mut connections,
+            Some(0),
+            now + PROBE_INTERVAL_MS,
+            &exploring(),
+            true,
+        );
+        assert_eq!(after, Some(1), "probe should be due again after the interval");
+    }
+
+    #[test]
+    fn test_probe_never_fires_without_a_healthy_link() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let now = now_ms();
+
+        // Everything is starved: there is no spare capacity to fund a probe,
+        // and normal scoring already routes to the least-bad link. Diverting
+        // here would just add latency to a packet the stream needs.
+        for c in connections.iter_mut() {
+            c.weak = true;
+            c.in_flight_packets = 5;
+        }
+        connections[1].in_flight_packets = 0; // best of a bad lot
+
+        let selected = select_connection_idx(&mut connections, Some(1), now, &exploring(), true);
+        assert_eq!(
+            selected,
+            Some(1),
+            "with no healthy link, selection must fall back to the best link and not probe"
+        );
+    }
+
+    #[test]
+    fn test_probe_only_diverts_data_packets() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let now = now_ms();
+
+        connections[0].in_flight_packets = 0;
+        connections[2].in_flight_packets = 5;
+        connections[1].in_flight_packets = 1;
+        connections[1].weak = true;
+
+        // A control packet carries no sequence number, so it can never earn the
+        // ACK/NAK a probe is collecting -- and steering SRT's own control
+        // traffic onto a degraded link would delay its control loop for nothing.
+        let selected = select_connection_idx(&mut connections, Some(0), now, &exploring(), false);
+        assert_eq!(
+            selected,
+            Some(0),
+            "control packets must never be diverted to a starved link"
+        );
+    }
+
+    #[test]
+    fn test_no_probe_when_exploration_disabled() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let now = now_ms();
+
+        connections[0].in_flight_packets = 0;
+        connections[2].in_flight_packets = 5;
+        connections[1].in_flight_packets = 1;
+        connections[1].weak = true;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, Some(0), now, &config, true);
+        assert_eq!(
+            selected,
+            Some(0),
+            "probing must stay off unless exploration is enabled"
         );
     }
 }

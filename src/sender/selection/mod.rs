@@ -14,12 +14,12 @@
 //! - NAK burst detection and penalties
 //! - RTT-aware scoring (small bonus for low latency)
 //! - Hysteresis (10%) to prevent flip-flopping
-//! - Time-based switch dampening to prevent rapid thrashing
+//! - Bounded probing of starved links (opt-in, see `exploration`)
 
 mod classic;
 pub mod classifier;
 pub mod enhanced;
-mod exploration;
+pub mod exploration;
 pub mod link_cc;
 mod quality;
 
@@ -30,20 +30,14 @@ use crate::config::ConfigSnapshot;
 use crate::connection::SrtlaConnection;
 use crate::mode::SchedulingMode;
 
-/// Minimum time in milliseconds between connection switches
-/// Prevents rapid thrashing when scores fluctuate due to bursty ACK/NAK patterns.
-/// Aligned with FLUSH_INTERVAL_MS (15ms) so connections can rotate between batches
-/// while avoiding intra-batch flip-flopping.
-pub const MIN_SWITCH_INTERVAL_MS: u64 = 15;
-
 /// Select the best connection index based on mode and configuration
 ///
 /// # Arguments
 /// * `conns` - Mutable slice of connections (for quality cache updates in enhanced mode)
 /// * `last_idx` - Previously selected connection (for hysteresis)
-/// * `last_switch_time_ms` - Time of last switch (for time-based dampening)
 /// * `current_time_ms` - Current timestamp in milliseconds
 /// * `config` - Configuration snapshot with mode and settings
+/// * `is_data` - Whether this packet carries an SRT sequence number
 ///
 /// # Returns
 /// The index of the selected connection, or None if no valid connections
@@ -51,9 +45,9 @@ pub const MIN_SWITCH_INTERVAL_MS: u64 = 15;
 pub fn select_connection_idx(
     conns: &mut [SrtlaConnection],
     last_idx: Option<usize>,
-    last_switch_time_ms: u64,
     current_time_ms: u64,
     config: &ConfigSnapshot,
+    is_data: bool,
 ) -> Option<usize> {
     // Stalled-link deselect (default on). A link is gated only when it is a
     // stalled black hole AND at least one healthier link can carry the traffic,
@@ -71,14 +65,15 @@ pub fn select_connection_idx(
             classic::select_connection(conns)
         }
         SchedulingMode::Enhanced => {
-            // Enhanced mode: quality-aware selection with optional exploration and time-based dampening
+            // Enhanced mode: quality-aware selection with score hysteresis and
+            // optional exploration.
             enhanced::select_connection(
                 conns,
                 last_idx,
-                last_switch_time_ms,
                 current_time_ms,
                 config.effective_quality_enabled(),
                 config.effective_exploration_enabled(),
+                is_data,
             )
         }
     }
@@ -120,16 +115,13 @@ mod tests {
 
     #[test]
     fn test_select_connection_idx_classic() {
-        // Test that classic mode always picks highest score, ignoring dampening
+        // Test that classic mode always picks highest score
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
         connections[0].in_flight_packets = 5; // Lower score
         connections[1].in_flight_packets = 0; // Highest score
         connections[2].in_flight_packets = 10; // Lowest score
-
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 100; // Within cooldown
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Classic,
@@ -138,14 +130,7 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        // Classic mode should pick connection 1 (highest score) even during cooldown
-        let result = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
+        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
         assert_eq!(
             result,
             Some(1),
@@ -154,17 +139,18 @@ mod tests {
     }
 
     #[test]
-    fn test_select_connection_idx_enhanced() {
-        // Test that enhanced mode enforces cooldown dampening
+    fn test_enhanced_switches_immediately_when_clearly_better() {
+        // Regression guard for the removed switch cooldown. Selection must be
+        // free to re-decide on every packet: `get_score()` counts queued packets
+        // as in-flight, so routing a packet de-prioritises its own link, and that
+        // feedback loop is what bounds per-link queue depth. A time-based lock
+        // would defer the switch below and let in-flight run away on link 0.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
         connections[0].in_flight_packets = 5; // Currently selected, lower score
-        connections[1].in_flight_packets = 0; // Highest score
+        connections[1].in_flight_packets = 0; // Far better score
         connections[2].in_flight_packets = 10; // Lowest score
-
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 5; // Within 15ms cooldown
 
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
@@ -173,33 +159,40 @@ mod tests {
             ..ConfigSnapshot::default()
         };
 
-        // Enhanced mode should stay with connection 0 due to cooldown
-        let result = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
+        // Immediately after having selected link 0, with no elapsed time at all.
+        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
+        assert_eq!(
+            result,
+            Some(1),
+            "Enhanced mode must switch to a clearly better link with no time-based delay"
         );
+    }
+
+    #[test]
+    fn test_enhanced_hysteresis_holds_when_gain_is_marginal() {
+        // Switching is damped in score space, not time: a link that is better by
+        // less than SWITCH_THRESHOLD (10%) does not win the packet.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // score = window / (in_flight + 1), so 20 vs 19 in flight is only a ~5%
+        // improvement -- inside the hysteresis band.
+        connections[0].in_flight_packets = 20; // currently selected
+        connections[1].in_flight_packets = 19; // marginally better
+        connections[2].in_flight_packets = 40; // clearly worse
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            exploration_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+
+        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
         assert_eq!(
             result,
             Some(0),
-            "Enhanced mode should enforce cooldown and stay with current connection"
-        );
-
-        // After cooldown expires, should allow switching
-        let current_time_after_cooldown = last_switch_time_ms + 20; // Past 15ms cooldown
-        let result_after = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_after_cooldown,
-            &config,
-        );
-        assert_eq!(
-            result_after,
-            Some(1),
-            "Enhanced mode should allow switching after cooldown expires"
+            "Enhanced mode should hold the current link when the alternative is <10% better"
         );
     }
 
@@ -212,7 +205,7 @@ mod tests {
             exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let result = select_connection_idx(&mut conns, None, 0, 0, &config);
+        let result = select_connection_idx(&mut conns, None, 0, &config, true);
         assert_eq!(result, None);
     }
 }

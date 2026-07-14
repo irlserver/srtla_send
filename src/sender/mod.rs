@@ -43,6 +43,8 @@ pub use selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
 // `super::selection::select_connection_idx` path. The re-export is here
 // for tests that import the sender public surface with a glob.
 #[allow(unused_imports)]
+pub use selection::exploration::PROBE_INTERVAL_MS;
+#[allow(unused_imports)]
 pub use selection::select_connection_idx;
 #[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
@@ -151,7 +153,6 @@ pub async fn run_sender_with_config(
     // Zero-allocation ring buffer for sequence tracking
     let mut seq_tracker = SequenceTracker::new();
     let mut last_selected_idx: Option<usize> = None;
-    let mut last_switch_time_ms: u64 = 0; // Track time of last connection switch
     let mut all_failed_at: Option<Instant> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
@@ -196,7 +197,6 @@ pub async fn run_sender_with_config(
                             &mut recv_buf,
                             &mut connections,
                             &mut last_selected_idx,
-                            &mut last_switch_time_ms,
                             &mut seq_tracker,
                             &mut last_client_addr,
                             reg.has_connected,

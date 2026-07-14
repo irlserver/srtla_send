@@ -244,7 +244,6 @@ pub async fn handle_srt_packet(
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
-    last_switch_time_ms: &mut u64,
     seq_tracker: &mut SequenceTracker,
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
@@ -270,7 +269,6 @@ pub async fn handle_srt_packet(
                         seq,
                         connections,
                         last_selected_idx,
-                        last_switch_time_ms,
                         seq_tracker,
                         packet_time_ms,
                     )
@@ -284,9 +282,9 @@ pub async fn handle_srt_packet(
             let mut sel_idx = select_connection_idx(
                 connections,
                 *last_selected_idx,
-                *last_switch_time_ms,
                 packet_time_ms,
                 config_snap,
+                seq.is_some(),
             );
 
             // Keyframe priority: route critical packets to the highest-quality
@@ -317,7 +315,6 @@ pub async fn handle_srt_packet(
                     seq,
                     connections,
                     last_selected_idx,
-                    last_switch_time_ms,
                     seq_tracker,
                     packet_time_ms,
                 )
@@ -338,7 +335,6 @@ pub async fn forward_via_connection(
     seq: Option<u32>,
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
-    last_switch_time_ms: &mut u64,
     seq_tracker: &mut SequenceTracker,
     packet_time_ms: u64,
 ) {
@@ -374,7 +370,6 @@ pub async fn forward_via_connection(
             );
         }
         *last_selected_idx = Some(sel_idx);
-        *last_switch_time_ms = packet_time_ms; // Track when switch occurred (use cached timestamp)
     }
 
     // Get conn_id before mutable borrow for seq_tracker
