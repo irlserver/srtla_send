@@ -29,6 +29,7 @@
 //!   the priority sidecar (encoder keyframe hint).
 
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
@@ -47,6 +48,10 @@ struct Entry {
 /// Shared fan-out hub. Cheap to clone.
 #[derive(Clone, Default)]
 pub struct SubscriptionHub {
+    /// Only the control socket hands out subscription ids, and that socket is
+    /// Unix-domain. On other platforms the hub still publishes -- to nobody,
+    /// since there is no way to subscribe.
+    #[cfg(unix)]
     next_id: Arc<AtomicU64>,
     entries: Arc<Mutex<Vec<Entry>>>,
 }
@@ -59,6 +64,7 @@ impl SubscriptionHub {
     /// Register a subscription. Returns the subscription id the client
     /// should use to unsubscribe. Caller supplies their push channel;
     /// every published event on the topic is written to it.
+    #[cfg(unix)]
     pub async fn subscribe(&self, topic: &str, push_tx: mpsc::Sender<String>) -> String {
         let id = format!("sub-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         self.entries.lock().await.push(Entry {
@@ -70,6 +76,7 @@ impl SubscriptionHub {
     }
 
     /// Remove a subscription by id. Returns true if it was present.
+    #[cfg(unix)]
     pub async fn unsubscribe(&self, id: &str) -> bool {
         let mut entries = self.entries.lock().await;
         let before = entries.len();
@@ -120,6 +127,7 @@ impl SubscriptionHub {
 
     /// Number of active subscriptions (all topics combined). Exposed for
     /// telemetry; not needed for correctness.
+    #[cfg(unix)]
     pub async fn len(&self) -> usize {
         self.entries.lock().await.len()
     }

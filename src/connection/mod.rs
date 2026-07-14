@@ -22,7 +22,9 @@ pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
 // Host-side binder for platforms that steer egress by network handle (Android).
-// Exported for library consumers; the CLI binary does not construct it.
+// Exported for library consumers; the CLI binary does not construct it. Unix
+// only: it binds by raw fd, which Windows does not have.
+#[cfg(unix)]
 #[allow(unused_imports)]
 pub use socket::CallbackBinder;
 pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};

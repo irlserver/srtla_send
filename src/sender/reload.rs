@@ -16,7 +16,10 @@ use smallvec::SmallVec;
 /// kept and the stream keeps running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReloadRefusal {
-    /// The ips file could not be opened or read.
+    /// The ips file could not be opened or read. Only reachable from
+    /// [`analyze_ip_reload`], which is the SIGHUP entry point and therefore
+    /// unix-only.
+    #[cfg(unix)]
     NotFound,
     /// The ips file has no non-blank lines.
     Empty,
@@ -83,6 +86,10 @@ pub fn analyze_ip_reload_text(text: &str) -> IpReload {
 /// Read `path` and analyze it for a SIGHUP reload. A read error maps to
 /// [`ReloadRefusal::NotFound`] — the C guard treats an unreadable file as zero
 /// valid IPs and refuses the reload.
+///
+/// Unix-only: reload is driven by SIGHUP, which Windows does not have. Startup
+/// parsing goes through [`analyze_ip_reload_text`] on every platform.
+#[cfg(unix)]
 pub fn analyze_ip_reload(path: &str) -> IpReload {
     match std::fs::read_to_string(path) {
         Ok(text) => analyze_ip_reload_text(&text),

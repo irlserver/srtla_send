@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::config::DynamicConfig;
+#[cfg(unix)]
 use crate::control::{SubscriptionContext, dispatch_async};
 use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;

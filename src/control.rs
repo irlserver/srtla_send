@@ -25,12 +25,14 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(unix)]
 use tokio::sync::mpsc;
 
 use crate::config::DynamicConfig;
 use crate::mode::SchedulingMode;
 use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;
+#[cfg(unix)]
 use crate::subscriptions::SubscriptionHub;
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -107,10 +109,13 @@ impl Response {
     }
 }
 
-/// Per-connection context needed for `subscribe` / `unsubscribe`. The
-/// sync [`dispatch`] function takes an `Option<&SubscriptionContext>`;
-/// when present, subscribe-style methods route through the hub and
-/// track active subscriptions on behalf of this connection.
+/// Per-connection context needed for `subscribe` / `unsubscribe`.
+///
+/// Unix-only, along with the rest of the async dispatch surface: its only
+/// consumer is the Unix-domain control socket, which does not exist on Windows.
+/// The sync [`dispatch`] path (stdin/readline, used on every platform) has no
+/// push channel and answers subscribe-style methods with method-not-found.
+#[cfg(unix)]
 pub struct SubscriptionContext<'a> {
     pub hub: &'a SubscriptionHub,
     /// Push channel for *this* connection. Used by the hub to fan out
@@ -129,12 +134,13 @@ pub fn dispatch(
     critical_window: Option<&CriticalWindow>,
     line: &str,
 ) -> Option<Response> {
-    dispatch_inner(config, stats, critical_window, None, line)
+    dispatch_inner(config, stats, critical_window, line)
 }
 
 /// Async dispatch — used by the Unix socket handler, which has a push
 /// channel and can support subscriptions. Any `subscribe`/`unsubscribe`
 /// request routes through the given hub.
+#[cfg(unix)]
 pub async fn dispatch_async(
     config: &DynamicConfig,
     stats: Option<&SharedStats>,
@@ -189,6 +195,7 @@ pub async fn dispatch_async(
     })
 }
 
+#[cfg(unix)]
 async fn handle_subscribe(
     ctx: &mut SubscriptionContext<'_>,
     params: &Value,
@@ -208,6 +215,7 @@ async fn handle_subscribe(
     Ok(serde_json::json!({ "subscription_id": id }))
 }
 
+#[cfg(unix)]
 async fn handle_unsubscribe(
     ctx: &mut SubscriptionContext<'_>,
     params: &Value,
@@ -223,6 +231,7 @@ async fn handle_unsubscribe(
     Ok(serde_json::json!({ "removed": removed }))
 }
 
+#[cfg(unix)]
 fn is_known_topic(topic: &str) -> bool {
     matches!(topic, "stats" | "priority.window")
 }
@@ -231,7 +240,6 @@ fn dispatch_inner(
     config: &DynamicConfig,
     stats: Option<&SharedStats>,
     critical_window: Option<&CriticalWindow>,
-    _subscription_ctx: Option<&SubscriptionContext>,
     line: &str,
 ) -> Option<Response> {
     let line = line.trim();

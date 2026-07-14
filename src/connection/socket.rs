@@ -1,4 +1,8 @@
 use std::net::{IpAddr, SocketAddr};
+// The raw-fd binder below is a unix concept: it exists for Android, where the
+// host steers a socket onto a radio via `Network.bindSocket` on its fd. Windows
+// has no fd, and no such host integration, so the whole binder is unix-only.
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
@@ -40,11 +44,13 @@ impl UplinkBinder for SourceIpBinder {
 /// steer the fd onto the intended radio before the socket is connected.
 ///
 /// Exported for library consumers; the CLI binary never constructs it.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub struct CallbackBinder<F>(pub F)
 where
     F: Fn(RawFd, IpAddr) -> std::io::Result<()> + Send + Sync;
 
+#[cfg(unix)]
 impl<F> UplinkBinder for CallbackBinder<F>
 where
     F: Fn(RawFd, IpAddr) -> std::io::Result<()> + Send + Sync,
