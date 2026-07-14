@@ -342,11 +342,7 @@ mod tests {
 
         // A link better by more than SWITCH_THRESHOLD wins the packet.
         let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
-        assert_eq!(
-            selected,
-            Some(1),
-            "Should route to the better connection"
-        );
+        assert_eq!(selected, Some(1), "Should route to the better connection");
     }
 
     #[test]

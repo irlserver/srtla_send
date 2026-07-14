@@ -279,12 +279,8 @@ pub async fn handle_srt_packet(
             }
 
             // Normal scheduler selection
-            let mut sel_idx = select_connection_idx(
-                connections,
-                *last_selected_idx,
-                packet_time_ms,
-                config_snap,
-            );
+            let mut sel_idx =
+                select_connection_idx(connections, *last_selected_idx, packet_time_ms, config_snap);
 
             // Keyframe priority: route critical packets to the highest-quality
             // link. The critical time window is opened over the priority
