@@ -723,6 +723,98 @@ mod tests {
         );
     }
 
+    // ---- link phase as a weight, not a gate --------------------------------
+
+    #[test]
+    fn test_warming_link_is_schedulable() {
+        // At go-live EVERY link is warming. When Warming was a hard exclusion the
+        // candidate pool was empty and the sender dropped the stream until the
+        // first link was promoted. A warming link must be usable.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        for c in connections.iter_mut() {
+            c.phase = crate::connection::LinkPhase::Warming {
+                rtt_probes: 0,
+                entered_ms: now,
+            };
+        }
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 0; // best
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, now, &config, true);
+        assert_eq!(
+            selected,
+            Some(1),
+            "an all-warming pool must still schedule, not drop the packet"
+        );
+    }
+
+    #[test]
+    fn test_warming_link_is_derated_against_a_live_one() {
+        // The de-rating is what Warming buys us: a link whose RTT baseline is a
+        // keepalive old should not take a full share while a characterised link
+        // is available. 0.8 x a marginally better raw score loses to Live.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        // Warming link has the better *raw* score (fewer in flight)...
+        connections[0].phase = crate::connection::LinkPhase::Warming {
+            rtt_probes: 1,
+            entered_ms: now,
+        };
+        connections[0].in_flight_packets = 4;
+        // ...but the Live link is close enough that the 0.8 weight flips it.
+        connections[1].in_flight_packets = 5;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, now, &config, true);
+        assert_eq!(
+            selected,
+            Some(1),
+            "a warming link's 0.8 weight should cede a close call to a live link"
+        );
+    }
+
+    #[test]
+    fn test_registering_link_is_never_scheduled() {
+        // The one hard exclusion, and it is not a quality judgement: without REG3
+        // the receiver discards data on this link, so sending is pointless.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        connections[0].phase = crate::connection::LinkPhase::Registering;
+        connections[0].in_flight_packets = 0; // would otherwise be the best score
+        connections[1].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            exploration_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, now, &config, true);
+        assert_eq!(
+            selected,
+            Some(1),
+            "a link that has not completed REG3 must never be scheduled"
+        );
+    }
+
     // ---- starved-link probing (exploration) --------------------------------
     //
     // The probe exists to break the starvation lock: a gated link wins no

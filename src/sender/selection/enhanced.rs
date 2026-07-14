@@ -197,7 +197,11 @@ pub fn select_connection(
         } else {
             1.0
         };
-        let base = c.get_score() as f64;
+        // The phase weight de-rates a warming link rather than excluding it. At
+        // go-live every link is warming, so an exclusion here would empty the
+        // candidate pool and drop the stream; an equal de-rating leaves the
+        // relative ranking intact and traffic flows immediately.
+        let base = c.get_score() as f64 * c.phase_weight();
         let cap_mult = cc_soft_cap_multiplier(c);
         let score = if !enable_quality {
             base * cap_mult * gate_mult

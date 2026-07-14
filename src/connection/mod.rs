@@ -42,14 +42,29 @@ const WARMING_TIMEOUT_MS: u64 = 5_000;
 
 /// Link lifecycle phase.
 ///
-/// Drives which links the scheduler may use and prevents early NAK bursts
-/// from newly-connected links from polluting quality scores.
+/// A phase *weights* a link's score; it does not remove the link. `Registering`
+/// is the sole exception, and it is not a quality judgement: the receiver has
+/// not returned REG3, so data sent on that link would be discarded by the
+/// protocol itself.
+///
+/// This mirrors the model the phase machine was ported from, where the
+/// scheduler multiplies a link's score by a per-phase weight and only a dead
+/// link is filtered out. It also matches the rule the rest of this scheduler
+/// follows: `weak` and `loss_degraded` crush a score but keep the link rankable
+/// (`GATED_LINK_PENALTY`), and `stall_gated` only ever fires when a healthier
+/// link exists. Nothing is hard-removed for quality.
+///
+/// `Warming` used to be a hard exclusion, which broke that rule in the one place
+/// it mattered most: at go-live *every* link is warming, so the candidate pool
+/// was empty and the sender dropped the stream until the first link was promoted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LinkPhase {
     /// Waiting for REG3 handshake to complete.
     #[default]
     Registering,
-    /// REG3 received, accumulating RTT probes before becoming schedulable.
+    /// REG3 received, accumulating RTT probes. Usable, but de-rated: the link's
+    /// RTT baseline is only a keepalive or two old, so the window/in-flight
+    /// signal that drives selection is still coarse.
     Warming { rtt_probes: u32, entered_ms: u64 },
     /// Fully operational — scheduler may use this link.
     Live,
@@ -64,8 +79,26 @@ pub enum LinkPhase {
 
 impl LinkPhase {
     /// Whether the scheduler is allowed to send data on this link.
+    ///
+    /// Only `Registering` is excluded, and only because the protocol forbids it
+    /// (no REG3 yet). Every other phase is schedulable and expresses itself
+    /// through [`LinkPhase::weight`] instead.
     pub fn is_schedulable(&self) -> bool {
-        matches!(self, LinkPhase::Live | LinkPhase::Degraded)
+        !matches!(self, LinkPhase::Registering)
+    }
+
+    /// Scheduling weight contributed by this phase, folded into the link's score.
+    ///
+    /// `Degraded` stays at 1.0 deliberately. Degradation is already priced in
+    /// twice — by the quality multiplier that demoted the link in the first
+    /// place, and by the `weak`/`loss_degraded` admission gates — so charging it
+    /// a third time here would just double-count the same signal.
+    pub fn weight(&self) -> f64 {
+        match self {
+            LinkPhase::Registering => 0.0,
+            LinkPhase::Warming { .. } => 0.8,
+            LinkPhase::Live | LinkPhase::Degraded => 1.0,
+        }
     }
 }
 
@@ -522,6 +555,13 @@ impl SrtlaConnection {
     /// Whether this link is eligible for packet scheduling.
     pub fn is_schedulable(&self) -> bool {
         self.phase.is_schedulable()
+    }
+
+    /// Scheduling weight contributed by this link's phase
+    /// (see [`LinkPhase::weight`]).
+    #[inline(always)]
+    pub fn phase_weight(&self) -> f64 {
+        self.phase.weight()
     }
 
     /// `stall_deselect` signal (pure read; never mutates). True for a connected
