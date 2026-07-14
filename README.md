@@ -241,7 +241,7 @@ srtla_send --metrics-bind 127.0.0.1:9099 \
 curl -s 127.0.0.1:9099/metrics
 ```
 
-Exposed series include `srtla_send_link_up`, `srtla_send_link_rtt_ms`, `srtla_send_link_window`, `srtla_send_link_in_flight`, `srtla_send_link_nak_total`, `srtla_send_link_bitrate_bps`, `srtla_send_link_quality_multiplier`, plus aggregate `srtla_send_active_links`, `srtla_send_total_window`, `srtla_send_critical_windows_total`, and the current `srtla_send_mode` as a numeric gauge.
+Exposed series include `srtla_send_link_up`, `srtla_send_link_rtt_ms`, `srtla_send_link_window`, `srtla_send_link_in_flight`, `srtla_send_link_nak_total`, `srtla_send_link_bitrate_bytes_per_second`, `srtla_send_link_quality_multiplier`, plus aggregate `srtla_send_active_links`, `srtla_send_total_window`, `srtla_send_critical_windows_total`, and the current `srtla_send_mode` as a numeric gauge.
 
 ### Connection Selection Algorithm Details
 

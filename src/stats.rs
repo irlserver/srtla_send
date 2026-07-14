@@ -56,8 +56,14 @@ pub struct LinkStats {
     pub rtt_ms: u32,
     /// Total NAK count since connection established. Indicates packet loss.
     pub nak_count: i32,
-    /// Current send bitrate in bytes/sec (measured, not estimated).
-    pub bitrate_bps: u32,
+    /// Measured send rate in **bytes** per second (not estimated).
+    ///
+    /// Named for its unit on purpose. This was `bitrate_bps` while
+    /// carrying bytes/sec, sitting next to genuinely bit-denominated
+    /// fields like `cc_target_bps`, and feeding a Prometheus gauge whose
+    /// name also claimed bits. Anything that compared the two, or
+    /// graphed the gauge, was silently out by a factor of 8.
+    pub bitrate_bytes_per_sec: u32,
 
     // --- RTT baseline tracking ---
     /// Dual-window minimum RTT baseline in milliseconds.
@@ -313,7 +319,7 @@ impl SharedStats {
                 in_flight: conn.in_flight_packets,
                 rtt_ms: conn.get_smooth_rtt_ms() as u32,
                 nak_count: conn.total_nak_count(),
-                bitrate_bps: (conn.current_bitrate_mbps() * 1_000_000.0 / 8.0) as u32,
+                bitrate_bytes_per_sec: (conn.current_bitrate_mbps() * 1_000_000.0 / 8.0) as u32,
                 rtt_min_ms: conn.get_rtt_min_ms(),
                 rtt_velocity: conn.get_rtt_velocity(),
                 base_score: conn.get_score(),

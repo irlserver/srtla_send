@@ -126,17 +126,20 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
         .ok();
     }
 
+    // Renamed from srtla_send_link_bitrate_bps, which reported bytes/sec
+    // under a bits/sec name. Prometheus convention is base units, so the
+    // name now states the unit it actually carries.
     writeln!(
         out,
-        "# HELP srtla_send_link_bitrate_bps measured send bitrate, bytes/sec"
+        "# HELP srtla_send_link_bitrate_bytes_per_second measured send rate, bytes/sec"
     )
     .ok();
-    writeln!(out, "# TYPE srtla_send_link_bitrate_bps gauge").ok();
+    writeln!(out, "# TYPE srtla_send_link_bitrate_bytes_per_second gauge").ok();
     for link in &snap.links {
         writeln!(
             out,
-            r#"srtla_send_link_bitrate_bps{{ip="{}"}} {}"#,
-            link.ip, link.bitrate_bps
+            r#"srtla_send_link_bitrate_bytes_per_second{{ip="{}"}} {}"#,
+            link.ip, link.bitrate_bytes_per_sec
         )
         .ok();
     }
