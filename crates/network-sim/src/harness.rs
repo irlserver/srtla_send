@@ -8,6 +8,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -104,10 +105,35 @@ pub fn check_impairment_deps() -> std::result::Result<(), SkipReason> {
 /// A child process running inside a network namespace.
 ///
 /// Captures stdout+stderr and kills the process on drop.
+///
+/// The output pipes are drained continuously by background threads, and
+/// that is load-bearing rather than a convenience. A piped child whose
+/// output nobody reads blocks in `write()` as soon as the 64 KiB pipe
+/// buffer fills. srtla_send runs here with `RUST_LOG=debug`, which at a
+/// few Mbps fills that buffer in about a second — and because the task
+/// doing the logging is the main select loop, the *sender* wedges while
+/// its control socket (which logs almost nothing) carries on answering.
+/// The symptom is a stats snapshot frozen at the values it held a second
+/// into the run, which reads like an impossibly stable control loop
+/// rather than a deadlocked one. Short tests never noticed because they
+/// finish under 64 KiB.
 pub struct NamespaceProcess {
     child: Child,
     #[expect(dead_code)]
     label: String,
+    stdout: Arc<Mutex<Vec<String>>>,
+    stderr: Arc<Mutex<Vec<String>>>,
+}
+
+/// Drain a child pipe into a shared buffer, line by line, until EOF.
+fn drain_pipe<R: std::io::Read + Send + 'static>(pipe: R, sink: Arc<Mutex<Vec<String>>>) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(pipe).lines().map_while(|l| l.ok()) {
+            if let Ok(mut buf) = sink.lock() {
+                buf.push(line);
+            }
+        }
+    });
 }
 
 impl NamespaceProcess {
@@ -138,33 +164,38 @@ impl NamespaceProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd.spawn().with_context(|| format!("spawn {label}"))?;
+        let mut child = cmd.spawn().with_context(|| format!("spawn {label}"))?;
+
+        // Start draining immediately — see the note on the struct. If we
+        // wait until the process exits to read these, it never gets there.
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        if let Some(pipe) = child.stdout.take() {
+            drain_pipe(pipe, Arc::clone(&stdout));
+        }
+        if let Some(pipe) = child.stderr.take() {
+            drain_pipe(pipe, Arc::clone(&stderr));
+        }
 
         tracing::debug!(%label, pid = child.id(), "spawned namespace process");
-        Ok(Self { child, label })
+        Ok(Self {
+            child,
+            label,
+            stdout,
+            stderr,
+        })
     }
 
-    /// Read all captured stdout lines (non-blocking snapshot via `try_wait`).
-    /// Only meaningful after the process has exited.
+    /// Snapshot of the stdout lines captured so far. Safe to call while
+    /// the process is still running.
     pub fn stdout_lines(&mut self) -> Vec<String> {
-        match self.child.stdout.take() {
-            Some(stdout) => BufReader::new(stdout)
-                .lines()
-                .map_while(|l| l.ok())
-                .collect(),
-            None => vec![],
-        }
+        self.stdout.lock().map(|b| b.clone()).unwrap_or_default()
     }
 
-    /// Read all captured stderr lines. Only meaningful after exit.
+    /// Snapshot of the stderr lines captured so far. Safe to call while
+    /// the process is still running.
     pub fn stderr_lines(&mut self) -> Vec<String> {
-        match self.child.stderr.take() {
-            Some(stderr) => BufReader::new(stderr)
-                .lines()
-                .map_while(|l| l.ok())
-                .collect(),
-            None => vec![],
-        }
+        self.stderr.lock().map(|b| b.clone()).unwrap_or_default()
     }
 
     /// Send SIGTERM, wait briefly, then SIGKILL if needed.

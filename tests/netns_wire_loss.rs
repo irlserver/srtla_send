@@ -225,6 +225,10 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     // Even without a panic message, a snapshot that never changes while
     // traffic is flowing means the loop that produces it is not running.
     if frozen_ticks > 10 {
+        eprintln!("--- last 80 lines of srtla_send stderr (RUST_LOG=debug) ---");
+        for l in output.srtla_send_stderr.iter().rev().take(80).rev() {
+            eprintln!("{l}");
+        }
         panic!(
             "srtla_send's stats snapshot did not change for {frozen_ticks} consecutive seconds \
              while traffic was flowing — the housekeeping/CC task has stopped. Nothing below this \
