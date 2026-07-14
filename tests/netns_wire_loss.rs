@@ -24,25 +24,25 @@ use std::time::Duration;
 
 use network_sim::{ImpairmentConfig, SRT_CALLER_INGEST_PORT, SRT_PAYLOAD_BYTES, SrtlaTestStack};
 
-/// The lossy link is *roomy*: 8 Mbps, far above the ~2.5 Mbps it ends up
-/// carrying. Nothing we send can congest it, so its 2% loss is wire loss
-/// by construction — which is the whole point of the scenario.
-const LOSSY_LINK_KBIT: u64 = 8_000;
-
-/// The clean link is deliberately too small to carry the stream alone.
+/// Both links are the same generous size. The scenario has to hold two
+/// things at once, and they pull in opposite directions:
 ///
-/// This is what the first version of this test got wrong: with both
-/// links at 8 Mbps and only 2 Mbps offered, the clean link could swallow
-/// the entire stream, so the scheduler never had any reason to pick the
-/// lossy one. Link 0 sat at zero throughput and the congestion-control
-/// path under test was never executed. Starving the clean link forces
-/// the bond to actually use the lossy one.
-const CLEAN_LINK_KBIT: u64 = 1_500;
+/// - The lossy link must be *uncongested*, or its loss stops being wire
+///   loss and the test no longer isolates the bug. So each link is far
+///   larger than its share of the offered stream.
+/// - Both links must actually be *used*, or there is no bond to speak
+///   of. So the offered rate exceeds what either link carries alone,
+///   forcing the scheduler to spread across both.
+///
+/// 6 Mbps links, ~9 Mbps offered: each link ends up around 4.5 Mbps —
+/// comfortably below its own ceiling (loss stays wire loss) yet more
+/// than one link can supply (both stay busy).
+const LOSSY_LINK_KBIT: u64 = 6_000;
+const CLEAN_LINK_KBIT: u64 = 6_000;
 
-/// ~4 Mbps offered: comfortably more than the clean link's 1.5 Mbps, so
-/// roughly 2.5 Mbps has to go down the lossy link, which is still well
-/// under its 8 Mbps ceiling.
-const PACKETS_PER_SEC: u32 = 380;
+/// ~9 Mbps offered as 1316-byte datagrams. Above either link's 6 Mbps,
+/// so the bond has to use both.
+const PACKETS_PER_SEC: u32 = 850;
 const RUN_SECS: u64 = 45;
 
 /// Bits actually offered per second, for reference in assertions.
@@ -110,6 +110,7 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     let mut saw_any_traffic = false;
     let mut bond_bps_steady: Vec<u64> = Vec::new();
     let mut lossy_bps_steady: Vec<u64> = Vec::new();
+    let mut clean_bps_steady: Vec<u64> = Vec::new();
     let mut prev_line = String::new();
     let mut frozen_ticks = 0usize;
 
@@ -182,6 +183,7 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
         if total_ticks > 10 {
             bond_bps_steady.push(bond_bps);
             lossy_bps_steady.push(link_bps(lossy));
+            clean_bps_steady.push(link_bps(&links[1]));
         }
         // Ignore the bootstrap ticks: the target is parked at the floor
         // until the first RTT sample, which would trivially satisfy the
@@ -278,36 +280,45 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     };
     let bond_median = median(bond_bps_steady);
     let lossy_median = median(lossy_bps_steady.clone());
+    let clean_median = median(clean_bps_steady);
     eprintln!(
-        "\nsteady state: bond={bond_median} bps, lossy link={lossy_median} bps, \
-         offered={OFFERED_BPS} bps, lossy CC target low-water={lossy_target_min} bps"
+        "\nsteady state: bond={bond_median} bps, lossy={lossy_median} bps, clean={clean_median} \
+         bps, offered={OFFERED_BPS} bps, lossy CC target low-water={lossy_target_min} bps"
     );
 
     // 1. The CC must not have ratcheted the lossy link's cap into the
-    //    ground. Before the load gate and the efficacy test, BackingOff
-    //    compounded -15% every tick for as long as the loss lasted,
-    //    which pinned the target at MIN_TARGET_BPS within ~20s.
+    //    ground. Before the load gate, the efficacy test, and the
+    //    delivered floor, BackingOff compounded -15% every tick for as
+    //    long as the loss lasted, pinning the target at MIN_TARGET_BPS.
     assert!(
         lossy_target_min > CC_FLOOR_BPS * 3,
         "lossy link's CC target collapsed to {lossy_target_min} bps (floor is {CC_FLOOR_BPS}) — \
-         steady wire loss ratcheted a healthy 8 Mbps link out of the bond"
+         steady wire loss ratcheted a healthy {LOSSY_LINK_KBIT} kbit link out of the bond"
     );
 
-    // 2. And it must still have been *carrying* traffic. A target that
-    //    stays high while the link sits idle would satisfy (1) without
-    //    the bond gaining anything, so assert the delivered rate too.
-    //    The clean link alone caps out at 1.5 Mbps.
+    // 2. Both links must be carrying real traffic at once — that is what
+    //    makes this a bond rather than a failover. A quarter of the
+    //    offered rate on each is a generous floor (fair share is ~half)
+    //    that still fails loudly if either link is idle or trickling.
+    let each_link_floor = OFFERED_BPS / 4;
     assert!(
-        lossy_median > CLEAN_LINK_KBIT * 1_000 / 2,
-        "lossy link only carried {lossy_median} bps in steady state — it is nominally in the bond \
-         but is not doing real work"
+        lossy_median > each_link_floor,
+        "lossy link carried only {lossy_median} bps of {OFFERED_BPS} offered — it is nominally in \
+         the bond but not pulling its weight"
+    );
+    assert!(
+        clean_median > each_link_floor,
+        "clean link carried only {clean_median} bps of {OFFERED_BPS} offered — the bond is really \
+         running on one link"
     );
 
-    // 3. The point of all of it: the bond aggregates. Losing the lossy
-    //    link would cap the bond at the clean link's 1.5 Mbps.
+    // 3. The bond aggregates past what either link can do alone. Each is
+    //    capped at 6 Mbps, so clearing that ceiling proves both links are
+    //    summing rather than one covering for the other.
+    let single_link_bps = LOSSY_LINK_KBIT.max(CLEAN_LINK_KBIT) * 1_000;
     assert!(
-        bond_median > CLEAN_LINK_KBIT * 1_000 * 3 / 2,
-        "bond carried only {bond_median} bps — barely more than the clean link's \
-         {CLEAN_LINK_KBIT} kbit on its own, so bonding gained nothing"
+        bond_median > single_link_bps,
+        "bond carried only {bond_median} bps — no more than a single {single_link_bps}-bps link, \
+         so bonding gained nothing"
     );
 }

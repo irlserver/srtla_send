@@ -324,16 +324,118 @@ impl SrtlaTestTopology {
             receiver_ifaces.push(r_iface);
         }
 
-        let receiver_ip = "10.10.1.2".to_string();
+        // One receiver endpoint reached over every uplink, which is how
+        // SRTLA actually bonds: N sender source IPs, one receiver
+        // address. A per-link near-end IP (the old `10.10.1.2`) only
+        // worked for link 0 — every other uplink routed its packets out
+        // link 0's veth and got dropped by the receiver's reverse-path
+        // filter, so it never registered and the bond was really one
+        // link. See `wire_bonding_routes`.
+        let receiver_ip = SRTLA_RECEIVER_SERVICE_IP.to_string();
 
-        Ok(Self {
+        let topo = Self {
             sender_ns,
             receiver_ns,
             sender_ips,
             receiver_ip,
             sender_ifaces,
             receiver_ifaces,
-        })
+        };
+        topo.wire_bonding_routes()?;
+        Ok(topo)
+    }
+
+    /// Make the single receiver endpoint reachable over each uplink
+    /// independently, so every source IP egresses its own (impairable)
+    /// veth. This is the piece that turns the topology from "one link
+    /// plus dead spares" into a real bond.
+    ///
+    /// Per uplink `i` on subnet `10.10.{i+1}.0/24` (sender `.1`,
+    /// receiver `.2`):
+    ///
+    /// - The receiver owns the service IP on `lo`, so it answers on it no
+    ///   matter which veth a request arrived on.
+    /// - The sender gets a routing table per source IP
+    ///   (`ip rule from <src> lookup <table>`) whose route to the service
+    ///   IP points out that uplink's veth. Binding a socket to the source
+    ///   IP therefore pins its traffic to that veth.
+    /// - The receiver returns packets to each sender source with the
+    ///   service IP as source address (`src` on the route), so the
+    ///   sender's connected UDP socket accepts the reply.
+    /// - Reverse-path filtering is relaxed on both ends. With per-source
+    ///   policy routing the return route lives outside the main table, so
+    ///   strict rp_filter (the default) would drop the very packets that
+    ///   make the uplink work.
+    fn wire_bonding_routes(&self) -> Result<()> {
+        disable_rp_filter(&self.sender_ns, &self.sender_ifaces)?;
+        disable_rp_filter(&self.receiver_ns, &self.receiver_ifaces)?;
+
+        // Service IP lives on the receiver's loopback.
+        self.receiver_ns
+            .exec_checked(
+                "ip",
+                &[
+                    "addr",
+                    "add",
+                    &format!("{SRTLA_RECEIVER_SERVICE_IP}/32"),
+                    "dev",
+                    "lo",
+                ],
+            )
+            .context("add receiver service IP")?;
+
+        for (i, (s_ip, s_iface)) in self
+            .sender_ips
+            .iter()
+            .zip(self.sender_ifaces.iter())
+            .enumerate()
+        {
+            let subnet = i + 1;
+            let r_ip = format!("10.10.{subnet}.2");
+            let table = (subnet).to_string();
+
+            // Sender: source-routed path to the service IP over this veth.
+            self.sender_ns
+                .exec_checked(
+                    "ip",
+                    &[
+                        "route",
+                        "add",
+                        &format!("{SRTLA_RECEIVER_SERVICE_IP}/32"),
+                        "via",
+                        &r_ip,
+                        "dev",
+                        s_iface,
+                        "table",
+                        &table,
+                    ],
+                )
+                .context("sender per-uplink route")?;
+            self.sender_ns
+                .exec_checked("ip", &["rule", "add", "from", s_ip, "lookup", &table])
+                .context("sender per-uplink rule")?;
+
+            // Receiver: return to this sender source with the service IP
+            // as the source address, so the reply's peer matches what the
+            // sender connected to.
+            let r_iface = &self.receiver_ifaces[i];
+            self.receiver_ns
+                .exec_checked(
+                    "ip",
+                    &[
+                        "route",
+                        "add",
+                        &format!("{s_ip}/32"),
+                        "dev",
+                        r_iface,
+                        "src",
+                        SRTLA_RECEIVER_SERVICE_IP,
+                    ],
+                )
+                .context("receiver return route")?;
+        }
+
+        Ok(())
     }
 
     /// Apply impairment to sender-side veth link at `idx`.
@@ -435,6 +537,32 @@ pub struct SrtlaTestStack {
 
 /// UDP port the SRT caller ingests from, when one is started.
 pub const SRT_CALLER_INGEST_PORT: u16 = 6000;
+
+/// The single receiver endpoint every uplink connects to. Lives on the
+/// receiver's loopback and is reachable over each veth via per-source
+/// policy routing (see `SrtlaTestTopology::wire_bonding_routes`).
+const SRTLA_RECEIVER_SERVICE_IP: &str = "10.99.0.1";
+
+/// Disable reverse-path filtering in a namespace: set the `all` and
+/// `default` keys plus every named interface to `0`. The effective value
+/// is `max(all, iface)`, so both have to be cleared.
+///
+/// Off, not loose (`2`): whether loose mode honours the per-source policy
+/// routing this topology relies on is kernel-version-dependent, and a
+/// test namespace has nothing to protect, so remove the variable.
+fn disable_rp_filter(ns: &Namespace, ifaces: &[String]) -> Result<()> {
+    let mut keys = vec!["all".to_string(), "default".to_string()];
+    keys.extend(ifaces.iter().cloned());
+    for key in keys {
+        // Best-effort per key: a kernel may lack a given conf path, and
+        // that should not fail the whole topology.
+        let _ = ns.exec(
+            "sysctl",
+            &["-w", &format!("net.ipv4.conf.{key}.rp_filter=0")],
+        );
+    }
+    Ok(())
+}
 
 /// Output collected from all processes after stopping the stack.
 pub struct StackOutput {
