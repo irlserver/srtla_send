@@ -110,6 +110,8 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     let mut saw_any_traffic = false;
     let mut bond_bps_steady: Vec<u64> = Vec::new();
     let mut lossy_bps_steady: Vec<u64> = Vec::new();
+    let mut prev_line = String::new();
+    let mut frozen_ticks = 0usize;
 
     for _ in 0..RUN_SECS {
         thread::sleep(Duration::from_secs(1));
@@ -153,6 +155,13 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
         eprintln!("t+{total_ticks}s\n{line}");
         total_ticks += 1;
 
+        if line == prev_line {
+            frozen_ticks += 1;
+        } else {
+            frozen_ticks = 0;
+        }
+        prev_line = line;
+
         let lossy = &links[0];
         let target = lossy
             .get("cc_target_bps")
@@ -191,8 +200,37 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     let output = stack.stop();
     let _ = std::fs::remove_file(&sock);
 
-    let stderr: String = output.srtla_send_stderr.join("\n");
-    assert!(!stderr.contains("panic"), "srtla_send panicked");
+    // srtla_send runs housekeeping, the weak-link classifier and the CC
+    // controller in one tokio task, and writes the stats snapshot at the
+    // end of it. A panic anywhere in there kills only that task: the
+    // control socket lives in a different task and keeps happily serving
+    // the last snapshot it saw. The symptom is a stats reply that is
+    // byte-identical forever, which reads like a suspiciously stable
+    // control loop rather than a dead one. Say so explicitly.
+    let panics: Vec<&String> = output
+        .srtla_send_stderr
+        .iter()
+        .filter(|l| l.contains("panicked at") || l.contains("PANIC"))
+        .collect();
+    assert!(
+        panics.is_empty(),
+        "srtla_send panicked — housekeeping/CC task is dead, so every stat below is stale:\n{}",
+        panics
+            .iter()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // Even without a panic message, a snapshot that never changes while
+    // traffic is flowing means the loop that produces it is not running.
+    if frozen_ticks > 10 {
+        panic!(
+            "srtla_send's stats snapshot did not change for {frozen_ticks} consecutive seconds \
+             while traffic was flowing — the housekeeping/CC task has stopped. Nothing below this \
+             point is a measurement of congestion control."
+        );
+    }
 
     assert!(
         samples > 10,

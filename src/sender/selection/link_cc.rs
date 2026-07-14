@@ -33,31 +33,42 @@
 //! the cap to the floor, where the BDP in-flight cap deselects a link
 //! that was carrying real traffic.
 //!
-//! Two guards keep the decrease honest, and they cover different halves
-//! of the problem:
+//! Three guards keep the decrease honest. Each covers a case the others
+//! cannot, and all three were needed before a link with steady wire loss
+//! stopped being ratcheted to the floor on a real netem run.
 //!
-//! - `BACKOFF_MIN_LOAD_PERMILLE` gates *entry*: a link we are barely
+//! - `BACKOFF_MIN_LOAD_PERMILLE` gates *entry*. A link we are barely
 //!   feeding cannot be the cause of its own loss, so it never backs off.
-//!   This covers the starved link.
-//! - `BACKOFF_EFFICACY_TICKS` bounds the *descent* on a link we really
-//!   are driving hard, by asking whether cutting is working. Congestive
-//!   loss responds to a lower offered rate; wire loss does not. If a
-//!   ~39% cut has not moved the loss, we stop attributing it to
-//!   ourselves (`loss_uncongestive`) and let the link climb again.
+//!   This is the only guard that helps a **starved** link: one carrying
+//!   nothing has no throughput signal for the other two to reason from.
 //!
-//! Neither is sufficient alone. The load gate does not converge by
-//! itself — each cut lowers the target, which *raises* load, holding the
-//! gate open all the way to the floor. And the efficacy test cannot
-//! protect a starved link, because a link carrying nothing has no
-//! throughput signal to judge a cut against.
+//! - The **delivered floor** bounds the *depth*: never cap a link below
+//!   the rate it is visibly sustaining. This is the load-bearing one,
+//!   and the reason is easy to get backwards. `target_bps` **does not
+//!   pace**. It steers the scheduler between links; it does not throttle
+//!   this one. So a cut does not reduce what this link sends, and
+//!   measured throughput does *not* follow the cap down. A cap under
+//!   proven delivery is not a conservative estimate, it is a wrong one,
+//!   and nothing about it self-corrects — so the decrease compounds
+//!   until it hits `MIN_TARGET_BPS`. Under genuine congestion the floor
+//!   still converges, because there a cut steers traffic *off* the link,
+//!   throughput really does fall, and the floor follows it down.
 //!
-//! Note the asymmetry with `Drain`: the loss decrease is allowed to
-//! compound, where the RTT decrease is one-shot. That is deliberate.
-//! `rtt_min_ms` is windowed (`CC_RTT_MIN_WINDOW_MS`), so once congestion
-//! outlives the window the baseline re-anchors to the congested RTT and
-//! inflation reads ~1.0 — RTT fades as a signal exactly when congestion
-//! is most persistent. Loss is the only backstop left, so it has to be
-//! able to walk the cap all the way down to real capacity.
+//! - `BACKOFF_EFFICACY_TICKS` bounds the *duration*: if a ~39% cut has
+//!   not moved the loss, stop attributing it to ourselves
+//!   (`loss_uncongestive`) and let the link climb again. Congestive loss
+//!   responds to a lower offered rate; wire loss does not.
+//!
+//! The verdict expires only on `LOSS_UNCONGESTIVE_RETEST_TICKS`, or when
+//! the loss regime ends. It deliberately does **not** expire on RTT
+//! inflation. That was tried, on the theory that RTT is congestion
+//! evidence independent of the loss signal, and it re-opened the backoff
+//! path on every inflated tick: the controller alternated
+//! `BackingOff → Drain → BackingOff`, cut on nearly all of them, and
+//! ratcheted to the floor exactly as if the latch did not exist.
+//! Congestion visible in RTT is already handled by `Drain` and
+//! `Holding`, which are untouched by any of this — the loss path does
+//! not need to double up on it.
 //!
 //! ## Age-bucketed RTT EWMA
 //!
@@ -112,6 +123,13 @@ const BACKOFF_EFFICACY_TICKS: u32 = 3;
 /// The loss permille must fall to at most this fraction of its level at
 /// the start of the episode for the backoff to count as working.
 const BACKOFF_EFFICACY_IMPROVEMENT_PERMILLE: u32 = 800;
+
+/// How long an "this loss is not mine" verdict stands before we re-test
+/// it. A verdict that never expires is one we can never correct, and a
+/// link's conditions do change. Re-testing costs at most one more
+/// `BACKOFF_EFFICACY_TICKS` episode (~39%) per interval, against which
+/// `Climbing` recovers considerably more, so it cannot ratchet.
+const LOSS_UNCONGESTIVE_RETEST_TICKS: u32 = 30;
 
 /// Climbing additive-increase step as a permille of the current target.
 /// 0.02 = +2% per tick — the conservative baseline for steady state.
@@ -338,9 +356,12 @@ pub struct LinkCongestionState {
     backoff_entry_loss_pm: u32,
     /// Latched verdict: we cut hard and the loss did not respond, so it
     /// is not loss our offered rate is causing. Suppresses further
-    /// loss-driven backoff until the loss regime ends, or until RTT
-    /// inflation offers fresh, independent evidence of congestion.
+    /// loss-driven backoff until the loss regime ends, or until the
+    /// re-test timer expires.
     loss_uncongestive: bool,
+    /// Ticks the `loss_uncongestive` verdict has been held, against
+    /// `LOSS_UNCONGESTIVE_RETEST_TICKS`.
+    uncongestive_ticks: u32,
 }
 
 impl Default for LinkCongestionState {
@@ -368,6 +389,7 @@ impl Default for LinkCongestionState {
             backoff_ticks: 0,
             backoff_entry_loss_pm: 0,
             loss_uncongestive: false,
+            uncongestive_ticks: 0,
         }
     }
 }
@@ -503,25 +525,36 @@ impl LinkCongestionState {
     ///
     /// Called once per tick, before the state transition, so `self.state`
     /// here is still the *previous* tick's state — i.e. "was I cutting?".
-    fn update_backoff_efficacy(&mut self, loss_high: bool, loss_pm: u32, rtt_inflation: f64) {
+    fn update_backoff_efficacy(&mut self, loss_high: bool, loss_pm: u32) {
         if !loss_high {
             // The loss regime is over. Everything we concluded about it
             // is stale, so the next episode re-tests from scratch.
             self.backoff_ticks = 0;
             self.backoff_entry_loss_pm = 0;
             self.loss_uncongestive = false;
+            self.uncongestive_ticks = 0;
             return;
         }
 
-        // RTT inflation is evidence of congestion that does not come
-        // from the loss signal itself, so it is allowed to overturn an
-        // earlier "not my fault" verdict. Without this, a link that
-        // starts genuinely congesting while the latch is held would
-        // never back off for loss again.
-        if self.loss_uncongestive && rtt_inflation > RTT_HOLD_FACTOR {
-            self.loss_uncongestive = false;
-            self.backoff_ticks = 0;
-            self.backoff_entry_loss_pm = loss_pm;
+        // A held verdict expires on a timer, and on nothing else.
+        //
+        // It used to be cleared by RTT inflation, on the theory that
+        // this was congestion evidence independent of the loss signal.
+        // In practice that re-opened the backoff path on *every* tick
+        // where RTT was inflated, so the controller just alternated
+        // BackingOff → Drain → BackingOff and cut on almost every one,
+        // ratcheting the cap to the floor exactly as before. The latch
+        // was worthless. Congestion that shows up in RTT is already
+        // handled, independently and correctly, by `Drain` and
+        // `Holding` below — the loss path does not need to double up.
+        if self.loss_uncongestive {
+            self.uncongestive_ticks += 1;
+            if self.uncongestive_ticks >= LOSS_UNCONGESTIVE_RETEST_TICKS {
+                self.loss_uncongestive = false;
+                self.uncongestive_ticks = 0;
+                self.backoff_ticks = 0;
+                self.backoff_entry_loss_pm = loss_pm;
+            }
             return;
         }
 
@@ -549,6 +582,7 @@ impl LinkCongestionState {
         } else {
             // We cut ~39% and the loss did not care. It is not ours.
             self.loss_uncongestive = true;
+            self.uncongestive_ticks = 0;
         }
     }
 
@@ -606,7 +640,7 @@ impl LinkCongestionState {
         // target, which *raises* load, which holds the gate open all the
         // way down to `MIN_TARGET_BPS`.
         let loss_high = loss_pm > LOSS_BACKOFF_PERMILLE;
-        self.update_backoff_efficacy(loss_high, loss_pm, rtt_inflation);
+        self.update_backoff_efficacy(loss_high, loss_pm);
 
         let prev_state = self.state;
         let next_state = if loss_high && loaded && !self.loss_uncongestive {
@@ -679,14 +713,29 @@ impl LinkCongestionState {
             }
             CcState::BackingOff => {
                 self.climb_mode = ClimbMode::Normal;
-                // Unlike `Drain` this decrease is allowed to compound:
-                // sustained congestion has to be able to walk the cap
-                // down to the real capacity, and the windowed rtt_min
-                // means RTT inflation fades as a signal once congestion
-                // outlives the window, so loss is the only backstop
-                // left. What bounds the descent is the efficacy test
-                // above, not a one-shot contract.
-                (prev * BACKOFF_PERMILLE as f64) / 1000.0
+                // Multiplicative decrease, but never below what the link
+                // is provably carrying right now.
+                //
+                // The floor matters because `target_bps` does not pace
+                // anything. It steers the scheduler *between* links; it
+                // does not throttle this one. So cutting it does not
+                // reduce what this link sends, and measured throughput
+                // does *not* follow the cut downwards. A cap under the
+                // rate the link is visibly sustaining is therefore not a
+                // conservative estimate, it is just a wrong one — and
+                // since it never becomes self-correcting, the decrease
+                // compounds until it hits MIN_TARGET_BPS.
+                //
+                // It still converges under real congestion: there,
+                // cutting a link's cap steers traffic *off* it, so its
+                // measured throughput really does fall, and the floor
+                // falls with it.
+                //
+                // Clamped to `prev` so a backoff can never raise the cap
+                // when the link is already delivering above it.
+                let decreased = (prev * BACKOFF_PERMILLE as f64) / 1000.0;
+                let delivered_floor = (sane_observed as f64).min(prev);
+                decreased.max(delivered_floor)
             }
             CcState::Drain => {
                 self.climb_mode = ClimbMode::Normal;
@@ -997,11 +1046,18 @@ mod tests {
         );
     }
 
-    /// The `loss_uncongestive` latch must not be permanent: RTT
-    /// inflation is evidence that does not come from the loss signal
-    /// itself, so it re-opens the backoff path.
+    /// RTT inflation must NOT clear the verdict.
+    ///
+    /// This asserts the opposite of what it originally did, because a
+    /// real netem run proved the original wrong. Clearing on RTT
+    /// inflation re-opened the backoff path on every inflated tick: the
+    /// controller alternated BackingOff → Drain → BackingOff, cut on
+    /// nearly every one, and drove the cap to MIN_TARGET_BPS anyway. The
+    /// latch might as well not have existed.
+    ///
+    /// Congestion that shows up in RTT is still answered — by `Drain`.
     #[test]
-    fn rtt_inflation_overturns_the_uncongestive_verdict() {
+    fn rtt_inflation_does_not_reopen_the_backoff_path() {
         let mut cc = LinkCongestionState::default();
         cc.record_rtt(50.0, 0);
         cc.tick(2_000_000, 0);
@@ -1012,17 +1068,79 @@ mod tests {
         }
         assert!(cc.loss_uncongestive);
 
-        // The path starts queueing: 50 → 90ms is past RTT_HOLD_FACTOR.
+        // The path starts queueing: 50 → 120ms is past DRAIN_RTT_INFLATION.
         for i in 11..=20 {
-            cc.record_rtt(90.0, i * 1_000);
+            cc.record_rtt(120.0, i * 1_000);
             cc.record_loss(1_000, 100, i * 1_000);
             cc.tick(cc.target_bps.min(2_000_000), i * 1_000);
         }
+
         assert!(
-            !cc.loss_uncongestive,
-            "queue growth should re-open the backoff path"
+            cc.loss_uncongestive,
+            "RTT inflation must not re-open the loss-backoff path — that nullifies the latch"
         );
-        assert_eq!(cc.state, CcState::BackingOff);
+        assert_ne!(
+            cc.state,
+            CcState::BackingOff,
+            "the loss path must stay shut; Drain is what answers RTT inflation"
+        );
+    }
+
+    /// The verdict expires, so a link whose conditions change is
+    /// re-tested rather than trusted forever.
+    #[test]
+    fn uncongestive_verdict_is_retested_on_a_timer() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(2_000_000, 0);
+
+        for i in 1..=10 {
+            let delivered = cc.target_bps.min(2_000_000);
+            drive_tick(&mut cc, i * 1_000, delivered, 100);
+        }
+        assert!(cc.loss_uncongestive);
+
+        // Look for the verdict being *released*, not its value at some
+        // arbitrary later tick: once released it re-tests, fails again on
+        // loss that is still not ours, and re-latches. Sampling a single
+        // instant would be racing that cycle.
+        let mut released = false;
+        for i in 11..=(12 + u64::from(LOSS_UNCONGESTIVE_RETEST_TICKS)) {
+            let delivered = cc.target_bps.min(2_000_000);
+            drive_tick(&mut cc, i * 1_000, delivered, 100);
+            if !cc.loss_uncongestive {
+                released = true;
+            }
+        }
+        assert!(
+            released,
+            "verdict never expired — it should be re-tested every \
+             {LOSS_UNCONGESTIVE_RETEST_TICKS} ticks, not trusted forever"
+        );
+    }
+
+    /// The load-bearing guard, and the one whose rationale is easiest to
+    /// get backwards. `target_bps` steers the scheduler between links; it
+    /// does not throttle this one. So measured throughput does not fall
+    /// when the cap is cut, and a cap below proven delivery never
+    /// self-corrects — it just compounds to the floor.
+    #[test]
+    fn backoff_never_caps_below_delivered_throughput() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(1_000_000, 0);
+
+        // The link keeps delivering 4 Mbps flat whatever we set the cap
+        // to, and sheds a steady 2% that has nothing to do with our rate.
+        for i in 1..=30 {
+            drive_tick(&mut cc, i * 1_000, 4_000_000, 20);
+        }
+
+        assert!(
+            cc.target_bps >= 4_000_000,
+            "target {} was cut below the 4 Mbps the link is demonstrably carrying",
+            cc.target_bps
+        );
     }
 
     /// A clean window ends the episode, so the next one re-tests from
