@@ -284,7 +284,6 @@ pub async fn handle_srt_packet(
                 *last_selected_idx,
                 packet_time_ms,
                 config_snap,
-                seq.is_some(),
             );
 
             // Keyframe priority: route critical packets to the highest-quality

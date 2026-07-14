@@ -14,12 +14,10 @@
 //! - NAK burst detection and penalties
 //! - RTT-aware scoring (small bonus for low latency)
 //! - Hysteresis (10%) to prevent flip-flopping
-//! - Bounded probing of starved links (opt-in, see `exploration`)
 
 mod classic;
 pub mod classifier;
 pub mod enhanced;
-pub mod exploration;
 pub mod link_cc;
 mod quality;
 
@@ -37,7 +35,6 @@ use crate::mode::SchedulingMode;
 /// * `last_idx` - Previously selected connection (for hysteresis)
 /// * `current_time_ms` - Current timestamp in milliseconds
 /// * `config` - Configuration snapshot with mode and settings
-/// * `is_data` - Whether this packet carries an SRT sequence number
 ///
 /// # Returns
 /// The index of the selected connection, or None if no valid connections
@@ -47,7 +44,6 @@ pub fn select_connection_idx(
     last_idx: Option<usize>,
     current_time_ms: u64,
     config: &ConfigSnapshot,
-    is_data: bool,
 ) -> Option<usize> {
     // Stalled-link deselect (default on). A link is gated only when it is a
     // stalled black hole AND at least one healthier link can carry the traffic,
@@ -65,15 +61,12 @@ pub fn select_connection_idx(
             classic::select_connection(conns)
         }
         SchedulingMode::Enhanced => {
-            // Enhanced mode: quality-aware selection with score hysteresis and
-            // optional exploration.
+            // Enhanced mode: quality-aware selection with score hysteresis.
             enhanced::select_connection(
                 conns,
                 last_idx,
                 current_time_ms,
                 config.effective_quality_enabled(),
-                config.effective_exploration_enabled(),
-                is_data,
             )
         }
     }
@@ -126,11 +119,10 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
-        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
+        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
         assert_eq!(
             result,
             Some(1),
@@ -155,12 +147,11 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
         // Immediately after having selected link 0, with no elapsed time at all.
-        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
+        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
         assert_eq!(
             result,
             Some(1),
@@ -184,11 +175,10 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
-        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
+        let result = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
         assert_eq!(
             result,
             Some(0),
@@ -202,10 +192,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let result = select_connection_idx(&mut conns, None, 0, &config, true);
+        let result = select_connection_idx(&mut conns, None, 0, &config);
         assert_eq!(result, None);
     }
 }

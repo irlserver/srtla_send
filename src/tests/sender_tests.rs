@@ -27,11 +27,10 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, &config, true);
+        let selected = select_connection_idx(&mut connections, None, 0, &config);
         assert_eq!(selected, Some(1));
     }
 
@@ -51,10 +50,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
         assert_eq!(
             selected,
             Some(0),
@@ -80,10 +78,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
         assert_eq!(
             selected,
             Some(1),
@@ -110,10 +107,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
         assert_eq!(
             selected,
             Some(0),
@@ -139,10 +135,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
         assert_eq!(
             selected,
             Some(1),
@@ -166,10 +161,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
         assert_eq!(
             selected,
             Some(0),
@@ -195,10 +189,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
         assert_eq!(
             selected,
             Some(1),
@@ -207,38 +200,42 @@ mod tests {
     }
 
     #[test]
-    fn test_enhanced_weak_link_stays_reachable_for_exploration() {
-        // A2: a quality-gated link is crushed in score but not removed,
-        // so exploration can still probe it. Without that, the gated link
-        // is never ranked second-best, exploration can't reach it, it
-        // earns zero throughput share, and the classifier keeps it weak
-        // forever (starvation lock).
+    fn test_enhanced_weak_link_stays_rankable() {
+        // A quality-gated link is crushed in score but not removed, so it keeps
+        // a trickle of traffic and can still earn the ACK/loss samples that
+        // clear the gate. Without that it earns zero throughput share, the
+        // classifier reads NoTraffic/LowShare, and it stays weak forever: a
+        // starvation lock. This trickle is what makes an explicit re-probing
+        // mechanism unnecessary (measured: a 70%-loss link gated to 0.00 Mbps
+        // re-adopts itself ~7s after it silently heals).
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(2));
         let current_time = now_ms();
 
-        // Connection 0 is the current best but has a recent NAK
-        // (degrading). Connection 1 is weak but has no NAKs (recovered).
-        // Exploration's degraded-best + recovered-second path fires
-        // deterministically, independent of wall-clock.
-        connections[0].in_flight_packets = 0;
-        connections[0].congestion.nak_count = 1;
-        connections[0].congestion.last_nak_time_ms = current_time.saturating_sub(1000);
-        connections[1].in_flight_packets = 0;
-        connections[1].weak = true;
-
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: true,
             ..ConfigSnapshot::default()
         };
-        // last_idx = 0 (current best), well outside the switch cooldown.
-        let selected = select_connection_idx(&mut connections, Some(0), current_time, &config, true);
+
+        // The healthy link wins while it is healthy -- the weak link is crushed
+        // by GATED_LINK_PENALTY, not removed.
+        connections[0].in_flight_packets = 0; // healthy
+        connections[1].in_flight_packets = 0;
+        connections[1].weak = true;
+        let selected = select_connection_idx(&mut connections, Some(0), current_time, &config);
+        assert_eq!(selected, Some(0), "healthy link should win over a weak one");
+
+        // Crushed, but still in the ranking: once the healthy link is loaded
+        // enough that even a 0.02x score beats it, the weak link takes the
+        // packet. An *excluded* link could never do this, and would earn zero
+        // share forever.
+        connections[0].in_flight_packets = 10_000;
+        let selected = select_connection_idx(&mut connections, Some(0), current_time, &config);
         assert_eq!(
             selected,
             Some(1),
-            "weak link must remain rankable so exploration can probe it"
+            "weak link must remain rankable so its trickle can clear the gate"
         );
     }
 
@@ -262,11 +259,10 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -291,11 +287,10 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, current_time, &config, true);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
@@ -314,7 +309,6 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
@@ -322,7 +316,7 @@ mod tests {
         // `get_score()` counts queued packets as in-flight, so routing a packet
         // lowers its own link's score -- that feedback loop is what bounds
         // per-link queue depth, and a time lock would open it.
-        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
         assert_eq!(
             selected,
             Some(1),
@@ -343,12 +337,11 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
         // A link better by more than SWITCH_THRESHOLD wins the packet.
-        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
         assert_eq!(
             selected,
             Some(1),
@@ -373,11 +366,10 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
         assert_eq!(
             selected,
             Some(1),
@@ -398,13 +390,12 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
         // Classic mode: per-packet selection ALWAYS picks highest score connection
         // No hysteresis - matches original C implementation
-        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config, true);
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
 
         // Per-packet routing immediately uses connection 1 (best score)
         assert_eq!(
@@ -610,32 +601,13 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, &config, true);
+        let selected = select_connection_idx(&mut connections, None, 0, &config);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
-    }
-
-    #[test]
-    fn test_exploration_mode() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-
-        let config = ConfigSnapshot {
-            mode: SchedulingMode::Enhanced,
-            quality_enabled: false,
-            exploration_enabled: true,
-            ..ConfigSnapshot::default()
-        };
-
-        // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&mut connections, None, 0, &config, true);
-
-        // The result depends on timing, but should not panic
     }
 
     #[test]
@@ -646,7 +618,6 @@ mod tests {
         // Default values from DynamicConfig::new()
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
-        assert!(!snap.exploration_enabled);
     }
 
     #[test]
@@ -746,10 +717,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, now, &config, true);
+        let selected = select_connection_idx(&mut connections, None, now, &config);
         assert_eq!(
             selected,
             Some(1),
@@ -778,10 +748,9 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, now, &config, true);
+        let selected = select_connection_idx(&mut connections, None, now, &config);
         assert_eq!(
             selected,
             Some(1),
@@ -804,165 +773,13 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut connections, None, now, &config, true);
+        let selected = select_connection_idx(&mut connections, None, now, &config);
         assert_eq!(
             selected,
             Some(1),
             "a link that has not completed REG3 must never be scheduled"
-        );
-    }
-
-    // ---- starved-link probing (exploration) --------------------------------
-    //
-    // The probe exists to break the starvation lock: a gated link wins no
-    // packets, so it earns no ACKs, so the signal that gated it never clears.
-    // These tests pin the properties that keep it from being harmful.
-
-    fn exploring() -> ConfigSnapshot {
-        ConfigSnapshot {
-            mode: SchedulingMode::Enhanced,
-            quality_enabled: false,
-            exploration_enabled: true,
-            ..ConfigSnapshot::default()
-        }
-    }
-
-    #[test]
-    fn test_probe_targets_the_starved_link_not_second_best() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-        let now = now_ms();
-
-        // 0 is the healthy best. 2 is healthy but merely second-best -- it is
-        // already earning ACKs and needs no probe. 1 is starved.
-        connections[0].in_flight_packets = 0;
-        connections[2].in_flight_packets = 5;
-        connections[1].in_flight_packets = 1;
-        connections[1].weak = true;
-
-        let selected = select_connection_idx(&mut connections, Some(0), now, &exploring(), true);
-        assert_eq!(
-            selected,
-            Some(1),
-            "probe must go to the starved link, not the healthy second-best"
-        );
-    }
-
-    #[test]
-    fn test_probe_is_rate_limited_per_link() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-        let now = now_ms();
-
-        connections[0].in_flight_packets = 0;
-        connections[2].in_flight_packets = 5;
-        connections[1].in_flight_packets = 1;
-        connections[1].weak = true;
-
-        // First packet probes the starved link and stamps it.
-        let first = select_connection_idx(&mut connections, Some(0), now, &exploring(), true);
-        assert_eq!(first, Some(1));
-
-        // The very next packet must go back to the healthy link: a probe is one
-        // packet, not a mode. Without the budget this alternates every packet.
-        let second = select_connection_idx(&mut connections, Some(1), now + 1, &exploring(), true);
-        assert_eq!(
-            second,
-            Some(0),
-            "a second probe must not fire inside PROBE_INTERVAL_MS"
-        );
-
-        // Still suppressed just before the interval elapses.
-        let during = select_connection_idx(
-            &mut connections,
-            Some(0),
-            now + PROBE_INTERVAL_MS - 1,
-            &exploring(),
-            true,
-        );
-        assert_eq!(during, Some(0), "probe budget must hold for the full interval");
-
-        // Due again once the interval has passed.
-        let after = select_connection_idx(
-            &mut connections,
-            Some(0),
-            now + PROBE_INTERVAL_MS,
-            &exploring(),
-            true,
-        );
-        assert_eq!(after, Some(1), "probe should be due again after the interval");
-    }
-
-    #[test]
-    fn test_probe_never_fires_without_a_healthy_link() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-        let now = now_ms();
-
-        // Everything is starved: there is no spare capacity to fund a probe,
-        // and normal scoring already routes to the least-bad link. Diverting
-        // here would just add latency to a packet the stream needs.
-        for c in connections.iter_mut() {
-            c.weak = true;
-            c.in_flight_packets = 5;
-        }
-        connections[1].in_flight_packets = 0; // best of a bad lot
-
-        let selected = select_connection_idx(&mut connections, Some(1), now, &exploring(), true);
-        assert_eq!(
-            selected,
-            Some(1),
-            "with no healthy link, selection must fall back to the best link and not probe"
-        );
-    }
-
-    #[test]
-    fn test_probe_only_diverts_data_packets() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-        let now = now_ms();
-
-        connections[0].in_flight_packets = 0;
-        connections[2].in_flight_packets = 5;
-        connections[1].in_flight_packets = 1;
-        connections[1].weak = true;
-
-        // A control packet carries no sequence number, so it can never earn the
-        // ACK/NAK a probe is collecting -- and steering SRT's own control
-        // traffic onto a degraded link would delay its control loop for nothing.
-        let selected = select_connection_idx(&mut connections, Some(0), now, &exploring(), false);
-        assert_eq!(
-            selected,
-            Some(0),
-            "control packets must never be diverted to a starved link"
-        );
-    }
-
-    #[test]
-    fn test_no_probe_when_exploration_disabled() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-        let now = now_ms();
-
-        connections[0].in_flight_packets = 0;
-        connections[2].in_flight_packets = 5;
-        connections[1].in_flight_packets = 1;
-        connections[1].weak = true;
-
-        let config = ConfigSnapshot {
-            mode: SchedulingMode::Enhanced,
-            quality_enabled: false,
-            exploration_enabled: false,
-            ..ConfigSnapshot::default()
-        };
-        let selected = select_connection_idx(&mut connections, Some(0), now, &config, true);
-        assert_eq!(
-            selected,
-            Some(0),
-            "probing must stay off unless exploration is enabled"
         );
     }
 }

@@ -31,7 +31,6 @@ pub const STALL_ACK_STALE_MS: u64 = 3000;
 pub struct ConfigSnapshot {
     pub mode: SchedulingMode,
     pub quality_enabled: bool,
-    pub exploration_enabled: bool,
     /// Stalled-link deselect (default ON). On, the selection layer excludes a
     /// link whose in-flight backlog is high while its last delivery proof has
     /// gone stale, provided at least one healthier link can carry the traffic.
@@ -49,7 +48,6 @@ impl Default for ConfigSnapshot {
         Self {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
             stall_deselect: true,
             stall_min_in_flight: STALL_MIN_IN_FLIGHT_PACKETS,
             stall_ack_stale_ms: STALL_ACK_STALE_MS,
@@ -64,13 +62,6 @@ impl ConfigSnapshot {
     pub fn effective_quality_enabled(&self) -> bool {
         self.quality_enabled && !self.mode.is_classic()
     }
-
-    /// Check if exploration is effective for the current mode.
-    /// Exploration only applies to enhanced mode.
-    #[inline]
-    pub fn effective_exploration_enabled(&self) -> bool {
-        self.exploration_enabled && self.mode.is_enhanced()
-    }
 }
 
 /// Dynamic configuration that can be modified at runtime.
@@ -79,7 +70,6 @@ impl ConfigSnapshot {
 pub struct DynamicConfig {
     mode: Arc<AtomicU8>,
     quality_enabled: Arc<AtomicBool>,
-    exploration_enabled: Arc<AtomicBool>,
     stall_deselect: Arc<AtomicBool>,
     stall_min_in_flight: Arc<AtomicI32>,
     stall_ack_stale_ms: Arc<AtomicU64>,
@@ -96,7 +86,6 @@ impl DynamicConfig {
         Self {
             mode: Arc::new(AtomicU8::new(SchedulingMode::Enhanced.as_u8())),
             quality_enabled: Arc::new(AtomicBool::new(true)),
-            exploration_enabled: Arc::new(AtomicBool::new(false)),
             stall_deselect: Arc::new(AtomicBool::new(true)),
             stall_min_in_flight: Arc::new(AtomicI32::new(STALL_MIN_IN_FLIGHT_PACKETS)),
             stall_ack_stale_ms: Arc::new(AtomicU64::new(STALL_ACK_STALE_MS)),
@@ -107,7 +96,6 @@ impl DynamicConfig {
     pub fn from_cli(
         mode: SchedulingMode,
         no_quality: bool,
-        exploration: bool,
         no_stall_deselect: bool,
         stall_min_in_flight: i32,
         stall_ack_stale_ms: u64,
@@ -115,7 +103,6 @@ impl DynamicConfig {
         Self {
             mode: Arc::new(AtomicU8::new(mode.as_u8())),
             quality_enabled: Arc::new(AtomicBool::new(!no_quality)),
-            exploration_enabled: Arc::new(AtomicBool::new(exploration)),
             stall_deselect: Arc::new(AtomicBool::new(!no_stall_deselect)),
             stall_min_in_flight: Arc::new(AtomicI32::new(stall_min_in_flight)),
             stall_ack_stale_ms: Arc::new(AtomicU64::new(stall_ack_stale_ms)),
@@ -130,7 +117,6 @@ impl DynamicConfig {
         ConfigSnapshot {
             mode: SchedulingMode::from_u8(self.mode.load(Ordering::Relaxed)),
             quality_enabled: self.quality_enabled.load(Ordering::Relaxed),
-            exploration_enabled: self.exploration_enabled.load(Ordering::Relaxed),
             stall_deselect: self.stall_deselect.load(Ordering::Relaxed),
             stall_min_in_flight: self.stall_min_in_flight.load(Ordering::Relaxed),
             stall_ack_stale_ms: self.stall_ack_stale_ms.load(Ordering::Relaxed),
@@ -151,11 +137,6 @@ impl DynamicConfig {
     /// Set whether quality scoring is enabled.
     pub fn set_quality_enabled(&self, enabled: bool) {
         self.quality_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    /// Set whether exploration is enabled.
-    pub fn set_exploration_enabled(&self, enabled: bool) {
-        self.exploration_enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// Toggle the stalled-link deselect guard at runtime.
@@ -195,14 +176,12 @@ mod tests {
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
-        assert!(!snap.exploration_enabled);
     }
 
     #[test]
     fn test_config_from_cli() {
         let config = DynamicConfig::from_cli(
             SchedulingMode::Classic,
-            true,
             true,
             false,
             STALL_MIN_IN_FLIGHT_PACKETS,
@@ -211,31 +190,26 @@ mod tests {
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);
         assert!(!snap.quality_enabled); // no_quality=true means disabled
-        assert!(snap.exploration_enabled);
         assert!(snap.stall_deselect); // on by default (no_stall_deselect=false)
     }
 
     #[test]
     fn test_effective_quality() {
-        // Classic mode - quality never effective, exploration never effective
+        // Classic mode - quality scoring never effective
         let snap = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: true,
-            exploration_enabled: true,
             ..ConfigSnapshot::default()
         };
         assert!(!snap.effective_quality_enabled());
-        assert!(!snap.effective_exploration_enabled());
 
-        // Enhanced mode - both can be effective
+        // Enhanced mode - effective
         let snap = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: true,
             ..ConfigSnapshot::default()
         };
         assert!(snap.effective_quality_enabled());
-        assert!(snap.effective_exploration_enabled());
     }
 
     #[test]

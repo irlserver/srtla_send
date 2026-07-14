@@ -65,7 +65,6 @@ fn create_connection_from_socket(
         },
         quality_cache: CachedQuality::default(),
         batch_sender: BatchSender::new(),
-        last_probe_ms: 0,
         phase: LinkPhase::Live,
         weak: false,
         cc_backing_off: false,

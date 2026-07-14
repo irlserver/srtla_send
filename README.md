@@ -44,14 +44,6 @@ The sender supports two mutually exclusive scheduling modes:
 - Pure capacity-based selection without quality awareness
 - Enable via `--mode classic`
 
-### Optional Smart Exploration (Enhanced Mode Only)
-
-- **Context-Aware Discovery**: Tests alternative connections when current best is degrading and alternatives have recovered
-- **Periodic Fallback**: Every 30 seconds for 300ms as a safety net
-- **Smart Switching**: Tries second-best connections instead of always sticking to current best
-- **Enable via**: `--exploration` flag or the `set_exploration` JSON-RPC method
-- **Use Case**: More aggressive connection testing in unstable network conditions
-
 ### Stalled-Link Deselect (On by Default)
 
 - **What it does**: Temporarily excludes a link that is holding a large in-flight backlog while producing no fresh delivery proof (no earned ACK and no keepalive round-trip within the staleness window), as long as a healthier link can carry the traffic.
@@ -137,7 +129,6 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 
 - `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default)
 - `--no-quality`: Disable quality scoring (enhanced only)
-- `--exploration`: Enable connection exploration (enhanced only)
 - `--no-stall-deselect`: Disable the stalled-link deselect guard (on by default). The guard skips a link whose in-flight backlog is high while its last delivery proof (an earned ACK or keepalive round-trip) has gone stale, provided a healthier link can carry the traffic. The link recovers automatically on its next keepalive round-trip, so nothing is probed blindly. This mainly helps satellite links (Starlink obstructions and handovers) that keep a large backlog while briefly delivering nothing.
 - `--stall-min-in-flight <N>`: In-flight backlog (packets) at or above which a link becomes a stall candidate (default 32)
 - `--stall-ack-stale-ms <MS>`: Delivery-proof staleness window in milliseconds after which a stall candidate is deselected (default 3000)
@@ -229,7 +220,6 @@ echo '{"jsonrpc":"2.0","id":1,"method":"set_mode","params":{"mode":"classic"}}' 
 
 - `set_mode { "mode": "classic"|"enhanced" }`
 - `set_quality { "enabled": bool }`
-- `set_exploration { "enabled": bool }`
 - `get_status` returns the full config snapshot and priority-sidecar counters
 - `get_stats` returns per-link telemetry JSON
 - `subscribe` / `unsubscribe` to a topic (`stats` or `priority.window`) for streamed updates
@@ -257,7 +247,7 @@ Exposed series include `srtla_send_link_up`, `srtla_send_link_rtt_ms`, `srtla_se
 
 **Classic Mode**: Matches the original srtla_send logic without any enhancements.
 
-**Enhanced Mode** (default): Quality-based scoring that punishes connections with recent NAKs. More recent NAKs mean more punishment. Additional 30% penalty (0.7x multiplier) for NAK bursts (≥5 NAKs in short time). Optional connection exploration for testing alternative connections.
+**Enhanced Mode** (default): Quality-based scoring that punishes connections with recent NAKs. More recent NAKs mean more punishment. Additional 30% penalty (0.7x multiplier) for NAK bursts (≥5 NAKs in short time).
 
 ## IP List Reload (Unix only)
 
@@ -341,7 +331,6 @@ With properly configured connections, you should observe:
 - Per-packet connection selection decisions
 - Quality multiplier calculations
 - NAK burst detections and recovery
-- Exploration attempts
 - Hysteresis decisions
 
 ### Troubleshooting
@@ -393,10 +382,6 @@ If needed, these can be adjusted in `src/sender/selection/`:
 - `MIN_RTT_MS`: 50ms - minimum RTT for calculation (prevents division issues)
 - `MAX_RTT_BONUS`: 1.03 (3% max bonus) - maximum RTT bonus multiplier
 
-**Exploration (`enhanced.rs`):**
-
-- Exploration period: `should_explore_now()` function, currently 30s - adjust exploration interval
-
 ### Runtime Optimization
 
 For maximum throughput:
@@ -409,5 +394,4 @@ For maximum throughput:
 For maximum stability:
 
 - Use classic mode (`--mode classic`) for predictable, simple behavior
-- Disable exploration (`explore off`) if not needed
 - Increase hysteresis threshold if experiencing unnecessary switching

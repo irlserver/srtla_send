@@ -8,7 +8,6 @@
 //! Methods:
 //! - `set_mode { mode: "classic"|"enhanced" }`
 //! - `set_quality { enabled: bool }`
-//! - `set_exploration { enabled: bool }`
 //! - `set_stall_deselect { enabled: bool }`
 //! - `get_status` → current `ConfigSnapshot`
 //! - `get_stats` → per-link telemetry
@@ -312,15 +311,6 @@ fn handle_method(
             Ok(json!({ "enabled": enabled }))
         }
 
-        "set_exploration" => {
-            let enabled = params
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .ok_or_else(|| ErrorObject::new(INVALID_PARAMS, "expected params.enabled: bool"))?;
-            config.set_exploration_enabled(enabled);
-            Ok(json!({ "enabled": enabled }))
-        }
-
         "set_stall_deselect" => {
             let enabled = params
                 .get("enabled")
@@ -338,7 +328,6 @@ fn handle_method(
             Ok(json!({
                 "mode": snap.mode.to_string(),
                 "quality_enabled": snap.quality_enabled,
-                "exploration_enabled": snap.exploration_enabled,
                 "stall_deselect": snap.stall_deselect,
                 "stall_min_in_flight": snap.stall_min_in_flight,
                 "stall_ack_stale_ms": snap.stall_ack_stale_ms,
@@ -456,6 +445,5 @@ mod tests {
         let result = &v["result"];
         assert!(result["mode"].is_string());
         assert!(result["quality_enabled"].is_boolean());
-        assert!(result["exploration_enabled"].is_boolean());
     }
 }

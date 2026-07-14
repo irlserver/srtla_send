@@ -317,8 +317,8 @@ impl WeakLinkFilter {
             // Probation re-test — breaks the share-starvation latch (R1). A
             // link gated for low share earns a crushed routing score, gets
             // ~no traffic, so its share stays low and it stays gated: a
-            // self-sustaining lock the GATED_LINK_PENALTY trickle can't escape
-            // (exploration is off by default). After PROBATION_INTERVAL_TICKS
+            // self-sustaining lock the GATED_LINK_PENALTY trickle can't escape.
+            // After PROBATION_INTERVAL_TICKS
             // continuously share-weak, force a PROBATION_WINDOW_TICKS window
             // treating the link as not-weak, so selection routes it real
             // traffic and it can re-prove its share. Emitting not-weak clears

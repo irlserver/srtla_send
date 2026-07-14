@@ -51,7 +51,7 @@ mod tests {
         make_stalled(&mut conns[0], now);
         make_healthy_busy(&mut conns[1], now);
 
-        let selected = select_connection_idx(&mut conns, None, now, &enhanced(), true);
+        let selected = select_connection_idx(&mut conns, None, now, &enhanced());
         assert_eq!(
             selected,
             Some(1),
@@ -70,7 +70,7 @@ mod tests {
         make_stalled(&mut conns[0], now);
         conns[1].in_flight_packets = 4;
 
-        let _ = select_connection_idx(&mut conns, None, now, &enhanced(), true);
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
 
         assert!(conns[0].connected, "gating must not clear `connected`");
         assert!(
@@ -95,7 +95,7 @@ mod tests {
             make_stalled(c, now);
         }
 
-        let selected = select_connection_idx(&mut conns, None, now, &enhanced(), true);
+        let selected = select_connection_idx(&mut conns, None, now, &enhanced());
         assert!(
             selected.is_some(),
             "with every link stalled, selection must still return a link"
@@ -118,7 +118,7 @@ mod tests {
             !conns[0].is_stalled(now, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS),
             "a link with no delivery proof yet must not be classed as stalled"
         );
-        let _ = select_connection_idx(&mut conns, None, now, &enhanced(), true);
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
         assert!(!conns[0].stall_gated, "sample==0 link must not be gated");
     }
 
@@ -157,7 +157,7 @@ mod tests {
             stall_deselect: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut conns, None, now, &config, true);
+        let selected = select_connection_idx(&mut conns, None, now, &config);
         assert_eq!(
             selected,
             Some(0),
@@ -181,7 +181,7 @@ mod tests {
             quality_enabled: false,
             ..ConfigSnapshot::default()
         };
-        let selected = select_connection_idx(&mut conns, None, now, &config, true);
+        let selected = select_connection_idx(&mut conns, None, now, &config);
         assert_eq!(
             selected,
             Some(1),

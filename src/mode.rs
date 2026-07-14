@@ -40,11 +40,6 @@ impl SchedulingMode {
     pub const fn is_classic(self) -> bool {
         matches!(self, SchedulingMode::Classic)
     }
-
-    /// Check if this mode is enhanced.
-    pub const fn is_enhanced(self) -> bool {
-        matches!(self, SchedulingMode::Enhanced)
-    }
 }
 
 impl fmt::Display for SchedulingMode {
@@ -120,9 +115,7 @@ mod tests {
     #[test]
     fn test_mode_checks() {
         assert!(SchedulingMode::Classic.is_classic());
-        assert!(!SchedulingMode::Classic.is_enhanced());
 
         assert!(!SchedulingMode::Enhanced.is_classic());
-        assert!(SchedulingMode::Enhanced.is_enhanced());
     }
 }

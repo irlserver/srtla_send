@@ -50,12 +50,6 @@ Toggle quality scoring (enhanced mode).
 
 Params: `{ "enabled": bool }`. Result: `{ "enabled": bool }`.
 
-### `set_exploration`
-
-Toggle scheduler exploration (enhanced mode only).
-
-Params: `{ "enabled": bool }`. Result: `{ "enabled": bool }`.
-
 ### `get_status`
 
 Return the full runtime configuration plus priority-sidecar telemetry.
@@ -66,7 +60,6 @@ Result:
 {
   "mode": "enhanced",
   "quality_enabled": true,
-  "exploration_enabled": false,
   "critical_windows_received": 142,
   "critical_malformed_datagrams": 0
 }

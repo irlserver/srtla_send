@@ -68,17 +68,12 @@ pub(crate) fn log_connection_status(
     info!("  Mode: {}", snap.mode);
     match snap.mode {
         crate::mode::SchedulingMode::Classic => {
-            info!("    (quality/exploration not applicable)");
+            info!("    (quality scoring not applicable)");
         }
         crate::mode::SchedulingMode::Enhanced => {
             info!(
-                "    Quality: {}, Exploration: {}",
-                if snap.quality_enabled { "ON" } else { "OFF" },
-                if snap.exploration_enabled {
-                    "ON"
-                } else {
-                    "OFF"
-                }
+                "    Quality: {}",
+                if snap.quality_enabled { "ON" } else { "OFF" }
             );
         }
     }

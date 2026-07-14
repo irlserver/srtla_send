@@ -16,8 +16,6 @@ pub struct TomlConfig {
     pub mode: String,
     /// Disable quality scoring.
     pub no_quality: bool,
-    /// Enable connection exploration (enhanced only).
-    pub exploration: bool,
     /// Disable the stalled-link deselect guard (on by default).
     pub no_stall_deselect: bool,
     /// In-flight backlog at or above which a link becomes a stall candidate.
@@ -53,7 +51,6 @@ impl Default for TomlConfig {
         Self {
             mode: "enhanced".to_string(),
             no_quality: false,
-            exploration: false,
             no_stall_deselect: false,
             stall_min_in_flight: crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             stall_ack_stale_ms: crate::config::STALL_ACK_STALE_MS,
@@ -122,7 +119,6 @@ mod tests {
         let toml_str = r#"
             mode = "classic"
             no_quality = true
-            exploration = true
             rtt_velocity_gate = 1.0
             warming_rtt_probes = 3
             warming_timeout_ms = 10000

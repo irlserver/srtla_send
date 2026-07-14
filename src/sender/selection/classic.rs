@@ -7,7 +7,6 @@
 //! - Pure capacity-based: score = window / (in_flight + 1)
 //! - No quality awareness (no NAK penalties)
 //! - No RTT consideration
-//! - No exploration
 //! - Simple "pick highest score" algorithm
 
 use crate::connection::SrtlaConnection;

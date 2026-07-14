@@ -43,8 +43,6 @@ pub use selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
 // `super::selection::select_connection_idx` path. The re-export is here
 // for tests that import the sender public surface with a glob.
 #[allow(unused_imports)]
-pub use selection::exploration::PROBE_INTERVAL_MS;
-#[allow(unused_imports)]
 pub use selection::select_connection_idx;
 #[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};

@@ -4,14 +4,12 @@
 //! - Quality-aware scoring based on NAK history
 //! - RTT-aware bonuses for low-latency connections
 //! - Score hysteresis to prevent flip-flopping (10%)
-//! - Optional smart exploration of alternative connections
 //!
 //! The enhanced mode provides better connection quality awareness while
 //! maintaining natural load distribution across all connections.
 
 use tracing::debug;
 
-use super::exploration::pick_probe_target;
 use super::link_cc::ASSUMED_SRT_PAYLOAD_BYTES;
 use crate::connection::SrtlaConnection;
 
@@ -42,11 +40,17 @@ const CC_SOFT_CAP_FLOOR: f64 = 0.10;
 /// The link stays in the ranking at a crushed score instead of being
 /// dropped outright. In steady state a healthy link's full score still
 /// wins decisively, so routing is unchanged; the point is that the
-/// demoted link remains eligible to be second-best (so exploration can
-/// probe it) and keeps a trickle of data flowing. Without this, an
+/// demoted link keeps a trickle of data flowing, which is what lets it
+/// earn the ACK and loss samples that clear the gate. Without this, an
 /// excluded link earns zero throughput share, which the classifier
 /// reads as `NoTraffic`/`LowShare` and keeps flagging weak — a
 /// self-sustaining starvation lock that never re-tests the link.
+///
+/// Measured: with a healthy peer available, a 70%-loss link is gated to
+/// 0.00 Mbps, silently heals, and re-adopts itself ~7s later purely on
+/// this trickle. That is why an explicit starved-link probe was tried
+/// and dropped — it moved delivery 0.76 pts (t=0.75, n=15), i.e. not at
+/// all, because this penalty already does the job.
 const GATED_LINK_PENALTY: f64 = 0.02;
 
 /// In-flight cap (packets) as a bandwidth-delay product: the link's
@@ -130,17 +134,12 @@ fn cc_soft_cap_multiplier(conn: &SrtlaConnection) -> f64 {
 /// * `last_idx` - Previously selected connection index (for hysteresis)
 /// * `current_time_ms` - Current timestamp in milliseconds
 /// * `enable_quality` - Whether to apply quality scoring
-/// * `enable_explore` - Whether to allow probing starved links
-/// * `is_data` - Whether this packet carries an SRT sequence number (only data
-///   packets can earn the ACK/NAK a probe exists to collect)
 #[inline(always)]
 pub fn select_connection(
     conns: &mut [SrtlaConnection],
     last_idx: Option<usize>,
     current_time_ms: u64,
     enable_quality: bool,
-    enable_explore: bool,
-    is_data: bool,
 ) -> Option<usize> {
     // First pass: discover whether at least one un-gated connection
     // can carry the packet. The classifier marks links weak when their
@@ -168,10 +167,7 @@ pub fn select_connection(
 
     // Score connections by base score; apply quality multiplier if enabled.
     //
-    // Only the best link is tracked. The runner-up used to matter because
-    // exploration probed *second-best*; probing now targets starved links
-    // instead (a healthy runner-up is already earning its own ACKs and needs no
-    // probe), so its rank is no longer interesting.
+    // Only the best link is tracked; nothing consumes the runner-up's rank.
     let mut best_idx: Option<usize> = None;
     let mut best_score: f64 = -1.0;
     let mut current_score: Option<f64> = None;
@@ -266,25 +262,6 @@ pub fn select_connection(
                 return Some(last);
             }
         }
-    }
-
-    // Probe a starved link with a single data packet, if one is due.
-    //
-    // Gated by `any_unconstrained`: the probe is paid for out of a healthy
-    // link's capacity, so if nothing healthy is schedulable every packet is
-    // needed for the stream and we never divert. Gated on `is_data` because a
-    // probe exists to earn an ACK or NAK, and only data packets carry a
-    // sequence number the receiver will acknowledge — diverting an SRT control
-    // packet to a degraded link would delay SRT's own control loop and teach us
-    // nothing.
-    if enable_explore
-        && is_data
-        && any_unconstrained
-        && let Some(best) = best_idx
-        && let Some(probe) = pick_probe_target(conns, best, current_time_ms)
-    {
-        conns[probe].last_probe_ms = current_time_ms;
-        return Some(probe);
     }
 
     best_idx

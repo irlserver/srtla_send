@@ -74,9 +74,6 @@ struct Cli {
     /// Disable quality scoring (enhanced only)
     #[arg(long = "no-quality")]
     no_quality: bool,
-    /// Enable connection exploration (enhanced only)
-    #[arg(long = "exploration")]
-    exploration: bool,
 
     /// Disable the stalled-link deselect guard (on by default). The guard skips
     /// a link whose in-flight backlog is high while its last delivery proof has
@@ -162,7 +159,6 @@ async fn main() -> Result<()> {
     let config = config::DynamicConfig::from_cli(
         args.mode,
         args.no_quality,
-        args.exploration,
         args.no_stall_deselect,
         args.stall_min_in_flight,
         args.stall_ack_stale_ms,
