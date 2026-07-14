@@ -220,6 +220,11 @@ pub struct SrtlaConnection {
     /// `is_timed_out`/`CONN_TIMEOUT`); a gated link keeps a trickle of
     /// traffic so the loss EWMA can recover and clear the latch.
     pub(crate) loss_degraded: bool,
+    /// When this link last received an exploration probe packet
+    /// (`sender::selection::exploration`). `0` means never probed.
+    /// Rate-limits probing so a persistently starved link cannot bleed
+    /// throughput one diverted packet at a time.
+    pub(crate) last_probe_ms: u64,
     /// Strategy for steering this uplink's socket onto its egress path.
     /// Retained so reconnects re-apply the same binding (source IP on Linux,
     /// host `Network.bindSocket` callback on Android).
@@ -272,6 +277,7 @@ impl SrtlaConnection {
             cc_backing_off: false,
             cc_target_bps: 0,
             loss_degraded: false,
+            last_probe_ms: 0,
             binder,
         })
     }
@@ -616,6 +622,7 @@ impl SrtlaConnection {
         // not classed as stalled the instant it reconnects with a backlog.
         self.last_ack_or_rtt_sample_ms = 0;
         self.stall_gated = false;
+        self.last_probe_ms = 0;
     }
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1.
