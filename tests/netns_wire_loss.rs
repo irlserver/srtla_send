@@ -34,15 +34,20 @@ use network_sim::{ImpairmentConfig, SRT_CALLER_INGEST_PORT, SRT_PAYLOAD_BYTES, S
 ///   of. So the offered rate exceeds what either link carries alone,
 ///   forcing the scheduler to spread across both.
 ///
-/// 6 Mbps links, ~9 Mbps offered: each link ends up around 4.5 Mbps —
-/// comfortably below its own ceiling (loss stays wire loss) yet more
-/// than one link can supply (both stay busy).
+/// 6 Mbps links. With two equal links there is an unavoidable squeeze:
+/// "use both" needs the offered rate above one link (>6 Mbps), i.e. above
+/// half the 12 Mbps total, so the bond always runs hot. Push too far past
+/// that and SRT's retransmits amplify the loss into congestion collapse.
+/// So keep the offered rate only a little over one link.
 const LOSSY_LINK_KBIT: u64 = 6_000;
 const CLEAN_LINK_KBIT: u64 = 6_000;
 
-/// ~9 Mbps offered as 1316-byte datagrams. Above either link's 6 Mbps,
-/// so the bond has to use both.
-const PACKETS_PER_SEC: u32 = 850;
+/// ~7 Mbps offered as 1316-byte datagrams: over one link's 6 Mbps so the
+/// bond must use both, but only ~58% of the 12 Mbps total, which leaves
+/// enough headroom to stay out of collapse. (The other half of avoiding
+/// collapse is the SRT caller's 2s latency exceeding the shaper buffer —
+/// see `start_srt_caller`.)
+const PACKETS_PER_SEC: u32 = 665;
 const RUN_SECS: u64 = 45;
 
 /// Bits actually offered per second, for reference in assertions.

@@ -691,7 +691,15 @@ impl SrtlaTestStack {
     /// [`inject_udp_stream`] on [`SRT_CALLER_INGEST_PORT`].
     pub fn start_srt_caller(&mut self) -> Result<()> {
         let in_uri = format!("udp://:{SRT_CALLER_INGEST_PORT}");
-        let out_uri = format!("srt://127.0.0.1:{SRTLA_SEND_SRT_PORT}?mode=caller&latency=200");
+        // Latency must sit *above* the TBF buffer depth (`latency 1s` in
+        // impairment.rs). SRT declares a packet lost and retransmits it
+        // once it is older than this window. If that window is shorter
+        // than the shaper's queue, a packet that is merely waiting its
+        // turn in the TBF gets retransmitted while the original is still
+        // in flight — a false-loss storm that doubles offered load and
+        // tips a busy bond into congestion collapse. 2s clears the 1s
+        // buffer with margin.
+        let out_uri = format!("srt://127.0.0.1:{SRTLA_SEND_SRT_PORT}?mode=caller&latency=2000");
         let mut caller = NamespaceProcess::spawn(
             &self.topo.sender_ns,
             "srt-live-transmit",
