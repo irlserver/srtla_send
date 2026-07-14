@@ -11,17 +11,53 @@
 //!
 //! Three states cover the practical regimes for a SRTLA soft cap:
 //!
-//! - **Climbing**: RTT stable, no loss observed in the recent window.
-//!   Additively grow `target_bps`. Step is bounded by current cap and
-//!   the link's measured throughput so it doesn't run away on idle
-//!   links.
+//! - **Climbing**: RTT stable, and no loss that we caused. Additively
+//!   grow `target_bps`. Step is bounded by current cap and the link's
+//!   measured throughput so it doesn't run away on idle links.
 //! - **Holding**: RTT inflating but no loss yet (delay-based signal of
 //!   approaching congestion). Hold target, don't grow.
-//! - **BackingOff**: Loss observed (NAK rate up). Multiplicative
-//!   decrease.
+//! - **BackingOff**: Loss observed (NAK rate up) *while we were driving
+//!   the link hard enough to have caused it*. Multiplicative decrease,
+//!   floored at measured throughput.
 //!
 //! Three states cover the steady-state, the bufferbloat-onset state,
 //! and the loss state — which is what matters for a soft cap.
+//!
+//! ## Only back off for loss you caused
+//!
+//! Loss is not by itself evidence of congestion. A cellular link at the
+//! cell edge sits at a percent or two of wire loss indefinitely, no
+//! matter how little we send down it. A soft cap cannot repair that
+//! loss, so reacting to it is pure downside: the decrease compounds for
+//! as long as the loss lasts, and loss that outlives the backoff drives
+//! the cap to the floor, where the BDP in-flight cap deselects a link
+//! that was carrying real traffic.
+//!
+//! Two guards keep the decrease honest, and they cover different halves
+//! of the problem:
+//!
+//! - `BACKOFF_MIN_LOAD_PERMILLE` gates *entry*: a link we are barely
+//!   feeding cannot be the cause of its own loss, so it never backs off.
+//!   This covers the starved link.
+//! - `BACKOFF_EFFICACY_TICKS` bounds the *descent* on a link we really
+//!   are driving hard, by asking whether cutting is working. Congestive
+//!   loss responds to a lower offered rate; wire loss does not. If a
+//!   ~39% cut has not moved the loss, we stop attributing it to
+//!   ourselves (`loss_uncongestive`) and let the link climb again.
+//!
+//! Neither is sufficient alone. The load gate does not converge by
+//! itself — each cut lowers the target, which *raises* load, holding the
+//! gate open all the way to the floor. And the efficacy test cannot
+//! protect a starved link, because a link carrying nothing has no
+//! throughput signal to judge a cut against.
+//!
+//! Note the asymmetry with `Drain`: the loss decrease is allowed to
+//! compound, where the RTT decrease is one-shot. That is deliberate.
+//! `rtt_min_ms` is windowed (`CC_RTT_MIN_WINDOW_MS`), so once congestion
+//! outlives the window the baseline re-anchors to the congested RTT and
+//! inflation reads ~1.0 — RTT fades as a signal exactly when congestion
+//! is most persistent. Loss is the only backstop left, so it has to be
+//! able to walk the cap all the way down to real capacity.
 //!
 //! ## Age-bucketed RTT EWMA
 //!
@@ -47,6 +83,35 @@ const LOSS_BACKOFF_PERMILLE: u32 = 5;
 
 /// Multiplicative-decrease factor (permille). 0.85 = -15%.
 const BACKOFF_PERMILLE: u32 = 850;
+
+/// Delivered throughput, as a permille of `target_bps`, above which
+/// observed loss is attributed to our own offered rate.
+///
+/// Loss below this line is loss we did not cause: we are not pushing
+/// enough traffic for it to be filling the bottleneck, so what we are
+/// seeing is wire loss (cell-edge SINR, HARQ residual, a lossy backhaul)
+/// that a lower soft cap cannot repair. Backing off only sheds bonding
+/// capacity we could otherwise use, and because the loss never clears,
+/// the decrease compounds every tick until the link is pinned at
+/// `MIN_TARGET_BPS` and the BDP in-flight cap deselects it — a link that
+/// was carrying megabits gets thrown away over a percent of wire loss.
+///
+/// The 30% line sits deliberately below the ~50% load a healthy link
+/// settles at (`Climbing` bounds the target at 2x measured throughput,
+/// so a fully-climbed active link reads ~0.5), and well above the near-
+/// zero load of a link the scheduler has stopped feeding. Links the
+/// scheduler is genuinely driving still back off; starved ones stop
+/// being punished for loss that isn't theirs.
+const BACKOFF_MIN_LOAD_PERMILLE: u32 = 300;
+
+/// Consecutive `BackingOff` ticks after which the decrease has to show
+/// results. Three ticks is a ~39% cut (0.85^3), which is far more than
+/// enough for a bottleneck we are actually overdriving to drain.
+const BACKOFF_EFFICACY_TICKS: u32 = 3;
+
+/// The loss permille must fall to at most this fraction of its level at
+/// the start of the episode for the backoff to count as working.
+const BACKOFF_EFFICACY_IMPROVEMENT_PERMILLE: u32 = 800;
 
 /// Climbing additive-increase step as a permille of the current target.
 /// 0.02 = +2% per tick — the conservative baseline for steady state.
@@ -154,7 +219,11 @@ pub enum CcState {
     Climbing,
     /// RTT inflating, no loss yet. Hold target.
     Holding,
-    /// Loss observed. Multiplicative decrease.
+    /// Loss observed while the link was loaded past
+    /// `BACKOFF_MIN_LOAD_PERMILLE` — i.e. loss our own offered rate
+    /// plausibly caused. Multiplicative decrease, floored at measured
+    /// throughput. Loss on an under-driven link is wire loss and lands
+    /// in `Climbing` instead.
     BackingOff,
     /// One-shot drain when RTT inflation crosses
     /// `DRAIN_RTT_INFLATION` without explicit loss — bandwidth-delay
@@ -261,6 +330,17 @@ pub struct LinkCongestionState {
     /// Latched hysteretic verdict: true once loss has been sustained
     /// high, false again once it recovers below `LOSS_DEGRADE_CLEAR`.
     loss_degraded: bool,
+    /// Consecutive ticks spent in `BackingOff` since the efficacy test
+    /// last re-armed.
+    backoff_ticks: u32,
+    /// Loss permille at the point the current efficacy window opened.
+    /// The decrease is judged against this.
+    backoff_entry_loss_pm: u32,
+    /// Latched verdict: we cut hard and the loss did not respond, so it
+    /// is not loss our offered rate is causing. Suppresses further
+    /// loss-driven backoff until the loss regime ends, or until RTT
+    /// inflation offers fresh, independent evidence of congestion.
+    loss_uncongestive: bool,
 }
 
 impl Default for LinkCongestionState {
@@ -285,6 +365,9 @@ impl Default for LinkCongestionState {
             loss_ewma_last_ms: 0,
             loss_high_since_ms: 0,
             loss_degraded: false,
+            backoff_ticks: 0,
+            backoff_entry_loss_pm: 0,
+            loss_uncongestive: false,
         }
     }
 }
@@ -415,6 +498,60 @@ impl LinkCongestionState {
         permille.min(1_000_000) as u32
     }
 
+    /// Decide whether the loss-driven backoff is achieving anything,
+    /// and latch `loss_uncongestive` when it demonstrably is not.
+    ///
+    /// Called once per tick, before the state transition, so `self.state`
+    /// here is still the *previous* tick's state — i.e. "was I cutting?".
+    fn update_backoff_efficacy(&mut self, loss_high: bool, loss_pm: u32, rtt_inflation: f64) {
+        if !loss_high {
+            // The loss regime is over. Everything we concluded about it
+            // is stale, so the next episode re-tests from scratch.
+            self.backoff_ticks = 0;
+            self.backoff_entry_loss_pm = 0;
+            self.loss_uncongestive = false;
+            return;
+        }
+
+        // RTT inflation is evidence of congestion that does not come
+        // from the loss signal itself, so it is allowed to overturn an
+        // earlier "not my fault" verdict. Without this, a link that
+        // starts genuinely congesting while the latch is held would
+        // never back off for loss again.
+        if self.loss_uncongestive && rtt_inflation > RTT_HOLD_FACTOR {
+            self.loss_uncongestive = false;
+            self.backoff_ticks = 0;
+            self.backoff_entry_loss_pm = loss_pm;
+            return;
+        }
+
+        if self.state != CcState::BackingOff {
+            // First tick of a loss regime (or we are being held out of
+            // it): open the efficacy window against the current loss.
+            self.backoff_ticks = 0;
+            self.backoff_entry_loss_pm = loss_pm;
+            return;
+        }
+
+        // We cut last tick. Give the decrease `BACKOFF_EFFICACY_TICKS`
+        // to move the loss, then judge it.
+        self.backoff_ticks += 1;
+        if self.backoff_ticks < BACKOFF_EFFICACY_TICKS {
+            return;
+        }
+        let improved = (loss_pm as u64) * 1_000
+            < (self.backoff_entry_loss_pm as u64) * BACKOFF_EFFICACY_IMPROVEMENT_PERMILLE as u64;
+        if improved {
+            // Backing off is relieving the loss, so we are the cause.
+            // Re-arm and let the decrease keep walking the cap down.
+            self.backoff_ticks = 0;
+            self.backoff_entry_loss_pm = loss_pm;
+        } else {
+            // We cut ~39% and the loss did not care. It is not ours.
+            self.loss_uncongestive = true;
+        }
+    }
+
     /// Recompute the state and `target_bps` from the latest signals.
     /// Called once per housekeeping tick.
     pub fn tick(&mut self, observed_bps: u64, now_ms: u64) {
@@ -436,8 +573,43 @@ impl LinkCongestionState {
             1.0
         };
 
+        // Outlier rejection: clamp a single throughput sample to
+        // `CC_OUTLIER_FACTOR` times the running estimate (floored at the
+        // initial estimate so the first seed isn't pinned to the very
+        // low target_bps floor). This bounds how far one contaminated
+        // burst can move the soft cap, whether at the seed or via the
+        // climb's measured cap.
+        let baseline = self.target_bps.max(INITIAL_TARGET_BPS) as f64;
+        let sane_observed = (observed_bps as f64).min(CC_OUTLIER_FACTOR * baseline) as u64;
+
+        // First non-bootstrap tick: seed the target from observed throughput
+        // (or a conservative floor if no traffic yet).
+        if self.target_bps == MIN_TARGET_BPS {
+            let seed = sane_observed.max(INITIAL_TARGET_BPS);
+            self.target_bps = seed.clamp(MIN_TARGET_BPS, MAX_TARGET_BPS);
+        }
+
+        // Is this loss ours? Two independent things have to hold.
+        //
+        // First, we must be driving the link hard enough to be filling
+        // the bottleneck at all — see `BACKOFF_MIN_LOAD_PERMILLE`. A
+        // starved link's NAKs are wire loss, and cutting its cap in
+        // response is how a usable link gets ratcheted into oblivion.
+        let loaded = (sane_observed as u128) * 1_000
+            >= (self.target_bps as u128) * (BACKOFF_MIN_LOAD_PERMILLE as u128);
+
+        // Second, backing off has to actually be *working*. This is the
+        // only test that separates the two kinds of loss on a link we
+        // *are* driving hard, and it is a causal one: congestive loss
+        // responds to a lower offered rate, wire loss does not. Without
+        // it the load gate alone never converges — each cut lowers the
+        // target, which *raises* load, which holds the gate open all the
+        // way down to `MIN_TARGET_BPS`.
+        let loss_high = loss_pm > LOSS_BACKOFF_PERMILLE;
+        self.update_backoff_efficacy(loss_high, loss_pm, rtt_inflation);
+
         let prev_state = self.state;
-        let next_state = if loss_pm > LOSS_BACKOFF_PERMILLE {
+        let next_state = if loss_high && loaded && !self.loss_uncongestive {
             CcState::BackingOff
         } else if rtt_inflation >= DRAIN_RTT_INFLATION {
             // BDQ overload before loss surfaces — drain hard.
@@ -445,6 +617,12 @@ impl LinkCongestionState {
         } else if rtt_inflation > RTT_HOLD_FACTOR {
             CcState::Holding
         } else {
+            // Falling through here with loss above the threshold is
+            // deliberate: an under-driven link that is losing packets is
+            // losing them to the wire, and its capacity is still real.
+            // Let it climb — the 2x-measured clamp below keeps that
+            // honest, and the sustained `loss_degraded` latch is what
+            // penalises it in routing.
             CcState::Climbing
         };
 
@@ -461,22 +639,6 @@ impl LinkCongestionState {
         }
 
         self.state = next_state;
-
-        // Outlier rejection: clamp a single throughput sample to
-        // `CC_OUTLIER_FACTOR` times the running estimate (floored at the
-        // initial estimate so the first seed isn't pinned to the very
-        // low target_bps floor). This bounds how far one contaminated
-        // burst can move the soft cap, whether at the seed or via the
-        // climb's measured cap.
-        let baseline = self.target_bps.max(INITIAL_TARGET_BPS) as f64;
-        let sane_observed = (observed_bps as f64).min(CC_OUTLIER_FACTOR * baseline) as u64;
-
-        // First non-bootstrap tick: seed the target from observed throughput
-        // (or a conservative floor if no traffic yet).
-        if self.target_bps == MIN_TARGET_BPS {
-            let seed = sane_observed.max(INITIAL_TARGET_BPS);
-            self.target_bps = seed.clamp(MIN_TARGET_BPS, MAX_TARGET_BPS);
-        }
 
         let prev = self.target_bps as f64;
         let next = match next_state {
@@ -517,6 +679,13 @@ impl LinkCongestionState {
             }
             CcState::BackingOff => {
                 self.climb_mode = ClimbMode::Normal;
+                // Unlike `Drain` this decrease is allowed to compound:
+                // sustained congestion has to be able to walk the cap
+                // down to the real capacity, and the windowed rtt_min
+                // means RTT inflation fades as a signal once congestion
+                // outlives the window, so loss is the only backstop
+                // left. What bounds the descent is the efficacy test
+                // above, not a one-shot contract.
                 (prev * BACKOFF_PERMILLE as f64) / 1000.0
             }
             CcState::Drain => {
@@ -722,6 +891,162 @@ mod tests {
             cc.tick(2_000_000, i * 600);
         }
         assert_eq!(cc.state, CcState::Holding);
+    }
+
+    /// Drive one 1Hz tick: report `loss_pm` permille of loss and
+    /// `delivered_bps` of throughput, at a flat RTT.
+    fn drive_tick(cc: &mut LinkCongestionState, t_ms: u64, delivered_bps: u64, loss_pm: u32) {
+        cc.record_rtt(50.0, t_ms);
+        if loss_pm > 0 {
+            cc.record_loss(1_000, loss_pm, t_ms);
+        } else {
+            cc.record_loss(1_000, 0, t_ms);
+        }
+        cc.tick(delivered_bps, t_ms);
+    }
+
+    /// The reported starvation latch. A link the scheduler has stopped
+    /// feeding still sees NAKs — that is wire loss, not congestion we
+    /// caused. Before the load gate, `BackingOff` compounded -15% every
+    /// tick for as long as the loss lasted and pinned a multi-megabit
+    /// link at `MIN_TARGET_BPS`, where the BDP in-flight cap deselects
+    /// it outright.
+    #[test]
+    fn starved_link_with_wire_loss_does_not_ratchet_to_the_floor() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(3_000_000, 0);
+        let seeded = cc.target_bps;
+        assert!(seeded >= 3_000_000);
+
+        // The scheduler moves traffic elsewhere: we now deliver a
+        // trickle. The link keeps shedding 5% to the wire regardless.
+        for i in 1..=30 {
+            drive_tick(&mut cc, i * 1_000, 50_000, 50);
+        }
+
+        assert_ne!(cc.state, CcState::BackingOff);
+        assert!(
+            cc.target_bps >= seeded,
+            "starved link was ratcheted from {seeded} to {} by loss it did not cause",
+            cc.target_bps
+        );
+    }
+
+    /// The other half: a link we *are* driving hard, whose loss is still
+    /// not ours. The load gate cannot catch this one (load stays high
+    /// precisely because each cut lowers the target), so the efficacy
+    /// test has to. We cut ~39%, the loss ignores it, and we stop.
+    #[test]
+    fn loaded_link_stops_cutting_when_the_backoff_does_not_move_the_loss() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(2_000_000, 0);
+
+        // Wire loss: a flat 10%, wholly indifferent to our offered rate.
+        // Delivery tracks whatever cap we set, so the link stays loaded.
+        for i in 1..=25 {
+            let delivered = cc.target_bps.min(2_000_000);
+            drive_tick(&mut cc, i * 1_000, delivered, 100);
+        }
+
+        assert!(
+            cc.loss_uncongestive,
+            "should have given up attributing the loss to itself"
+        );
+        assert_ne!(cc.state, CcState::BackingOff);
+        // 0.85^25 would have taken this to MIN_TARGET_BPS. The descent
+        // is bounded to roughly the efficacy window instead.
+        assert!(
+            cc.target_bps > 1_000_000,
+            "target collapsed to {} despite the link delivering 2 Mbps",
+            cc.target_bps
+        );
+    }
+
+    /// Guard against the obvious way to get the above wrong: genuinely
+    /// congestive loss must still walk the cap down to real capacity.
+    /// Here the loss *is* ours — it grades down as we cut — so the
+    /// efficacy test keeps re-arming and the decrease keeps compounding.
+    #[test]
+    fn congestive_loss_still_converges_on_capacity() {
+        const CAPACITY_BPS: u64 = 1_500_000;
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(3_000_000, 0);
+        assert!(cc.target_bps > CAPACITY_BPS);
+
+        // A real bottleneck: we offer at the cap, anything past capacity
+        // is dropped, so the loss ratio falls as the cap comes down.
+        for i in 1..=25 {
+            let offered = cc.target_bps;
+            let delivered = offered.min(CAPACITY_BPS);
+            let loss_pm = ((offered - delivered) * 1_000 / offered.max(1)) as u32;
+            drive_tick(&mut cc, i * 1_000, delivered, loss_pm);
+        }
+
+        assert!(
+            !cc.loss_uncongestive,
+            "congestive loss was misread as wire loss — the backoff was working"
+        );
+        // Converged to the bottleneck rather than overshooting to the floor.
+        assert!(
+            cc.target_bps > CAPACITY_BPS / 2 && cc.target_bps < CAPACITY_BPS * 2,
+            "target {} did not settle near capacity {CAPACITY_BPS}",
+            cc.target_bps
+        );
+    }
+
+    /// The `loss_uncongestive` latch must not be permanent: RTT
+    /// inflation is evidence that does not come from the loss signal
+    /// itself, so it re-opens the backoff path.
+    #[test]
+    fn rtt_inflation_overturns_the_uncongestive_verdict() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(2_000_000, 0);
+
+        for i in 1..=10 {
+            let delivered = cc.target_bps.min(2_000_000);
+            drive_tick(&mut cc, i * 1_000, delivered, 100);
+        }
+        assert!(cc.loss_uncongestive);
+
+        // The path starts queueing: 50 → 90ms is past RTT_HOLD_FACTOR.
+        for i in 11..=20 {
+            cc.record_rtt(90.0, i * 1_000);
+            cc.record_loss(1_000, 100, i * 1_000);
+            cc.tick(cc.target_bps.min(2_000_000), i * 1_000);
+        }
+        assert!(
+            !cc.loss_uncongestive,
+            "queue growth should re-open the backoff path"
+        );
+        assert_eq!(cc.state, CcState::BackingOff);
+    }
+
+    /// A clean window ends the episode, so the next one re-tests from
+    /// scratch instead of inheriting a stale verdict.
+    #[test]
+    fn clean_loss_window_rearms_the_efficacy_test() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(2_000_000, 0);
+
+        for i in 1..=10 {
+            let delivered = cc.target_bps.min(2_000_000);
+            drive_tick(&mut cc, i * 1_000, delivered, 100);
+        }
+        assert!(cc.loss_uncongestive);
+
+        for i in 11..=14 {
+            drive_tick(&mut cc, i * 1_000, 2_000_000, 0);
+        }
+        assert!(
+            !cc.loss_uncongestive,
+            "a clean window should clear the verdict"
+        );
+        assert_eq!(cc.state, CcState::Climbing);
     }
 
     #[test]
