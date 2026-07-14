@@ -84,6 +84,7 @@ pub fn inject_stream(
         "127.0.0.1",
         stack.sender_srt_port(),
         packets_per_sec,
+        network_sim::TS_PACKET_BYTES,
         duration,
     )
 }

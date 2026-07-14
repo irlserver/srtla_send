@@ -398,8 +398,12 @@ pub struct SrtlaTestStack {
     srt_server: Option<NamespaceProcess>,
     srtla_rec: Option<NamespaceProcess>,
     srtla_send: Option<NamespaceProcess>,
+    srt_caller: Option<NamespaceProcess>,
     _ip_list_path: PathBuf,
 }
+
+/// UDP port the SRT caller ingests from, when one is started.
+pub const SRT_CALLER_INGEST_PORT: u16 = 6000;
 
 /// Output collected from all processes after stopping the stack.
 pub struct StackOutput {
@@ -409,6 +413,8 @@ pub struct StackOutput {
     pub srtla_rec_stderr: Vec<String>,
     pub srtla_send_stdout: Vec<String>,
     pub srtla_send_stderr: Vec<String>,
+    pub srt_caller_stdout: Vec<String>,
+    pub srt_caller_stderr: Vec<String>,
 }
 
 /// Ports used by the test stack.
@@ -499,8 +505,81 @@ impl SrtlaTestStack {
             srt_server: Some(srt_server),
             srtla_rec: Some(srtla_rec),
             srtla_send: Some(srtla_send),
+            srt_caller: None,
             _ip_list_path: ip_list_path,
         })
+    }
+
+    /// Start a real SRT caller in the sender namespace, in front of
+    /// srtla_send.
+    ///
+    /// Without this the stack carries no SRT session: injecting raw UDP
+    /// into srtla_send's listener gets it proxied over the bond, but the
+    /// far end never completes a handshake, so it never returns ACKs or
+    /// NAKs. Any test that depends on loss or RTT feedback reaching the
+    /// sender — i.e. anything touching congestion control or link
+    /// scoring — is silently vacuous without a caller here.
+    ///
+    /// With it, the chain is a genuine end-to-end SRT connection:
+    ///
+    /// ```text
+    /// UDP :6000 → srt-live-transmit (caller) → srtla_send :5555
+    ///     → [bonded uplinks] → srtla_rec → srt-live-transmit (listener)
+    /// ```
+    ///
+    /// so the listener's ACK/NAK stream flows back through the bond and
+    /// drives the real feedback path. Feed it with
+    /// [`inject_udp_stream`] on [`SRT_CALLER_INGEST_PORT`].
+    pub fn start_srt_caller(&mut self) -> Result<()> {
+        let in_uri = format!("udp://:{SRT_CALLER_INGEST_PORT}");
+        let out_uri = format!("srt://127.0.0.1:{SRTLA_SEND_SRT_PORT}?mode=caller&latency=200");
+        let mut caller = NamespaceProcess::spawn(
+            &self.topo.sender_ns,
+            "srt-live-transmit",
+            &[&in_uri, &out_uri],
+        )
+        .context("start srt-live-transmit caller")?;
+
+        std::thread::sleep(Duration::from_millis(750));
+        if let Some((code, stderr)) = caller.check_exit() {
+            bail!("srt caller exited immediately (code: {code:?})\nstderr:\n{stderr}");
+        }
+        wait_for_udp_listener(
+            &self.topo.sender_ns,
+            SRT_CALLER_INGEST_PORT,
+            Duration::from_secs(5),
+        )
+        .context("wait for srt caller udp ingest")?;
+
+        self.srt_caller = Some(caller);
+        Ok(())
+    }
+
+    /// Query srtla_send's control socket for a `get_stats` snapshot,
+    /// returning the parsed `result` object.
+    ///
+    /// Runs the query as root inside the namespace: srtla_send is spawned
+    /// under sudo, so the socket it binds is root-owned and a test process
+    /// running as the invoking user cannot connect to it directly.
+    pub fn get_stats(&self, socket_path: &str) -> Result<serde_json::Value> {
+        let script = format!(
+            "import socket,sys\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\ns.\
+             settimeout(5)\ns.connect('{socket_path}')\ns.sendall(b'{{\"jsonrpc\":\"2.0\",\"id\":\
+             1,\"method\":\"get_stats\",\"params\":{{}}}}\\n')\nbuf=b''\nwhile not \
+             buf.endswith(b'\\n'):\n\x20 c=s.recv(65536)\n\x20 if not c: break\n\x20 \
+             buf+=c\ns.close()\nsys.stdout.write(buf.decode())"
+        );
+        let out = self
+            .topo
+            .sender_ns
+            .exec_checked("python3", &["-c", &script])
+            .context("query control socket")?;
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let resp: serde_json::Value = serde_json::from_str(raw.trim())
+            .with_context(|| format!("parse stats reply: {raw}"))?;
+        resp.get("result")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no result in stats reply: {resp}"))
     }
 
     /// Apply impairment to sender-side link at `idx`.
@@ -523,8 +602,13 @@ impl SrtlaTestStack {
         let mut send_out = (vec![], vec![]);
         let mut rec_out = (vec![], vec![]);
         let mut srt_out = (vec![], vec![]);
+        let mut caller_out = (vec![], vec![]);
 
-        // Kill in reverse order: sender → receiver → srt server
+        // Kill in reverse order: caller → sender → receiver → srt server
+        if let Some(mut p) = self.srt_caller.take() {
+            p.kill();
+            caller_out = (p.stdout_lines(), p.stderr_lines());
+        }
         if let Some(mut p) = self.srtla_send.take() {
             p.kill();
             send_out = (p.stdout_lines(), p.stderr_lines());
@@ -545,6 +629,8 @@ impl SrtlaTestStack {
             srtla_rec_stderr: rec_out.1,
             srtla_send_stdout: send_out.0,
             srtla_send_stderr: send_out.1,
+            srt_caller_stdout: caller_out.0,
+            srt_caller_stderr: caller_out.1,
         }
     }
 }
@@ -553,6 +639,7 @@ impl Drop for SrtlaTestStack {
     fn drop(&mut self) {
         // Ensure all processes are killed even if stop() wasn't called.
         // Dropping NamespaceProcess triggers its Drop impl which calls kill().
+        drop(self.srt_caller.take());
         drop(self.srtla_send.take());
         drop(self.srtla_rec.take());
         drop(self.srt_server.take());
@@ -578,29 +665,75 @@ pub fn inject_udp_packets(ns: &Namespace, target_ip: &str, port: u16, count: usi
     Ok(())
 }
 
+/// Default datagram size: one MPEG-TS packet.
+pub const TS_PACKET_BYTES: usize = 188;
+/// libsrt's default payload size. Prefer this when a test needs real
+/// throughput: a Python pump cannot reliably sleep in the sub-millisecond
+/// intervals that megabit rates demand at 188 bytes a datagram, so it
+/// silently becomes the bottleneck instead of the network.
+pub const SRT_PAYLOAD_BYTES: usize = 1316;
+
+/// Build the steady-rate UDP sender script shared by the blocking and
+/// spawned stream injectors.
+///
+/// The loop paces against a wall-clock deadline per packet rather than
+/// sleeping a fixed interval, so send-call overhead does not accumulate
+/// into a drifting, ever-slower rate.
+fn udp_stream_script(
+    target_ip: &str,
+    port: u16,
+    packets_per_sec: u32,
+    payload_bytes: usize,
+    duration: Duration,
+) -> Result<String> {
+    if packets_per_sec == 0 {
+        bail!("packets_per_sec must be > 0");
+    }
+    if payload_bytes == 0 {
+        bail!("payload_bytes must be > 0");
+    }
+    let interval = 1.0 / f64::from(packets_per_sec);
+    let dur_secs = duration.as_secs_f64();
+
+    Ok(format!(
+        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\nd=b'\\xb8'*\
+         {payload_bytes}\nstart=time.time(); i=0\nwhile True:\n\x20   now=time.time()\n\x20   if \
+         now-start>={dur_secs}: break\n\x20   s.sendto(d,('{target_ip}',{port}))\n\x20   \
+         i+=1\n\x20   nxt=start+i*{interval}\n\x20   slp=nxt-time.time()\n\x20   if slp>0: \
+         time.sleep(slp)\ns.close()\nprint(f'sent {{i}} packets')"
+    ))
+}
+
 /// Inject UDP packets at a steady rate (packets/sec) for `duration`.
+/// Blocks until the stream finishes.
 pub fn inject_udp_stream(
     ns: &Namespace,
     target_ip: &str,
     port: u16,
     packets_per_sec: u32,
+    payload_bytes: usize,
     duration: Duration,
 ) -> Result<()> {
-    if packets_per_sec == 0 {
-        bail!("packets_per_sec must be > 0");
-    }
-    let interval_us = 1_000_000 / packets_per_sec;
-    let dur_secs = duration.as_secs_f64();
-
-    let script = format!(
-        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\nd=b'\\x00'*188\\
-         nstart=time.time(); i=0\nwhile time.time()-start<{dur_secs}:\n\x20 \
-         s.sendto(d,('{target_ip}',{port}))\n\x20 i+=1\n\x20 \
-         time.sleep({interval_us}/1e6)\ns.close()\nprint(f'sent {{i}} packets')"
-    );
+    let script = udp_stream_script(target_ip, port, packets_per_sec, payload_bytes, duration)?;
     ns.exec_checked("python3", &["-c", &script])
         .context("inject UDP stream")?;
     Ok(())
+}
+
+/// Like [`inject_udp_stream`], but returns immediately with the running
+/// process so the caller can observe the system *while* traffic flows.
+/// Anything that samples a control loop's behaviour under load needs
+/// this rather than the blocking form.
+pub fn spawn_udp_stream(
+    ns: &Namespace,
+    target_ip: &str,
+    port: u16,
+    packets_per_sec: u32,
+    payload_bytes: usize,
+    duration: Duration,
+) -> Result<NamespaceProcess> {
+    let script = udp_stream_script(target_ip, port, packets_per_sec, payload_bytes, duration)?;
+    NamespaceProcess::spawn(ns, "python3", &["-c", &script]).context("spawn UDP stream")
 }
 
 // ---------------------------------------------------------------------------
