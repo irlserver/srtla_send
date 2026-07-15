@@ -6,7 +6,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, trace, warn};
 
-use super::selection::select_connection_idx;
+use crate::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, UplinkPacket};
 use crate::config::ConfigSnapshot;

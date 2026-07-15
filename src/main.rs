@@ -21,6 +21,7 @@ mod priority_listener;
 // so `crate::protocol::*` keeps resolving in the binary's module tree.
 use srtla_protocol as protocol;
 mod registration;
+mod selection;
 mod sender;
 mod stats;
 mod subscriptions;

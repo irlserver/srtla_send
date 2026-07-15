@@ -2,10 +2,6 @@ mod connections;
 mod housekeeping;
 mod packet_handler;
 mod reload;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod selection;
-#[cfg(not(any(test, feature = "test-internals")))]
-mod selection;
 mod sequence;
 mod status;
 mod uplink;
@@ -33,18 +29,19 @@ pub(crate) use packet_handler::attribute_nak;
 use packet_handler::{
     drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
 };
+// Selection now lives in the top-level `crate::selection` (it is core logic,
+// mutually dependent with `connection`, not shell). These re-exports preserve
+// the `crate::sender::*` surface that tests and shell telemetry still import.
 #[allow(unused_imports)]
-pub use selection::calculate_quality_multiplier;
-pub use selection::classifier::{ClassificationResult, WeakReason};
+pub use crate::selection::calculate_quality_multiplier;
 #[allow(unused_imports)]
-pub use selection::enhanced::{in_flight_cap_exceeded, in_flight_cap_packets};
+pub use crate::selection::classifier::{ClassificationResult, WeakReason};
 #[allow(unused_imports)]
-pub use selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
-// `select_connection_idx` is consumed by `packet_handler` via its own
-// `super::selection::select_connection_idx` path. The re-export is here
-// for tests that import the sender public surface with a glob.
+pub use crate::selection::enhanced::{in_flight_cap_exceeded, in_flight_cap_packets};
 #[allow(unused_imports)]
-pub use selection::select_connection_idx;
+pub use crate::selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
+#[allow(unused_imports)]
+pub use crate::selection::select_connection_idx;
 #[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
@@ -173,10 +170,10 @@ pub async fn run_sender_with_config(
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
     // Enhanced selection as an admission gate.
-    let mut weak_link_filter = selection::classifier::WeakLinkFilter::new();
+    let mut weak_link_filter = crate::selection::classifier::WeakLinkFilter::new();
     // Per-link CC soft-cap controller. `cc_target_bps` feeds the soft-cap
     // multiplier and in-flight cap; `loss_degraded` feeds the loss gate.
-    let mut link_cc_controller = selection::link_cc::LinkCcController::new();
+    let mut link_cc_controller = crate::selection::link_cc::LinkCcController::new();
 
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
@@ -295,7 +292,7 @@ pub async fn run_sender_with_config(
                                 .unwrap_or(false);
                             let cc_snap = link_cc_snapshots.get(&conn.conn_id);
                             conn.cc_backing_off = cc_snap
-                                .map(|s| s.state == selection::link_cc::CcState::BackingOff)
+                                .map(|s| s.state == crate::selection::link_cc::CcState::BackingOff)
                                 .unwrap_or(false);
                             conn.cc_target_bps = cc_snap.map(|s| s.target_bps).unwrap_or(0);
                             conn.loss_degraded =

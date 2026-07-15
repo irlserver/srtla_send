@@ -680,7 +680,7 @@ impl SrtlaConnection {
     /// because it only recalculates every 50ms.
     #[inline(always)]
     pub fn get_cached_quality_multiplier(&mut self, current_time_ms: u64) -> f64 {
-        use crate::sender::calculate_quality_multiplier;
+        use crate::selection::calculate_quality_multiplier;
 
         if current_time_ms.saturating_sub(self.quality_cache.last_calculated_ms)
             >= QUALITY_CACHE_INTERVAL_MS

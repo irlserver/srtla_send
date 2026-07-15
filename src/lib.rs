@@ -27,6 +27,9 @@ pub mod priority_listener;
 // `protocol` so `crate::protocol::*` keeps resolving throughout the codebase.
 pub use srtla_protocol as protocol;
 pub mod registration;
+// Scheduler / link selection. Core logic (mutually dependent with `connection`),
+// so it lives top-level rather than under the `sender` shell.
+pub mod selection;
 pub mod sender;
 pub mod stats;
 pub mod subscriptions;
