@@ -16,6 +16,7 @@ mod kalman;
 mod metrics;
 mod mode;
 mod priority;
+mod priority_listener;
 // Wire protocol lives in its own dependency-free crate; alias it as `protocol`
 // so `crate::protocol::*` keeps resolving in the binary's module tree.
 use srtla_protocol as protocol;
@@ -174,7 +175,7 @@ async fn main() -> Result<()> {
     let critical_window = priority::CriticalWindow::new();
     if let Some(bind) = args.priority_bind {
         warn_if_not_loopback("priority sidecar (--priority-bind)", bind);
-        priority::spawn_listener(
+        priority_listener::spawn_listener(
             bind,
             critical_window.clone(),
             Some(subscription_hub.clone()),

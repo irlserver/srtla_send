@@ -22,6 +22,7 @@ pub mod kalman;
 pub mod metrics;
 pub mod mode;
 pub mod priority;
+pub mod priority_listener;
 // The wire protocol lives in its own dependency-free crate. Alias it as
 // `protocol` so `crate::protocol::*` keeps resolving throughout the codebase.
 pub use srtla_protocol as protocol;
