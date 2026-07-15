@@ -120,16 +120,16 @@ pub async fn handle_uplink_packet(
         return;
     }
     if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
-        match connections[idx]
-            .process_packet(
-                idx,
-                reg,
-                local_listener,
-                instant_tx,
-                last_client_addr,
-                &packet.bytes,
-            )
-            .await
+        match super::uplink_recv::process_uplink_packet(
+            &mut connections[idx],
+            idx,
+            reg,
+            local_listener,
+            instant_tx,
+            last_client_addr,
+            &packet.bytes,
+        )
+        .await
         {
             Ok(mut incoming) => {
                 // Flush the deferred immediate-REG1 effect on this link's socket.

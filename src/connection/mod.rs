@@ -4,7 +4,6 @@ pub mod batch_send;
 mod bitrate;
 mod congestion;
 mod incoming;
-mod packet_io;
 mod reconnection;
 mod rtt;
 mod socket;
