@@ -6,7 +6,7 @@
 //! (srt-live-transmit + srtla_rec + srtla_send).
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -79,6 +79,77 @@ pub fn check_integration_deps() -> std::result::Result<(), SkipReason> {
     }
 
     Ok(())
+}
+
+/// C source for the adaptive SRT sender, compiled on demand. Kept out of
+/// the Rust build on purpose: the workspace must build without libsrt
+/// dev headers, and only a machine actually running the netns tests (a
+/// superset of the srtla stack, which already needs libsrt) has to be
+/// able to compile it.
+const ADAPTIVE_SENDER_SRC: &str = include_str!("adaptive_srt_send.c");
+
+/// Whether the adaptive SRT sender can be built here: a C compiler and
+/// libsrt dev, the latter probed through `pkg-config srt`.
+pub fn check_adaptive_sender_deps() -> std::result::Result<(), SkipReason> {
+    if check_binary("cc").is_none() {
+        return Err(SkipReason::MissingTool("cc".into()));
+    }
+    let srt_dev = Command::new("pkg-config")
+        .args(["--exists", "srt"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !srt_dev {
+        return Err(SkipReason::MissingBinary(
+            "libsrt dev (pkg-config srt)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Compile the adaptive SRT sender against the system libsrt and return
+/// the built binary. Gate on [`check_adaptive_sender_deps`] first.
+///
+/// Recompiles every call — the source is tiny and this keeps a stale
+/// binary from surviving a source edit. The output lands in the system
+/// temp dir, not the cargo target tree.
+pub fn build_adaptive_sender() -> Result<PathBuf> {
+    let dir = std::env::temp_dir();
+    let src = dir.join("network_sim_adaptive_srt_send.c");
+    let bin = dir.join("network_sim_adaptive_srt_send");
+    std::fs::write(&src, ADAPTIVE_SENDER_SRC).context("write adaptive sender source")?;
+
+    let flags_out = Command::new("pkg-config")
+        .args(["--cflags", "--libs", "srt"])
+        .output()
+        .context("pkg-config srt")?;
+    if !flags_out.status.success() {
+        bail!(
+            "pkg-config srt failed: {}",
+            String::from_utf8_lossy(&flags_out.stderr).trim()
+        );
+    }
+    let flags = String::from_utf8_lossy(&flags_out.stdout);
+
+    let mut args: Vec<String> = vec![
+        src.to_string_lossy().into_owned(),
+        "-O2".into(),
+        "-o".into(),
+        bin.to_string_lossy().into_owned(),
+    ];
+    args.extend(flags.split_whitespace().map(str::to_string));
+
+    let out = Command::new("cc")
+        .args(&args)
+        .output()
+        .context("cc adaptive sender")?;
+    if !out.status.success() {
+        bail!(
+            "compiling adaptive sender failed:\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(bin)
 }
 
 /// Check deps including netem (for tests that apply impairment).
@@ -719,6 +790,49 @@ impl SrtlaTestStack {
         .context("wait for srt caller udp ingest")?;
 
         self.srt_caller = Some(caller);
+        Ok(())
+    }
+
+    /// Start the adaptive SRT sender in the sender namespace, in front of
+    /// srtla_send. The counterpart to [`start_srt_caller`] for tests that
+    /// need a *realistic* offered load rather than a fixed one.
+    ///
+    /// `start_srt_caller` drives a constant bitrate, which oversubscribes
+    /// a busy bond and collapses it into a retransmit storm. This instead
+    /// runs a real SRT caller that lowers its rate when the SRT send
+    /// buffer backs up — belacoder's congestion response without the
+    /// encoder — so the offered rate tracks what the bond can carry and
+    /// the run stays in a regime where per-link goodput is meaningful.
+    ///
+    /// Build the binary once with [`build_adaptive_sender`] and pass it
+    /// in; the sender ramps between `min_kbps` and `max_kbps`.
+    pub fn start_adaptive_sender(
+        &mut self,
+        sender_bin: &Path,
+        min_kbps: u32,
+        max_kbps: u32,
+    ) -> Result<()> {
+        let bin = sender_bin.to_string_lossy().into_owned();
+        let port = SRTLA_SEND_SRT_PORT.to_string();
+        let min_s = min_kbps.to_string();
+        let max_s = max_kbps.to_string();
+        // 2s SRT latency, above the shaper buffer — same reason as the
+        // constant caller above.
+        let mut sender = NamespaceProcess::spawn(
+            &self.topo.sender_ns,
+            &bin,
+            &["127.0.0.1", &port, &min_s, &max_s, "2000"],
+        )
+        .context("start adaptive SRT sender")?;
+
+        std::thread::sleep(Duration::from_millis(1500));
+        if let Some((code, stderr)) = sender.check_exit() {
+            bail!("adaptive sender exited immediately (code: {code:?})\nstderr:\n{stderr}");
+        }
+
+        // Reuse the caller slot: this *is* the SRT caller, and the slot's
+        // lifecycle (kill on stop/drop) is exactly what we want.
+        self.srt_caller = Some(sender);
         Ok(())
     }
 

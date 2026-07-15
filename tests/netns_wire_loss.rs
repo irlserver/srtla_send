@@ -18,50 +18,43 @@
 //! under test.
 //!
 //! Two links, both live, so this exercises real bonding rather than one
-//! link with dead spares. What it asserts is deliberately narrow: the
-//! lossy link's CC target must not ratchet to the floor, and both links
-//! must stay alive. It does *not* assert a bonded goodput figure. A real
-//! SRT session over a lossy shaped link retransmits hard enough that the
-//! per-link send rate is several times its goodput and swings widely, so
-//! any throughput assertion would be measuring retransmit noise, not the
-//! fix. Taming that would need FEC or encoder-rate adaptation, which
-//! srtla_send does not have.
+//! link with dead spares. Offered load comes from the *adaptive* SRT
+//! sender, not a constant pump: it lowers its bitrate when the SRT send
+//! buffer backs up or RTT inflates (belacoder's congestion response,
+//! minus the encoder), so the rate tracks what the bond can carry rather
+//! than oversubscribing it into an immediate retransmit-fuelled collapse.
+//!
+//! It keeps the run far healthier than a constant pump, but it does not
+//! make it pristine: a real SRT session over a hard-capped lossy link
+//! still oscillates, because settling at a clean steady rate would take
+//! production-grade congestion control tuned for the path. So the checks
+//! are the ones that hold *through* that oscillation: the lossy link's CC
+//! target never ratchets to the floor (the fix), and both links carry a
+//! real share at once (the bond is bonding). Aggregate goodput is logged
+//! but not asserted — it is not a stable enough number to threshold on.
 
 mod common;
 
 use std::thread;
 use std::time::Duration;
 
-use network_sim::{ImpairmentConfig, SRT_CALLER_INGEST_PORT, SRT_PAYLOAD_BYTES, SrtlaTestStack};
+use network_sim::{ImpairmentConfig, SrtlaTestStack};
 
-/// Both links are the same generous size. The scenario has to hold two
-/// things at once, and they pull in opposite directions:
-///
-/// - The lossy link must be *uncongested*, or its loss stops being wire
-///   loss and the test no longer isolates the bug. So each link is far
-///   larger than its share of the offered stream.
-/// - Both links must actually be *used*, or there is no bond to speak
-///   of. So the offered rate exceeds what either link carries alone,
-///   forcing the scheduler to spread across both.
-///
-/// 6 Mbps links. With two equal links there is an unavoidable squeeze:
-/// "use both" needs the offered rate above one link (>6 Mbps), i.e. above
-/// half the 12 Mbps total, so the bond always runs hot. Push too far past
-/// that and SRT's retransmits amplify the loss into congestion collapse.
-/// So keep the offered rate only a little over one link.
+/// Both links are the same generous size. Each is far above the share it
+/// ends up carrying, so the lossy link stays uncongested and its 2% loss
+/// is genuinely wire loss, not congestion — which is what the fix is
+/// about. The adaptive sender ramps toward the bond's real capacity, so
+/// both links get used without anyone having to guess an offered rate.
 const LOSSY_LINK_KBIT: u64 = 6_000;
 const CLEAN_LINK_KBIT: u64 = 6_000;
 
-/// ~7 Mbps offered as 1316-byte datagrams: over one link's 6 Mbps so the
-/// bond must use both, but only ~58% of the 12 Mbps total, which leaves
-/// enough headroom to stay out of collapse. (The other half of avoiding
-/// collapse is the SRT caller's 2s latency exceeding the shaper buffer —
-/// see `start_srt_caller`.)
-const PACKETS_PER_SEC: u32 = 665;
-const RUN_SECS: u64 = 45;
+/// The adaptive sender's bitrate bounds. The ceiling sits above the
+/// 12 Mbps the bond could carry, so the sender is free to ramp up until
+/// the send buffer tells it to stop rather than being capped short.
+const SENDER_MIN_KBPS: u32 = 500;
+const SENDER_MAX_KBPS: u32 = 16_000;
 
-/// Bits actually offered per second, for reference in assertions.
-const OFFERED_BPS: u64 = PACKETS_PER_SEC as u64 * SRT_PAYLOAD_BYTES as u64 * 8;
+const RUN_SECS: u64 = 45;
 
 /// `MIN_TARGET_BPS` in link_cc. A link pinned here has a BDP in-flight
 /// cap of about one packet and is effectively out of the bond.
@@ -72,7 +65,13 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     if common::skip_without_impairment_deps() {
         return;
     }
+    // The adaptive sender is compiled here against the system libsrt.
+    if let Err(reason) = network_sim::check_adaptive_sender_deps() {
+        eprintln!("Skipping: {reason}");
+        return;
+    }
     common::build_srtla_send();
+    let sender_bin = network_sim::build_adaptive_sender().expect("build adaptive SRT sender");
 
     let sock = format!("/tmp/srtla-wireloss-{}.sock", std::process::id());
     let mut stack =
@@ -105,18 +104,9 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
         .expect("impair link 1");
 
     common::wait_until_ready(&stack);
-    stack.start_srt_caller().expect("start srt caller");
-
-    // Feed the SRT caller for the whole run while we sample the CC.
-    let mut pump = network_sim::spawn_udp_stream(
-        &stack.topo.sender_ns,
-        "127.0.0.1",
-        SRT_CALLER_INGEST_PORT,
-        PACKETS_PER_SEC,
-        SRT_PAYLOAD_BYTES,
-        Duration::from_secs(RUN_SECS),
-    )
-    .expect("spawn traffic pump");
+    stack
+        .start_adaptive_sender(&sender_bin, SENDER_MIN_KBPS, SENDER_MAX_KBPS)
+        .expect("start adaptive SRT sender");
 
     let mut lossy_target_min = u64::MAX;
     let mut samples = 0usize;
@@ -213,7 +203,8 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
         samples += 1;
     }
 
-    pump.kill();
+    // The adaptive sender lives in the stack's caller slot, so stop()
+    // kills it along with everything else.
     let output = stack.stop();
     let _ = std::fs::remove_file(&sock);
 
@@ -298,46 +289,45 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     let clean_median = median(clean_bps_steady);
     eprintln!(
         "\nsteady state: bond={bond_median} bps, lossy={lossy_median} bps, clean={clean_median} \
-         bps, offered={OFFERED_BPS} bps, lossy CC target low-water={lossy_target_min} bps"
+         bps, lossy CC target low-water={lossy_target_min} bps"
     );
 
-    // THE assertion. The lossy link's CC target must never ratchet to
-    // the floor. Before the load gate, the efficacy test, and the
-    // delivered floor, BackingOff compounded -15% every tick for as long
-    // as the loss lasted, pinning the target at MIN_TARGET_BPS in ~20s.
-    //
-    // This is the one measurement that is both robust and meaningful
-    // here. It holds regardless of how the SRT session behaves around it,
-    // and it has held on every run — clean or collapsed — never dropping
-    // near the floor.
+    // 1. THE fix. The lossy link's CC target must never ratchet to the
+    //    floor. Before the load gate, the efficacy test, and the
+    //    delivered floor, BackingOff compounded -15% every tick for as
+    //    long as the loss lasted, pinning the target at MIN_TARGET_BPS in
+    //    ~20s. Holds on every run so far, never near the floor.
     assert!(
         lossy_target_min > CC_FLOOR_BPS * 3,
         "lossy link's CC target collapsed to {lossy_target_min} bps (floor is {CC_FLOOR_BPS}) — \
          wire loss ratcheted a healthy {LOSSY_LINK_KBIT} kbit link out of the bond"
     );
 
-    // Both links must be alive and carrying traffic — that is what makes
-    // this a bond and not a one-link run with dead spares, and it is the
-    // point of the routing work in the harness.
+    // 2. Both links carry a real share at once — this is a bond, not a
+    //    failover, and getting the second link to register and pull
+    //    traffic is the point of the topology work in the harness.
     //
-    // Deliberately a low bar. `sent_bps` counts bytes queued to the link,
-    // which under a lossy shaped path is dominated by SRT retransmissions
-    // (the lossy link's raw send rate runs several times its goodput).
-    // That makes it a fine liveness signal but a poor throughput one, so
-    // we do not assert a goodput number or an aggregation ratio off it —
-    // those would pass on retransmit noise and mean nothing. A stable,
-    // uncongested two-link goodput measurement needs FEC or encoder-rate
-    // adaptation to tame the retransmit dynamics, which srtla_send does
-    // not have; that is out of scope for this test.
-    let liveness_floor = 500_000; // 0.5 Mbps: clearly not idle
+    //    A modest per-link floor, not a goodput target. The adaptive
+    //    sender keeps the run far healthier than the old constant pump
+    //    (which collapsed almost immediately), but an SRT session over a
+    //    hard-capped lossy link still oscillates — it does not settle at
+    //    a clean steady rate. Reaching that would take production-grade
+    //    congestion control (belacoder's, tuned for real cellular), which
+    //    is well beyond what this test needs. So assert liveness, which
+    //    holds through the oscillation, not a throughput figure that
+    //    would be flaky.
+    let each_link_floor = 500_000; // 0.5 Mbps: clearly pulling weight, not idle
     assert!(
-        lossy_median > liveness_floor && clean_median > liveness_floor,
-        "a link was effectively idle (lossy={lossy_median} bps, clean={clean_median} bps) — the \
-         bond is running on one link, so this is not exercising bonding"
+        lossy_median > each_link_floor,
+        "lossy link carried only {lossy_median} bps — it is nominally in the bond but effectively \
+         idle"
+    );
+    assert!(
+        clean_median > each_link_floor,
+        "clean link carried only {clean_median} bps — the bond is really running on one link"
     );
 
-    // `bond_median` and `OFFERED_BPS` are logged above for diagnostics
-    // but intentionally not asserted on — see the note above on why
-    // retransmit-inflated send rates are not a goodput measure.
-    let _ = (bond_median, OFFERED_BPS);
+    // bond_median is logged above for the operator; not asserted, since
+    // under oscillation it is not a stable aggregate to threshold on.
+    let _ = bond_median;
 }
