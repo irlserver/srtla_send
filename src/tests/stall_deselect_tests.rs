@@ -78,7 +78,7 @@ mod tests {
             "gating must not clear `last_received`"
         );
         assert!(
-            !conns[0].is_timed_out(),
+            !conns[0].is_timed_out(now_ms()),
             "a stall-gated link must never be treated as timed out"
         );
     }

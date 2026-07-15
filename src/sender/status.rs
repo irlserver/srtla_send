@@ -22,6 +22,9 @@ pub(crate) fn log_connection_status(
         return;
     }
 
+    // Telemetry is display-layer; a single monotonic read drives every elapsed
+    // computation and timeout check in this report.
+    let now = now_ms();
     let total_connections = connections.len();
 
     // Single pass over connections to collect all stats
@@ -30,7 +33,7 @@ pub(crate) fn log_connection_status(
     let mut total_in_flight = 0usize;
 
     for conn in connections.iter() {
-        if !conn.is_timed_out() {
+        if !conn.is_timed_out(now) {
             active_connections += 1;
         }
         total_bitrate_mbps += conn.current_bitrate_mbps();
@@ -97,7 +100,7 @@ pub(crate) fn log_connection_status(
 
     // Show individual connection details
     for (i, conn) in connections.iter().enumerate() {
-        let status = if conn.is_timed_out() {
+        let status = if conn.is_timed_out(now) {
             "TIMED_OUT"
         } else {
             "ACTIVE"
@@ -112,7 +115,6 @@ pub(crate) fn log_connection_status(
         };
 
         // Elapsed since the monotonic ms stamp.
-        let now = now_ms();
         let last_recv = conn
             .last_received
             .map(|t| format!("{:.1}s ago", now.saturating_sub(t) as f64 / 1000.0))

@@ -157,7 +157,7 @@ pub fn select_connection(
     // ranking. Otherwise we fall back to the full pool — better to send
     // on a gated link than to drop the packet.
     let any_unconstrained = conns.iter().any(|c| {
-        !c.is_timed_out()
+        !c.is_timed_out(current_time_ms)
             && c.is_schedulable()
             && !c.weak
             && !c.loss_degraded
@@ -176,7 +176,7 @@ pub fn select_connection(
         // A stall-gated link is a black hole with a healthier alternative
         // available (see `apply_stall_gate`); hard-skip it like a timed-out link
         // rather than crushing its score, since a trickle would only add latency.
-        if c.is_timed_out() || !c.is_schedulable() || c.stall_gated {
+        if c.is_timed_out(current_time_ms) || !c.is_schedulable() || c.stall_gated {
             continue;
         }
         // Hard-skip only the in-flight cap: it bounds queueing delay and

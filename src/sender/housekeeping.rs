@@ -48,7 +48,7 @@ pub async fn handle_housekeeping(
     // housekeeping: drive registration, send keepalives
     for (i, conn) in connections.iter_mut().enumerate() {
         // Simple reconnect-on-timeout, then allow reg driver to proceed
-        if conn.is_timed_out() {
+        if conn.is_timed_out(current_ms) {
             if conn.should_attempt_reconnect(current_ms) {
                 let label = conn.label.clone();
                 conn.record_reconnect_attempt(current_ms);
@@ -127,7 +127,7 @@ pub async fn handle_housekeeping(
 
     // Check for connection failures and output appropriate error messages
     // This matches the C implementation's connection_housekeeping logic
-    let active_connections = connections.iter().filter(|c| !c.is_timed_out()).count();
+    let active_connections = connections.iter().filter(|c| !c.is_timed_out(current_ms)).count();
 
     if active_connections == 0 {
         if all_failed_at.is_none() {

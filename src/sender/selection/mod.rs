@@ -58,7 +58,7 @@ pub fn select_connection_idx(
     match config.mode {
         SchedulingMode::Classic => {
             // Classic mode: simple capacity-based selection (no dampening, matches original C)
-            classic::select_connection(conns)
+            classic::select_connection(conns, current_time_ms)
         }
         SchedulingMode::Enhanced => {
             // Enhanced mode: quality-aware selection with score hysteresis.
@@ -88,7 +88,7 @@ fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config:
 
     let any_healthy = config.stall_deselect
         && conns.iter().any(|c| {
-            !c.is_timed_out()
+            !c.is_timed_out(current_time_ms)
                 && c.is_schedulable()
                 && !c.is_stalled(current_time_ms, min_in_flight, stale_ms)
         });

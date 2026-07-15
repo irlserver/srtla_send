@@ -634,7 +634,7 @@ mod tests {
         // housekeeping keeps driving registration instead of reconnection.
         conn.reconnection.startup_grace_deadline_ms = now_ms() + STARTUP_GRACE_MS;
         assert!(
-            !conn.is_timed_out(),
+            !conn.is_timed_out(now_ms()),
             "fresh never-received link within grace must NOT be timed out"
         );
 
@@ -642,7 +642,7 @@ mod tests {
         // data is now timed out, which is what drives re-registration.
         conn.reconnection.startup_grace_deadline_ms = now_ms().saturating_sub(1);
         assert!(
-            conn.is_timed_out(),
+            conn.is_timed_out(now_ms()),
             "a fresh link past its startup grace deadline must be timed out"
         );
     }

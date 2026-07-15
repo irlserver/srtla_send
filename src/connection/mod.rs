@@ -585,13 +585,13 @@ impl SrtlaConnection {
     ///
     /// `last_received` is a `now_ms()` monotonic millisecond stamp (the single
     /// clock this whole codebase runs on), so the timeout is a plain difference
-    /// against `now_ms()`. Tests drive it by stamping `last_received` a chosen
-    /// interval in the past (e.g. `now_ms() - (CONN_TIMEOUT + 1) * 1000`); they
-    /// no longer advance a tokio virtual clock, because this reads the monotonic
-    /// clock directly, not `tokio::time::Instant`.
+    /// against the caller's `now_ms`. Tests drive it by stamping `last_received` a
+    /// chosen interval in the past (e.g. `now_ms() - (CONN_TIMEOUT + 1) * 1000`);
+    /// they no longer advance a tokio virtual clock, because this compares against
+    /// the monotonic clock, not `tokio::time::Instant`.
     #[inline(always)]
-    pub fn is_timed_out(&self) -> bool {
-        let now = now_ms();
+    pub fn is_timed_out(&self, now_ms: u64) -> bool {
+        let now = now_ms;
         // During initial registration (not yet connected), allow grace period
         if !self.connected {
             // If this connection was never established (connection_established_ms == 0),

@@ -247,7 +247,7 @@ impl SharedStats {
         };
 
         for conn in connections {
-            let timed_out = conn.is_timed_out();
+            let timed_out = conn.is_timed_out(current_time_ms);
             let is_active = conn.connected && !timed_out;
 
             // Quality multiplier: use actual selection algorithm calculation,

@@ -440,15 +440,15 @@ mod tests {
         let mut conn = rt.block_on(create_test_connection());
 
         // Fresh connection should not be timed out
-        assert!(!conn.is_timed_out());
+        assert!(!conn.is_timed_out(now_ms()));
 
         // Stamp last_received CONN_TIMEOUT + 1 seconds in the past.
         conn.last_received = Some(now_ms() - (CONN_TIMEOUT + 1) * 1000);
-        assert!(conn.is_timed_out());
+        assert!(conn.is_timed_out(now_ms()));
 
         // Disconnected connection should be timed out
         conn.connected = false;
-        assert!(conn.is_timed_out());
+        assert!(conn.is_timed_out(now_ms()));
     }
 
     /// Deterministic timeout on the single monotonic clock: `is_timed_out` reads
@@ -462,11 +462,11 @@ mod tests {
         let now = now_ms();
 
         conn.last_received = Some(now);
-        assert!(!conn.is_timed_out(), "a just-received link is live");
+        assert!(!conn.is_timed_out(now_ms()), "a just-received link is live");
 
         conn.last_received = Some(now - (CONN_TIMEOUT + 1) * 1000);
         assert!(
-            conn.is_timed_out(),
+            conn.is_timed_out(now_ms()),
             "a stamp past CONN_TIMEOUT must mark the link timed out"
         );
     }
@@ -479,7 +479,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let conn = rt.block_on(create_test_connection());
         assert!(
-            !conn.is_timed_out(),
+            !conn.is_timed_out(now_ms()),
             "a freshly created link must not be timed out"
         );
     }
@@ -514,7 +514,7 @@ mod tests {
         assert!(!conn.connected);
 
         // Should be in recovery mode with reset state
-        assert!(conn.is_timed_out());
+        assert!(conn.is_timed_out(now_ms()));
         assert_eq!(conn.window, WINDOW_DEF * WINDOW_MULT);
         assert_eq!(conn.in_flight_packets, 0);
 

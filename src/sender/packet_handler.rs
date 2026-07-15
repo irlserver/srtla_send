@@ -211,12 +211,13 @@ pub async fn drain_packet_queue(
 fn select_pre_registration_connection(
     connections: &[SrtlaConnection],
     last_selected_idx: Option<usize>,
+    now_ms: u64,
 ) -> Option<usize> {
     // Try to reuse the last selected connection if it's still valid
     if let Some(idx) = last_selected_idx
         && let Some(conn) = connections.get(idx)
         && conn.connected
-        && !conn.is_timed_out()
+        && !conn.is_timed_out(now_ms)
     {
         return Some(idx);
     }
@@ -225,7 +226,7 @@ fn select_pre_registration_connection(
     connections
         .iter()
         .enumerate()
-        .find(|(_, c)| !c.is_timed_out())
+        .find(|(_, c)| !c.is_timed_out(now_ms))
         .map(|(i, _)| i)
 }
 
@@ -261,7 +262,8 @@ pub async fn handle_srt_packet(
             let pkt = &recv_buf[..n];
             let seq = protocol::get_srt_sequence_number(pkt);
             if !registration_complete {
-                let sel_idx = select_pre_registration_connection(connections, *last_selected_idx);
+                let sel_idx =
+                    select_pre_registration_connection(connections, *last_selected_idx, packet_time_ms);
                 if let Some(sel_idx) = sel_idx {
                     forward_via_connection(
                         sel_idx,
