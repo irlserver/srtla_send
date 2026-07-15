@@ -714,12 +714,12 @@ impl SrtlaConnection {
         self.quality_cache.multiplier
     }
 
-    pub fn should_attempt_reconnect(&self) -> bool {
-        self.reconnection.should_attempt_reconnect()
+    pub fn should_attempt_reconnect(&self, now_ms: u64) -> bool {
+        self.reconnection.should_attempt_reconnect(now_ms)
     }
 
-    pub fn record_reconnect_attempt(&mut self) {
-        self.reconnection.record_attempt(&self.label);
+    pub fn record_reconnect_attempt(&mut self, now_ms: u64) {
+        self.reconnection.record_attempt(&self.label, now_ms);
     }
 
     pub fn mark_reconnect_success(&mut self) {
@@ -776,7 +776,8 @@ impl SrtlaConnection {
         // Don't reset connection_established_ms for reconnections - only set when REG3
         // is received
         self.mark_reconnect_success();
-        self.reconnection.reset_startup_grace();
+        // Connection-layer ambient read; ReconnectionState is clock-injected.
+        self.reconnection.reset_startup_grace(now_ms());
         Ok(())
     }
 }

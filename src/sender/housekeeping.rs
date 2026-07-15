@@ -50,9 +50,9 @@ pub async fn handle_housekeeping(
     for (i, conn) in connections.iter_mut().enumerate() {
         // Simple reconnect-on-timeout, then allow reg driver to proceed
         if conn.is_timed_out() {
-            if conn.should_attempt_reconnect() {
+            if conn.should_attempt_reconnect(current_ms) {
                 let label = conn.label.clone();
-                conn.record_reconnect_attempt();
+                conn.record_reconnect_attempt(current_ms);
                 if conn.connection_established_ms() == 0 {
                     debug!("{} initial registration timed out; retrying", label);
                 } else {

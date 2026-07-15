@@ -1,7 +1,6 @@
 use tracing::{debug, info};
 
 use super::STARTUP_GRACE_MS;
-use crate::utils::now_ms;
 const BASE_RECONNECT_DELAY_MS: u64 = 5000;
 const MAX_BACKOFF_DELAY_MS: u64 = 120_000;
 const MAX_BACKOFF_COUNT: u32 = 5;
@@ -23,9 +22,7 @@ impl ReconnectionState {
         delay.min(MAX_BACKOFF_DELAY_MS)
     }
 
-    pub fn should_attempt_reconnect(&self) -> bool {
-        let now = now_ms();
-
+    pub fn should_attempt_reconnect(&self, now: u64) -> bool {
         if self.connection_established_ms == 0 {
             if now <= self.startup_grace_deadline_ms {
                 return false;
@@ -46,8 +43,8 @@ impl ReconnectionState {
         time_since_last_attempt >= self.backoff_delay()
     }
 
-    pub fn record_attempt(&mut self, label: &str) {
-        self.last_reconnect_attempt_ms = now_ms();
+    pub fn record_attempt(&mut self, label: &str, now: u64) {
+        self.last_reconnect_attempt_ms = now;
 
         // For initial registration we keep retry cadence fast and skip backoff
         if self.connection_established_ms == 0 {
@@ -75,7 +72,7 @@ impl ReconnectionState {
         }
     }
 
-    pub fn reset_startup_grace(&mut self) {
-        self.startup_grace_deadline_ms = now_ms() + STARTUP_GRACE_MS;
+    pub fn reset_startup_grace(&mut self, now: u64) {
+        self.startup_grace_deadline_ms = now + STARTUP_GRACE_MS;
     }
 }

@@ -410,15 +410,19 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
 
+        // Injected clock: the whole reconnect-backoff decision is exercised at
+        // chosen instants, so the test no longer races two real-clock reads.
+        let now = now_ms();
+
         // Should allow first reconnect attempt
-        assert!(conn.should_attempt_reconnect());
+        assert!(conn.should_attempt_reconnect(now));
 
         // Record attempt
-        conn.record_reconnect_attempt();
+        conn.record_reconnect_attempt(now);
         assert_eq!(conn.reconnection.reconnect_failure_count, 1);
 
         // Should not allow immediate retry
-        assert!(!conn.should_attempt_reconnect());
+        assert!(!conn.should_attempt_reconnect(now));
 
         // Test backoff behavior
         let initial_time = conn.reconnection.last_reconnect_attempt_ms;
