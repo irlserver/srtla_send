@@ -402,11 +402,14 @@ pub async fn forward_via_connection(
 /// Optimized with early exit: first check if any connection has queued packets
 /// before iterating. This avoids work on the 15ms timer when traffic is idle.
 pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
+    // One monotonic read drives the flush-window check for every connection.
+    let now = crate::utils::now_ms();
+
     // Quick scan to check if any connection has work to do
     // This is a fast read-only check that avoids the flush logic entirely when idle
     let has_work = connections
         .iter()
-        .any(|c| c.has_queued_packets() || c.needs_batch_flush());
+        .any(|c| c.has_queued_packets() || c.needs_batch_flush(now));
 
     if !has_work {
         return;
@@ -414,7 +417,7 @@ pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
 
     // Now do the actual flush for connections that need it
     for conn in connections.iter_mut() {
-        if (conn.needs_batch_flush() || conn.has_queued_packets())
+        if (conn.needs_batch_flush(now) || conn.has_queued_packets())
             && let Err(e) = conn.flush_batch().await
         {
             warn!("{}: periodic batch flush failed: {}", conn.label, e);

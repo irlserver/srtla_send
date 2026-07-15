@@ -21,6 +21,7 @@ pub use incoming::SrtlaIncoming;
 pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 // Host-side binder for platforms that steer egress by network handle (Android).
 // Exported for library consumers; the CLI binary does not construct it. Unix
 // only: it binds by raw fd, which Windows does not have.
@@ -341,8 +342,8 @@ impl SrtlaConnection {
 
     /// Check if the batch queue needs time-based flushing (15ms interval)
     #[inline]
-    pub fn needs_batch_flush(&self) -> bool {
-        self.batch_sender.needs_time_flush()
+    pub fn needs_batch_flush(&self, now_ms: u64) -> bool {
+        self.batch_sender.needs_time_flush(now_ms)
     }
 
     /// Check if there are any packets in the batch queue
@@ -359,15 +360,21 @@ impl SrtlaConnection {
             return Ok(());
         }
 
-        match self.batch_sender.flush(&self.socket).await {
-            Ok(tracking_info) => {
+        let now = now_ms();
+        let batch = self.batch_sender.drain(now);
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let bufs: SmallVec<&[u8], 32> = batch.iter().map(|(data, _, _)| data.as_slice()).collect();
+        match crate::connection::batch_send::send_all_datagrams(&self.socket, &bufs).await {
+            Ok(()) => {
                 // Register all sent packets for in-flight tracking
-                for (seq, send_time_ms) in tracking_info {
+                for (_, seq, send_time_ms) in &batch {
                     if let Some(s) = seq {
-                        self.register_packet(s as i32, send_time_ms);
+                        self.register_packet(*s as i32, *send_time_ms);
                     }
                 }
-                self.last_sent = Some(now_ms());
+                self.last_sent = Some(now);
                 Ok(())
             }
             Err(e) => Err(anyhow::anyhow!("batch flush failed: {}", e)),
