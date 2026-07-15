@@ -5,7 +5,6 @@ use tracing::debug;
 use crate::ewma::Ewma;
 use crate::kalman::{KalmanConfig, KalmanFilter};
 use crate::protocol::extract_keepalive_timestamp;
-use crate::utils::now_ms;
 
 /// Number of samples in the fast sliding window (~3s at 300ms keepalive interval).
 const FAST_WINDOW_SAMPLES: usize = 10;
@@ -111,7 +110,7 @@ impl RttTracker {
         self.rtt_sample_filter.clear();
     }
 
-    pub fn update_estimate(&mut self, rtt_ms: u64) {
+    pub fn update_estimate(&mut self, rtt_ms: u64, now_ms: u64) {
         let current_rtt = rtt_ms as f64;
 
         // Min-RTT sample filter: smooth jitter before feeding baseline tracker.
@@ -136,7 +135,7 @@ impl RttTracker {
             self.rtt_masd_ms = 0.0;
             self.rtt_min_fast_window.push_back(filtered_rtt);
             self.rtt_min_slow_window.push_back(filtered_rtt);
-            self.last_rtt_measurement_ms = now_ms();
+            self.last_rtt_measurement_ms = now_ms;
             return;
         }
 
@@ -188,7 +187,7 @@ impl RttTracker {
 
         // Smoothed RTT from Kalman
         self.estimated_rtt_ms = self.kalman_rtt.value();
-        self.last_rtt_measurement_ms = now_ms();
+        self.last_rtt_measurement_ms = now_ms;
     }
 
     pub fn is_stable(&self) -> bool {
@@ -220,23 +219,28 @@ impl RttTracker {
         self.rtt_gradient_ms() > trip
     }
 
-    pub fn record_keepalive_sent(&mut self) {
-        self.last_keepalive_sent_ms = now_ms();
+    pub fn record_keepalive_sent(&mut self, now_ms: u64) {
+        self.last_keepalive_sent_ms = now_ms;
         self.waiting_for_keepalive_response = true;
     }
 
-    pub fn handle_keepalive_response(&mut self, data: &[u8], label: &str) -> Option<u64> {
+    pub fn handle_keepalive_response(
+        &mut self,
+        data: &[u8],
+        label: &str,
+        now_ms: u64,
+    ) -> Option<u64> {
         if !self.waiting_for_keepalive_response {
             return None;
         }
         if let Some(ts) = extract_keepalive_timestamp(data) {
-            let now = now_ms();
+            let now = now_ms;
             let rtt = now.saturating_sub(ts);
             // Reject rtt == 0 (same-ms reply or future timestamp from clock skew):
             // a 0ms RTT is not a real sample and would seed rtt_min_ms = 0, making
             // the link look artificially fast. Matches the ACK path (ack_nak.rs).
             if rtt > 0 && rtt <= 10_000 {
-                self.update_estimate(rtt);
+                self.update_estimate(rtt, now);
                 self.waiting_for_keepalive_response = false;
                 debug!(
                     "{}: RTT from keepalive: {}ms (kalman: {:.1}ms, velocity: {:.2}ms/s, jitter: \
@@ -254,7 +258,12 @@ impl RttTracker {
         None
     }
 
-    pub fn needs_measurement(&self, connected: bool, connection_established_ms: u64) -> bool {
+    pub fn needs_measurement(
+        &self,
+        connected: bool,
+        connection_established_ms: u64,
+        now_ms: u64,
+    ) -> bool {
         if connection_established_ms == 0 {
             return false;
         }
@@ -262,7 +271,7 @@ impl RttTracker {
         connected
             && !self.waiting_for_keepalive_response
             && (self.last_rtt_measurement_ms == 0
-                || now_ms().saturating_sub(self.last_rtt_measurement_ms) > 3000)
+                || now_ms.saturating_sub(self.last_rtt_measurement_ms) > 3000)
     }
 }
 
@@ -270,13 +279,16 @@ impl RttTracker {
 mod tests {
     use super::*;
 
+    // Fixed virtual clock: injected `now` means these tests read no real clock.
+    const T0: u64 = 1_000_000;
+
     #[test]
     fn test_dual_window_adapts_to_handover() {
         let mut tracker = RttTracker::default();
 
         // Establish baseline at 50ms
         for _ in 0..FAST_WINDOW_SAMPLES {
-            tracker.update_estimate(50);
+            tracker.update_estimate(50, T0);
         }
         assert!(
             (tracker.rtt_min_ms - 50.0).abs() < 1.0,
@@ -287,7 +299,7 @@ mod tests {
         // Simulate cellular handover: RTT jumps to 120ms.
         let flush_count = RTT_SAMPLE_FILTER_SIZE + SLOW_WINDOW_SAMPLES;
         for _ in 0..flush_count {
-            tracker.update_estimate(120);
+            tracker.update_estimate(120, T0);
         }
 
         assert!(
@@ -301,11 +313,11 @@ mod tests {
     fn test_dual_window_tracks_minimum() {
         let mut tracker = RttTracker::default();
 
-        tracker.update_estimate(100);
-        tracker.update_estimate(80);
-        tracker.update_estimate(60);
-        tracker.update_estimate(90);
-        tracker.update_estimate(70);
+        tracker.update_estimate(100, T0);
+        tracker.update_estimate(80, T0);
+        tracker.update_estimate(60, T0);
+        tracker.update_estimate(90, T0);
+        tracker.update_estimate(70, T0);
 
         assert!(
             (tracker.rtt_min_ms - 60.0).abs() < 1.0,
@@ -319,7 +331,7 @@ mod tests {
         let mut tracker = RttTracker::default();
 
         for _ in 0..20 {
-            tracker.update_estimate(50);
+            tracker.update_estimate(50, T0);
         }
         assert!((tracker.rtt_min_ms - 50.0).abs() < 1.0);
 
@@ -327,7 +339,7 @@ mod tests {
 
         assert!((tracker.rtt_min_ms - 200.0).abs() < f64::EPSILON);
 
-        tracker.update_estimate(80);
+        tracker.update_estimate(80, T0);
         assert!(
             (tracker.rtt_min_ms - 80.0).abs() < 1.0,
             "after reset + new measurement, baseline should be 80ms, got {}",
@@ -339,10 +351,10 @@ mod tests {
     fn test_dual_window_fast_window_forgets_old_minimum() {
         let mut tracker = RttTracker::default();
 
-        tracker.update_estimate(20);
+        tracker.update_estimate(20, T0);
 
         for _ in 0..FAST_WINDOW_SAMPLES {
-            tracker.update_estimate(100);
+            tracker.update_estimate(100, T0);
         }
 
         assert!(
@@ -353,7 +365,7 @@ mod tests {
 
         let flush_count = RTT_SAMPLE_FILTER_SIZE + SLOW_WINDOW_SAMPLES;
         for _ in 0..flush_count {
-            tracker.update_estimate(100);
+            tracker.update_estimate(100, T0);
         }
 
         assert!(
@@ -371,7 +383,7 @@ mod tests {
         // even though MASD is large.
         for i in 0..80 {
             let rtt = if i % 2 == 0 { 40 } else { 60 };
-            tracker.update_estimate(rtt);
+            tracker.update_estimate(rtt, T0);
         }
         assert!(
             !tracker.queue_building_suspected(),
@@ -386,7 +398,7 @@ mod tests {
         let mut tracker = RttTracker::default();
         // Establish a low long-term floor.
         for _ in 0..30 {
-            tracker.update_estimate(20);
+            tracker.update_estimate(20, T0);
         }
         assert!(!tracker.queue_building_suspected());
         // Steady ramp (small successive steps -> low MASD) that lifts the
@@ -395,7 +407,7 @@ mod tests {
         let mut rtt = 20u64;
         for _ in 0..60 {
             rtt += 2;
-            tracker.update_estimate(rtt);
+            tracker.update_estimate(rtt, T0);
         }
         assert!(
             tracker.queue_building_suspected(),
@@ -411,7 +423,7 @@ mod tests {
 
         // Feed stable RTT
         for _ in 0..50 {
-            tracker.update_estimate(50);
+            tracker.update_estimate(50, T0);
         }
         assert!(
             (tracker.estimated_rtt_ms - 50.0).abs() < 1.0,
@@ -421,7 +433,7 @@ mod tests {
 
         // Feed rising RTT — velocity should go positive
         for _ in 0..20 {
-            tracker.update_estimate(80);
+            tracker.update_estimate(80, T0);
         }
         assert!(
             tracker.kalman_rtt.velocity() > 0.0 || tracker.estimated_rtt_ms > 60.0,
@@ -441,15 +453,15 @@ mod tests {
         let mut tracker = RttTracker::default();
         assert!((tracker.rtt_min_ms - 200.0).abs() < f64::EPSILON);
 
-        tracker.record_keepalive_sent();
+        tracker.record_keepalive_sent(T0);
         assert!(tracker.waiting_for_keepalive_response);
 
-        let future_ts = now_ms() + 1_000_000;
+        let future_ts = T0 + 1_000_000;
         let mut pkt = [0u8; 10];
         pkt[0..2].copy_from_slice(&crate::protocol::SRTLA_TYPE_KEEPALIVE.to_be_bytes());
         pkt[2..10].copy_from_slice(&future_ts.to_be_bytes());
 
-        let rtt = tracker.handle_keepalive_response(&pkt, "test");
+        let rtt = tracker.handle_keepalive_response(&pkt, "test", T0);
 
         assert_eq!(rtt, None, "zero-RTT keepalive must be rejected");
         assert!(

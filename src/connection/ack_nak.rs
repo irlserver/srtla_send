@@ -55,7 +55,7 @@ impl SrtlaConnection {
             let now = now_ms();
             let rtt = now.saturating_sub(sent_ms);
             if rtt > 0 && rtt <= 10_000 {
-                self.rtt.update_estimate(rtt);
+                self.rtt.update_estimate(rtt, now);
             }
         }
     }

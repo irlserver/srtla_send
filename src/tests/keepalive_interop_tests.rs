@@ -18,7 +18,10 @@
 mod tests {
     use crate::connection::RttTracker;
     use crate::protocol::*;
-    use crate::utils::now_ms;
+
+    // Fixed virtual clock: the receive path takes `now` as an argument, so these
+    // interop tests exercise the wire format at a chosen instant, no real clock.
+    const T0: u64 = 1_000_000;
 
     /// (a) Our extended keepalive builds → parses → RTT fields preserved.
     ///
@@ -53,15 +56,15 @@ mod tests {
         // real receive path, and confirm a plausible RTT sample is recovered
         // from bytes 2-9 despite the extended trailer.
         let mut tracker = RttTracker::default();
-        tracker.record_keepalive_sent();
+        tracker.record_keepalive_sent(T0);
         assert!(tracker.waiting_for_keepalive_response);
 
-        let sent_ts = now_ms().saturating_sub(50);
+        let sent_ts = T0.saturating_sub(50);
         let mut echo = create_keepalive_packet_ext(info);
         echo[2..10].copy_from_slice(&sent_ts.to_be_bytes());
 
         let measured = tracker
-            .handle_keepalive_response(&echo, "interop")
+            .handle_keepalive_response(&echo, "interop", T0)
             .expect("extended keepalive echo yields an RTT sample");
         assert!(
             (40..=10_000).contains(&measured),
@@ -102,8 +105,8 @@ mod tests {
         // panic, and the waiting flag is cleared so the next keepalive cycle
         // is not wedged.
         let mut tracker = RttTracker::default();
-        tracker.record_keepalive_sent();
-        let measured = tracker.handle_keepalive_response(&bare, "interop-bare");
+        tracker.record_keepalive_sent(T0);
+        let measured = tracker.handle_keepalive_response(&bare, "interop-bare", T0);
         assert_eq!(measured, None, "a bare 2-byte echo yields no RTT sample");
         assert!(
             !tracker.kalman_rtt.is_initialized(),
@@ -135,8 +138,8 @@ mod tests {
 
             // The receive path must never panic on a malformed echo. Re-arm
             // before each call so the guard branch is actually exercised.
-            tracker.record_keepalive_sent();
-            let _ = tracker.handle_keepalive_response(&buf, "interop-trunc");
+            tracker.record_keepalive_sent(T0);
+            let _ = tracker.handle_keepalive_response(&buf, "interop-trunc", T0);
 
             // Length-specific contract: a timestamp needs >= 10 bytes; the
             // extended telemetry needs the full 38-byte frame (magic+version).
@@ -154,7 +157,7 @@ mod tests {
         // as extended telemetry.
         let mut oversized = vec![0u8; MTU];
         oversized[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
-        let ts = now_ms().saturating_sub(20);
+        let ts = T0.saturating_sub(20);
         oversized[2..10].copy_from_slice(&ts.to_be_bytes());
         assert_eq!(get_packet_type(&oversized), Some(SRTLA_TYPE_KEEPALIVE));
         assert!(extract_keepalive_timestamp(&oversized).is_some());

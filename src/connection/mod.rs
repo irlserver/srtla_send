@@ -396,7 +396,7 @@ impl SrtlaConnection {
             && (self.rtt.last_rtt_measurement_ms == 0
                 || now.saturating_sub(self.rtt.last_rtt_measurement_ms) > 3000)
         {
-            self.rtt.record_keepalive_sent();
+            self.rtt.record_keepalive_sent(now);
         }
         Ok(())
     }
@@ -450,9 +450,12 @@ impl SrtlaConnection {
         self.rtt.queue_building_suspected()
     }
 
-    pub fn needs_rtt_measurement(&self) -> bool {
-        self.rtt
-            .needs_measurement(self.connected, self.reconnection.connection_established_ms)
+    pub fn needs_rtt_measurement(&self, now_ms: u64) -> bool {
+        self.rtt.needs_measurement(
+            self.connected,
+            self.reconnection.connection_established_ms,
+            now_ms,
+        )
     }
 
     pub fn needs_keepalive(&self) -> bool {

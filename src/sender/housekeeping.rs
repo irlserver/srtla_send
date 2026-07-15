@@ -92,7 +92,7 @@ pub async fn handle_housekeeping(
         if conn.needs_keepalive() {
             let _ = conn.send_keepalive().await;
         }
-        if conn.needs_rtt_measurement() {
+        if conn.needs_rtt_measurement(current_ms) {
             let _ = conn.send_keepalive().await;
         }
         if !classic {

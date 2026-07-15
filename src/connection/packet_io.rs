@@ -85,6 +85,7 @@ impl SrtlaConnection {
     ) -> Result<()> {
         incoming.read_any = true;
         let recv_time = Instant::now();
+        let now = crate::utils::now_ms();
         let pt = get_packet_type(data);
         if let Some(pt) = pt {
             if let Some(event) = reg.process_registration_packet(conn_idx, data) {
@@ -99,7 +100,7 @@ impl SrtlaConnection {
                         self.connected = true;
                         self.last_received = Some(recv_time);
                         if self.reconnection.connection_established_ms == 0 {
-                            self.reconnection.connection_established_ms = crate::utils::now_ms();
+                            self.reconnection.connection_established_ms = now;
                         }
                         self.reconnection.mark_success(&self.label);
                     }
@@ -162,7 +163,7 @@ impl SrtlaConnection {
             } else if pt == SRTLA_TYPE_KEEPALIVE {
                 if self
                     .rtt
-                    .handle_keepalive_response(data, &self.label)
+                    .handle_keepalive_response(data, &self.label, now)
                     .is_some()
                 {
                     self.record_rtt_probe();
@@ -171,7 +172,7 @@ impl SrtlaConnection {
                     // data ACKs are landing. Pairs with the earned-ACK site
                     // (see `ack_nak.rs`); together they let a recovered link
                     // un-gate itself without the scheduler probing blindly.
-                    self.last_ack_or_rtt_sample_ms = crate::utils::now_ms();
+                    self.last_ack_or_rtt_sample_ms = now;
                 }
             } else {
                 incoming

@@ -374,16 +374,16 @@ mod tests {
         let mut conn = rt.block_on(create_test_connection());
 
         // Should need RTT measurement initially
-        assert!(conn.needs_rtt_measurement());
+        assert!(conn.needs_rtt_measurement(now_ms()));
 
         // After waiting for response, should not need
         conn.rtt.waiting_for_keepalive_response = true;
-        assert!(!conn.needs_rtt_measurement());
+        assert!(!conn.needs_rtt_measurement(now_ms()));
 
         // After timeout, should need again
         conn.rtt.waiting_for_keepalive_response = false;
         conn.rtt.last_rtt_measurement_ms = now_ms() - 4000;
-        assert!(conn.needs_rtt_measurement());
+        assert!(conn.needs_rtt_measurement(now_ms()));
     }
 
     #[test]
