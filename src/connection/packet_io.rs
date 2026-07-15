@@ -3,7 +3,6 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
-use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use super::SrtlaConnection;
@@ -84,7 +83,6 @@ impl SrtlaConnection {
         incoming: &mut SrtlaIncoming,
     ) -> Result<()> {
         incoming.read_any = true;
-        let recv_time = Instant::now();
         let now = crate::utils::now_ms();
         let pt = get_packet_type(data);
         if let Some(pt) = pt {
@@ -98,7 +96,7 @@ impl SrtlaConnection {
                         // accumulated during pre-registration data forwarding
                         self.clear_pre_registration_state(now);
                         self.connected = true;
-                        self.last_received = Some(recv_time);
+                        self.last_received = Some(now);
                         if self.reconnection.connection_established_ms == 0 {
                             self.reconnection.connection_established_ms = now;
                         }
@@ -113,7 +111,7 @@ impl SrtlaConnection {
                 return Ok(());
             }
 
-            self.last_received = Some(recv_time);
+            self.last_received = Some(now);
 
             if pt == SRT_TYPE_ACK {
                 if let Some(ack) = parse_srt_ack(data) {

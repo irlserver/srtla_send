@@ -28,7 +28,6 @@ use rustc_hash::FxHashMap;
 #[allow(unused_imports)]
 pub use socket::CallbackBinder;
 pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};
-use tokio::time::Instant;
 use tracing::debug;
 
 use crate::protocol::*;
@@ -179,15 +178,15 @@ pub struct SrtlaConnection {
     #[cfg(not(feature = "test-internals"))]
     pub(crate) highest_acked_seq: i32,
     #[cfg(feature = "test-internals")]
-    pub last_received: Option<Instant>,
+    pub last_received: Option<u64>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_received: Option<Instant>,
+    pub(crate) last_received: Option<u64>,
     #[cfg(feature = "test-internals")]
-    pub last_sent: Option<Instant>,
+    pub last_sent: Option<u64>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_sent: Option<Instant>,
+    pub(crate) last_sent: Option<u64>,
     /// Timestamp of the last keepalive sent (for periodic telemetry)
-    pub(crate) last_keepalive_sent: Option<Instant>,
+    pub(crate) last_keepalive_sent: Option<u64>,
     /// `now_ms()` of this link's last delivery proof: an EARNED ACK (this link
     /// owned an acked seq) or a keepalive-RTT response. Stamped ONLY at those
     /// two sites — NEVER on generic inbound bytes (unlike `last_received`), so a
@@ -368,7 +367,7 @@ impl SrtlaConnection {
                         self.register_packet(s as i32, send_time_ms);
                     }
                 }
-                self.last_sent = Some(Instant::now());
+                self.last_sent = Some(now_ms());
                 Ok(())
             }
             Err(e) => Err(anyhow::anyhow!("batch flush failed: {}", e)),
@@ -387,10 +386,9 @@ impl SrtlaConnection {
         };
         let pkt = create_keepalive_packet_ext(info);
         self.socket.send(&pkt).await?;
-        let now_instant = Instant::now();
         let now = now_ms();
-        self.last_sent = Some(now_instant);
-        self.last_keepalive_sent = Some(now_instant);
+        self.last_sent = Some(now);
+        self.last_keepalive_sent = Some(now);
         // Only set waiting flag and timestamp when we intend to measure RTT
         if !self.rtt.waiting_for_keepalive_response
             && (self.rtt.last_rtt_measurement_ms == 0
@@ -403,7 +401,7 @@ impl SrtlaConnection {
 
     pub async fn send_srtla_packet(&mut self, pkt: &[u8]) -> Result<()> {
         self.socket.send(pkt).await?;
-        self.last_sent = Some(Instant::now());
+        self.last_sent = Some(now_ms());
         Ok(())
     }
 
@@ -468,7 +466,7 @@ impl SrtlaConnection {
 
         match self.last_keepalive_sent {
             None => true,
-            Some(last) => last.elapsed().as_secs() >= IDLE_TIME,
+            Some(last) => now_ms().saturating_sub(last) >= IDLE_TIME * 1000,
         }
     }
 
@@ -588,35 +586,34 @@ impl SrtlaConnection {
 
     /// Whether this link has gone silent past `CONN_TIMEOUT`.
     ///
-    /// `last_received` is a `tokio::time::Instant`, so every `elapsed()` read below
-    /// honors `tokio::time::pause()`/`advance()`: the timeout is deterministically
-    /// testable under `#[tokio::test(start_paused = true)]` with no wall-clock sleep.
-    /// Keep these reads on `tokio::time::Instant` (never `std::time::Instant`) or the
-    /// fake-clock tests silently regress to real time.
+    /// `last_received` is a `now_ms()` monotonic millisecond stamp (the single
+    /// clock this whole codebase runs on), so the timeout is a plain difference
+    /// against `now_ms()`. Tests drive it by stamping `last_received` a chosen
+    /// interval in the past (e.g. `now_ms() - (CONN_TIMEOUT + 1) * 1000`); they
+    /// no longer advance a tokio virtual clock, because this reads the monotonic
+    /// clock directly, not `tokio::time::Instant`.
     #[inline(always)]
     pub fn is_timed_out(&self) -> bool {
+        let now = now_ms();
         // During initial registration (not yet connected), allow grace period
         if !self.connected {
             // If this connection was never established (connection_established_ms == 0),
             // check if we're still within the startup grace period
-            if self.reconnection.connection_established_ms == 0 {
-                let now = now_ms();
-                if now < self.reconnection.startup_grace_deadline_ms {
-                    return false;
-                }
+            if self.reconnection.connection_established_ms == 0
+                && now < self.reconnection.startup_grace_deadline_ms
+            {
+                return false;
             }
             // After grace period, or for connections that were previously established,
             // if we've never received anything or haven't received in a while, consider it timed out
-            return self.last_received.is_none()
-                || self
-                    .last_received
-                    .map(|lr| lr.elapsed().as_secs() >= CONN_TIMEOUT)
-                    .unwrap_or(true);
+            return self
+                .last_received
+                .is_none_or(|lr| now.saturating_sub(lr) >= CONN_TIMEOUT * 1000);
         }
 
         // For established connections, check normal timeout
         if let Some(lr) = self.last_received {
-            lr.elapsed().as_secs() >= CONN_TIMEOUT
+            now.saturating_sub(lr) >= CONN_TIMEOUT * 1000
         } else {
             false
         }

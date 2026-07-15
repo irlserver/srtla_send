@@ -111,15 +111,16 @@ pub(crate) fn log_connection_status(
             s => s.to_string().into(),
         };
 
-        // Use elapsed seconds directly
+        // Elapsed since the monotonic ms stamp.
+        let now = now_ms();
         let last_recv = conn
             .last_received
-            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
+            .map(|t| format!("{:.1}s ago", now.saturating_sub(t) as f64 / 1000.0))
             .unwrap_or_else(|| "never".into());
 
         let last_send = conn
             .last_sent
-            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
+            .map(|t| format!("{:.1}s ago", now.saturating_sub(t) as f64 / 1000.0))
             .unwrap_or_else(|| "never".into());
 
         info!(

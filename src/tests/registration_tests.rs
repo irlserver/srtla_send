@@ -1,12 +1,11 @@
 #[cfg(test)]
 mod tests {
 
-    use tokio::time::Duration;
 
     use crate::connection::STARTUP_GRACE_MS;
     use crate::protocol::*;
     use crate::registration::*;
-    use crate::test_helpers::{advance_test_clock, create_test_connection};
+    use crate::test_helpers::create_test_connection;
     use crate::utils::now_ms;
 
     #[test]
@@ -347,7 +346,7 @@ mod tests {
         let mut connections = vec![create_test_connection().await];
 
         connections[0].connected = true;
-        connections[0].last_received = Some(tokio::time::Instant::now());
+        connections[0].last_received = Some(now_ms());
         reg.update_active_connections(&connections);
 
         let initial_target = reg.reg1_target_idx();
@@ -619,28 +618,32 @@ mod tests {
         );
     }
 
-    // A fresh link (last_received == None, not yet connected, within startup
-    // grace) drives registration, never reconnection, even after the virtual
-    // clock passes CONN_TIMEOUT. is_timed_out() reads tokio::time::Instant,
-    // honoring the paused clock.
-    #[tokio::test(start_paused = true)]
+    // A fresh link (last_received == None, not yet connected) drives registration,
+    // never reconnection, while it is inside its startup grace window. is_timed_out
+    // compares now_ms() against the grace deadline, so the test picks the deadline
+    // rather than advancing a virtual clock.
+    #[tokio::test]
     async fn fresh_link_not_timed_out() {
         let mut conn = create_test_connection().await;
 
         conn.connected = false;
         conn.last_received = None;
         conn.reconnection.connection_established_ms = 0;
-        conn.reconnection.startup_grace_deadline_ms = now_ms() + STARTUP_GRACE_MS;
 
+        // Within the grace window: never-received link is not timed out, so
+        // housekeeping keeps driving registration instead of reconnection.
+        conn.reconnection.startup_grace_deadline_ms = now_ms() + STARTUP_GRACE_MS;
         assert!(
             !conn.is_timed_out(),
-            "fresh never-received link must NOT be timed out before any data"
+            "fresh never-received link within grace must NOT be timed out"
         );
 
-        advance_test_clock(Duration::from_secs(CONN_TIMEOUT + 1)).await;
+        // Past the grace deadline: a never-established link that never received
+        // data is now timed out, which is what drives re-registration.
+        conn.reconnection.startup_grace_deadline_ms = now_ms().saturating_sub(1);
         assert!(
-            !conn.is_timed_out(),
-            "fresh link must stay not-timed-out even past CONN_TIMEOUT of virtual time"
+            conn.is_timed_out(),
+            "a fresh link past its startup grace deadline must be timed out"
         );
     }
 }

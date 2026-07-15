@@ -2,7 +2,6 @@
 mod tests {
     use std::time::Duration;
 
-    use tokio::time::Instant;
 
     use crate::protocol::*;
     use crate::sender::{SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker, attribute_nak};
@@ -359,12 +358,14 @@ mod tests {
         // Should need keepalive initially (last_keepalive_sent is None)
         assert!(conn.needs_keepalive());
 
+        let now = now_ms();
+
         // After sending keepalive, should not need immediately
-        conn.last_keepalive_sent = Some(Instant::now());
+        conn.last_keepalive_sent = Some(now);
         assert!(!conn.needs_keepalive());
 
-        // After timeout, should need again (simulate 2 seconds ago)
-        conn.last_keepalive_sent = Some(Instant::now() - Duration::from_secs(IDLE_TIME + 1));
+        // After timeout, should need again (stamp IDLE_TIME + 1 seconds in the past)
+        conn.last_keepalive_sent = Some(now - (IDLE_TIME + 1) * 1000);
         assert!(conn.needs_keepalive());
     }
 
@@ -441,10 +442,8 @@ mod tests {
         // Fresh connection should not be timed out
         assert!(!conn.is_timed_out());
 
-        // Simulate old last_received time
-        use std::time::Duration;
-        conn.last_received =
-            tokio::time::Instant::now().checked_sub(Duration::from_secs(CONN_TIMEOUT + 1));
+        // Stamp last_received CONN_TIMEOUT + 1 seconds in the past.
+        conn.last_received = Some(now_ms() - (CONN_TIMEOUT + 1) * 1000);
         assert!(conn.is_timed_out());
 
         // Disconnected connection should be timed out
@@ -452,31 +451,36 @@ mod tests {
         assert!(conn.is_timed_out());
     }
 
-    /// Deterministic timeout via the fake clock: a fresh (connected) link is not
-    /// timed out, but advancing the paused virtual clock past `CONN_TIMEOUT` flips
-    /// it. No real sleep is involved, so this completes in well under a millisecond.
-    #[tokio::test(start_paused = true)]
-    async fn fake_clock_timeout() {
-        let conn = create_test_connection().await;
-        // last_received is "now" on the paused clock: not yet timed out.
-        assert!(!conn.is_timed_out());
+    /// Deterministic timeout on the single monotonic clock: `is_timed_out` reads
+    /// `now_ms()` and compares against the `last_received` stamp, so the test picks
+    /// the stamp instead of advancing a virtual clock. A stamp within `CONN_TIMEOUT`
+    /// is live; one past the window trips it. Completes in microseconds, no sleep.
+    #[test]
+    fn monotonic_clock_timeout() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let now = now_ms();
 
-        // Jump the virtual clock just past the timeout window.
-        advance_test_clock(Duration::from_secs(CONN_TIMEOUT + 1)).await;
+        conn.last_received = Some(now);
+        assert!(!conn.is_timed_out(), "a just-received link is live");
+
+        conn.last_received = Some(now - (CONN_TIMEOUT + 1) * 1000);
         assert!(
             conn.is_timed_out(),
-            "advancing past CONN_TIMEOUT must mark the link timed out"
+            "a stamp past CONN_TIMEOUT must mark the link timed out"
         );
     }
 
-    /// Frozen clock: with no time advanced, the same fresh link never times out.
-    /// Guards against an accidental wall-clock dependency creeping into is_timed_out().
-    #[tokio::test(start_paused = true)]
-    async fn clock_frozen_no_timeout() {
-        let conn = create_test_connection().await;
+    /// A freshly created connected link is not timed out: its `last_received` stamp
+    /// is essentially `now_ms()`, so the monotonic difference is far below
+    /// `CONN_TIMEOUT`. Guards against the timeout tripping on a live link.
+    #[test]
+    fn fresh_link_not_timed_out_yet() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let conn = rt.block_on(create_test_connection());
         assert!(
             !conn.is_timed_out(),
-            "a frozen clock must never trip the timeout"
+            "a freshly created link must not be timed out"
         );
     }
 

@@ -151,7 +151,7 @@ pub async fn run_sender_with_config(
     // Zero-allocation ring buffer for sequence tracking
     let mut seq_tracker = SequenceTracker::new();
     let mut last_selected_idx: Option<usize> = None;
-    let mut all_failed_at: Option<Instant> = None;
+    let mut all_failed_at: Option<u64> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
     // Enhanced selection as an admission gate.
@@ -172,6 +172,7 @@ pub async fn run_sender_with_config(
             &mut connections,
             &mut reg,
             classic,
+            crate::utils::now_ms(),
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
@@ -247,6 +248,7 @@ pub async fn run_sender_with_config(
                             &mut connections,
                             &mut reg,
                             classic,
+                            crate::utils::now_ms(),
                             &mut all_failed_at,
                             &mut reader_handles,
                             &packet_tx,
