@@ -21,6 +21,8 @@ pub mod ewma;
 pub mod kalman;
 pub mod metrics;
 pub mod mode;
+// Uplink socket I/O (shell): batched UDP socket + egress binders.
+pub mod net;
 pub mod priority;
 pub mod priority_listener;
 // The wire protocol lives in its own dependency-free crate. Alias it as

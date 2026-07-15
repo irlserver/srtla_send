@@ -15,6 +15,7 @@ mod ewma;
 mod kalman;
 mod metrics;
 mod mode;
+mod net;
 mod priority;
 mod priority_listener;
 // Wire protocol lives in its own dependency-free crate; alias it as `protocol`
@@ -212,8 +213,8 @@ async fn main() -> Result<()> {
 
     // The CLI binds each uplink by its source IP, which on a multi-homed host
     // selects the egress via source-based routing.
-    let binder: std::sync::Arc<dyn connection::UplinkBinder> =
-        std::sync::Arc::new(connection::SourceIpBinder);
+    let binder: std::sync::Arc<dyn net::UplinkBinder> =
+        std::sync::Arc::new(net::SourceIpBinder);
 
     sender::run_sender_with_config(
         local_srt_port,

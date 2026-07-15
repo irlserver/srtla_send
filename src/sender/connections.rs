@@ -8,9 +8,8 @@ use tracing::{info, warn};
 
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIo, ConnIoMap};
-use crate::connection::{
-    BatchUdpSocket, SrtlaConnection, UplinkBinder, create_uplink_socket, resolve_remote,
-};
+use crate::connection::SrtlaConnection;
+use crate::net::{BatchUdpSocket, UplinkBinder, create_uplink_socket, resolve_remote};
 use crate::utils::now_ms;
 
 pub struct PendingConnectionChanges {

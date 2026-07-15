@@ -412,7 +412,7 @@ pub async fn forward_via_connection(
 /// for recovery, which clears the optimistically-registered in-flight packets.
 async fn send_connection_batch(
     conn: &mut SrtlaConnection,
-    socket: &crate::connection::BatchUdpSocket,
+    socket: &crate::net::BatchUdpSocket,
 ) -> std::io::Result<()> {
     let now = crate::utils::now_ms();
     let batch = conn.take_batch(now);
@@ -420,7 +420,7 @@ async fn send_connection_batch(
         return Ok(());
     }
     let bufs: SmallVec<&[u8], 32> = batch.iter().map(|(data, _, _)| data.as_slice()).collect();
-    crate::connection::send_all_datagrams(socket, &bufs).await
+    crate::net::send_all_datagrams(socket, &bufs).await
 }
 
 /// Flush all connection batches (called on timer or when needed)

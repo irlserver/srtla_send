@@ -1,17 +1,14 @@
 mod ack_nak;
-pub mod batch_recv;
 pub mod batch_send;
 mod bitrate;
 mod congestion;
 mod incoming;
 mod reconnection;
 mod rtt;
-mod socket;
 
 use std::net::IpAddr;
 
-pub use batch_recv::BatchUdpSocket;
-pub use batch_send::{BatchSender, DrainedPacket, send_all_datagrams};
+pub use batch_send::{BATCH_SEND_SIZE, BatchSender, DrainedPacket};
 pub use bitrate::BitrateTracker;
 pub use congestion::CongestionControl;
 pub use incoming::SrtlaIncoming;
@@ -19,13 +16,6 @@ pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-// Host-side binder for platforms that steer egress by network handle (Android).
-// Exported for library consumers; the CLI binary does not construct it. Unix
-// only: it binds by raw fd, which Windows does not have.
-#[cfg(unix)]
-#[allow(unused_imports)]
-pub use socket::CallbackBinder;
-pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};
 use tracing::debug;
 
 use crate::protocol::*;
@@ -327,7 +317,7 @@ impl SrtlaConnection {
     ///
     /// Pure builder: registers each tracked packet as in-flight, stamps
     /// `last_sent`, and returns the queued datagrams. The shell sends them (see
-    /// [`batch_send::send_all_datagrams`]) and calls [`Self::mark_for_recovery`]
+    /// `net::send_all_datagrams`) and calls [`Self::mark_for_recovery`]
     /// if the send fails. In-flight registration is optimistic — a failed send
     /// triggers `mark_for_recovery`, which clears `packet_log` anyway, so the
     /// registrations never leak. Empty when nothing was queued.

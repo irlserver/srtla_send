@@ -493,8 +493,8 @@ mod tests {
         seq_tracker.insert(100, connections[1].conn_id, now);
         seq_tracker.insert(200, connections[2].conn_id, now);
 
-        let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
-            std::sync::Arc::new(crate::connection::SourceIpBinder);
+        let binder: std::sync::Arc<dyn crate::net::UplinkBinder> =
+            std::sync::Arc::new(crate::net::SourceIpBinder);
         // BatchUdpSocket::new registers with the Tokio reactor, so build the map
         // inside the runtime context.
         let mut conn_io = rt.block_on(async { create_test_conn_io_map(&connections) });
@@ -555,8 +555,8 @@ mod tests {
         ];
 
         // This will likely fail to connect but should not panic
-        let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
-            std::sync::Arc::new(crate::connection::SourceIpBinder);
+        let binder: std::sync::Arc<dyn crate::net::UplinkBinder> =
+            std::sync::Arc::new(crate::net::SourceIpBinder);
         let mut conn_io = ConnIoMap::new();
         let connections =
             create_connections_from_ips(&ips, "127.0.0.1", 9999, &binder, &mut conn_io).await;

@@ -36,7 +36,10 @@
 use smallvec::SmallVec;
 use tracing::debug;
 
-use super::batch_recv::{BATCH_SEND_SIZE, BatchUdpSocket};
+/// Max datagrams per `sendmmsg` batch. Defined here (core) so the pure
+/// `drain()` return type and the shell's `net::send_all_datagrams` chunking
+/// agree on one value without core depending on the socket layer.
+pub const BATCH_SEND_SIZE: usize = 32;
 
 /// One drained datagram awaiting transmission: `(bytes, seq, queue_time_ms)`.
 /// `seq` is `Some` for tracked data packets and `None` for untracked ones; the
@@ -236,32 +239,6 @@ impl BatchSender {
         self.queue_times.clear();
         self.last_flush_ms = 0;
     }
-}
-
-/// Send every datagram to the connected peer, chunking into `sendmmsg` syscalls.
-///
-/// This is the I/O half of a batch flush, lifted out of the pure [`BatchSender`]
-/// into the shell. `sendmmsg` may accept fewer datagrams than offered (a short
-/// send once the socket buffer fills), so it loops until the whole batch is
-/// away. A no-progress send (`Ok(0)`) is treated as an error so the link is
-/// retried rather than livelocked.
-pub async fn send_all_datagrams(socket: &BatchUdpSocket, bufs: &[&[u8]]) -> std::io::Result<()> {
-    let total = bufs.len();
-    let mut sent = 0;
-    while sent < total {
-        let take = (total - sent).min(BATCH_SEND_SIZE);
-        match socket.send_batch(&bufs[sent..sent + take]).await {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "sendmmsg accepted no datagrams",
-                ));
-            }
-            Ok(n) => sent += n,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

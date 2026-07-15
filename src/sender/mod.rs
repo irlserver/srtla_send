@@ -75,7 +75,7 @@ pub async fn run_sender_with_config(
     shared_stats: SharedStats,
     critical_window: crate::priority::CriticalWindow,
     subscription_hub: crate::subscriptions::SubscriptionHub,
-    binder: std::sync::Arc<dyn crate::connection::UplinkBinder>,
+    binder: std::sync::Arc<dyn crate::net::UplinkBinder>,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}, mode={}",

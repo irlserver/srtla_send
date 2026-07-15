@@ -11,9 +11,10 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::time::Duration;
 
 use crate::connection::{
-    BatchSender, BatchUdpSocket, BitrateTracker, CachedQuality, CongestionControl, LinkPhase,
-    ReconnectionState, RttTracker, SourceIpBinder, SrtlaConnection,
+    BatchSender, BitrateTracker, CachedQuality, CongestionControl, LinkPhase, ReconnectionState,
+    RttTracker, SrtlaConnection,
 };
+use crate::net::{BatchUdpSocket, SourceIpBinder};
 use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
 use crate::sender::{ConnIo, ConnIoMap};
 use crate::utils::now_ms;

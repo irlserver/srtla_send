@@ -8,19 +8,15 @@
 //! Based on the rustorrent implementation:
 //! https://github.com/sebastiencs/rustorrent/blob/master/src/utp/udp_socket.rs
 
+// `BATCH_SEND_SIZE` is owned by the core (`connection::batch_send`) so the pure
+// drain and this socket layer agree without core depending on `net`.
+use crate::connection::BATCH_SEND_SIZE;
 use crate::protocol::MTU;
 
 /// Number of packets to receive in a single `recvmmsg` call.
 /// 32 is a good balance between syscall reduction and memory usage.
 #[cfg(target_os = "linux")]
 pub const BATCH_RECV_SIZE: usize = 32;
-
-/// Maximum datagrams per `sendmmsg` call. Matches the largest batch the
-/// send-side regime will accumulate (`BATCH_SIZE_HIGH_LOAD`), so a full
-/// batch always leaves in a single syscall. Defined on every platform, since
-/// `BatchSender::flush` chunks by it before calling `send_batch` and must
-/// compile identically on the non-Linux fallback path.
-pub const BATCH_SEND_SIZE: usize = 32;
 
 // ============================================================================
 // Linux implementation with recvmmsg
