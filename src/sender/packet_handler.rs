@@ -35,11 +35,13 @@ pub(crate) fn attribute_nak(
     if let Some(conn_id) = seq_tracker.get(nak, current_time_ms)
         && let Some(pos) = connections.iter().position(|c| c.conn_id == conn_id)
     {
-        return connections[pos].handle_nak(nak as i32).then_some(pos);
+        return connections[pos]
+            .handle_nak(nak as i32, current_time_ms)
+            .then_some(pos);
     }
 
     for (i, conn) in connections.iter_mut().enumerate() {
-        if conn.handle_nak(nak as i32) {
+        if conn.handle_nak(nak as i32, current_time_ms) {
             return Some(i);
         }
     }
@@ -79,15 +81,18 @@ pub async fn process_connection_events(
         return Ok(());
     }
 
+    // One monotonic read drives every ACK/NAK handler in this receive batch.
+    let current_time_ms = crate::utils::now_ms();
+
     for ack in incoming.ack_numbers.iter() {
         for c in connections.iter_mut() {
-            c.handle_srt_ack(*ack as i32);
+            c.handle_srt_ack(*ack as i32, current_time_ms);
         }
     }
 
     for srtla_ack in incoming.srtla_ack_numbers.iter() {
         for c in connections.iter_mut() {
-            if c.handle_srtla_ack_specific(*srtla_ack as i32, classic) {
+            if c.handle_srtla_ack_specific(*srtla_ack as i32, classic, current_time_ms) {
                 break;
             }
         }
@@ -96,8 +101,6 @@ pub async fn process_connection_events(
         }
     }
 
-    // Get current time once for all NAK processing
-    let current_time_ms = crate::utils::now_ms();
     for nak in incoming.nak_numbers.iter() {
         attribute_nak(connections, seq_tracker, *nak, current_time_ms);
     }

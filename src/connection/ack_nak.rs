@@ -2,7 +2,6 @@ use std::cmp::min;
 
 use super::SrtlaConnection;
 use crate::protocol::*;
-use crate::utils::now_ms;
 
 impl SrtlaConnection {
     /// Register a packet as in-flight. O(1) insert.
@@ -18,7 +17,7 @@ impl SrtlaConnection {
     /// - Tracks highest_acked_seq to skip already-processed ACKs
     /// - Only removes packets in the range (highest_acked_seq, ack]
     /// - O(k) where k is packets in range, not O(n) for entire log
-    pub fn handle_srt_ack(&mut self, ack: i32) {
+    pub fn handle_srt_ack(&mut self, ack: i32, now_ms: u64) {
         // Skip if this ACK doesn't advance our highest acked sequence
         // This handles duplicate ACKs and out-of-order ACKs efficiently
         if ack <= self.highest_acked_seq {
@@ -52,7 +51,7 @@ impl SrtlaConnection {
 
         // Update RTT estimate if we found the acked packet
         if let Some(sent_ms) = ack_send_time_ms {
-            let now = now_ms();
+            let now = now_ms;
             let rtt = now.saturating_sub(sent_ms);
             if rtt > 0 && rtt <= 10_000 {
                 self.rtt.update_estimate(rtt, now);
@@ -62,23 +61,19 @@ impl SrtlaConnection {
 
     /// Handle NAK for a specific sequence. O(1) remove.
     #[inline]
-    pub fn handle_nak(&mut self, seq: i32) -> bool {
+    pub fn handle_nak(&mut self, seq: i32, now_ms: u64) -> bool {
         let found = self.packet_log.remove(&seq).is_some();
         if found {
             self.in_flight_packets = self.packet_log.len() as i32;
-            // Ambient clock read at the connection layer (not the CongestionControl
-            // leaf, which is now clock-injected). This wrapper and its ~30 test
-            // callers are converted when the connection layer is threaded.
-            let now = now_ms();
             self.congestion
-                .handle_nak(&mut self.window, seq, &self.label, now);
+                .handle_nak(&mut self.window, seq, &self.label, now_ms);
         }
         found
     }
 
     /// Handle SRTLA ACK for a specific sequence. O(1) remove.
     #[inline]
-    pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool) -> bool {
+    pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool, now_ms: u64) -> bool {
         let found = self.packet_log.remove(&seq).is_some();
         if found {
             self.in_flight_packets = self.packet_log.len() as i32;
@@ -87,8 +82,7 @@ impl SrtlaConnection {
             // the strongest per-link proof it is still moving data. Stamped here
             // and at the keepalive-RTT site only (see `packet_io.rs`), never on
             // generic inbound bytes, so a stalled-but-echoing link stays stale.
-            let now = now_ms();
-            self.last_ack_or_rtt_sample_ms = now;
+            self.last_ack_or_rtt_sample_ms = now_ms;
 
             if classic_mode {
                 self.congestion.handle_srtla_ack_specific_classic(
@@ -102,7 +96,7 @@ impl SrtlaConnection {
                     &mut self.window,
                     self.in_flight_packets,
                     &self.label,
-                    now,
+                    now_ms,
                 );
             }
         }

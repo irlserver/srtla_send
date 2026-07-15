@@ -416,21 +416,21 @@ mod tests {
             connections[2].congestion.nak_count,
         ];
 
-        let found_0 = connections[0].handle_nak(100);
+        let found_0 = connections[0].handle_nak(100, now_ms());
         assert!(found_0);
         assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
         assert_eq!(connections[1].congestion.nak_count, initial_counts[1]);
         assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
-        let found_1 = connections[1].handle_nak(200);
+        let found_1 = connections[1].handle_nak(200, now_ms());
         assert!(found_1);
         assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
         assert_eq!(connections[1].congestion.nak_count, initial_counts[1] + 1);
         assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
-        let not_found_0 = connections[0].handle_nak(999);
-        let not_found_1 = connections[1].handle_nak(999);
-        let not_found_2 = connections[2].handle_nak(999);
+        let not_found_0 = connections[0].handle_nak(999, now_ms());
+        let not_found_1 = connections[1].handle_nak(999, now_ms());
+        let not_found_2 = connections[2].handle_nak(999, now_ms());
         assert!(!not_found_0);
         assert!(!not_found_1);
         assert!(!not_found_2);
