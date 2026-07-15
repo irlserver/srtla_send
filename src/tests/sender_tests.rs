@@ -11,7 +11,7 @@ mod tests {
     use crate::config::{ConfigSnapshot, DynamicConfig};
     use crate::mode::SchedulingMode;
     use crate::sender::*;
-    use crate::test_helpers::create_test_connections;
+    use crate::test_helpers::{create_test_conn_io_map, create_test_connections};
     use crate::utils::now_ms;
 
     #[test]
@@ -495,8 +495,12 @@ mod tests {
 
         let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
             std::sync::Arc::new(crate::connection::SourceIpBinder);
+        // BatchUdpSocket::new registers with the Tokio reactor, so build the map
+        // inside the runtime context.
+        let mut conn_io = rt.block_on(async { create_test_conn_io_map(&connections) });
         rt.block_on(apply_connection_changes(
             &mut connections,
+            &mut conn_io,
             &new_ips,
             "127.0.0.1",
             8080,
@@ -553,7 +557,9 @@ mod tests {
         // This will likely fail to connect but should not panic
         let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
             std::sync::Arc::new(crate::connection::SourceIpBinder);
-        let connections = create_connections_from_ips(&ips, "127.0.0.1", 9999, &binder).await;
+        let mut conn_io = ConnIoMap::new();
+        let connections =
+            create_connections_from_ips(&ips, "127.0.0.1", 9999, &binder, &mut conn_io).await;
 
         // Connections may be empty due to connection failures, which is OK for testing
         assert!(connections.len() <= ips.len());

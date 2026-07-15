@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::SrtlaConnection;
 use super::incoming::SrtlaIncoming;
@@ -11,43 +11,6 @@ use crate::protocol::*;
 use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
 
 impl SrtlaConnection {
-    pub async fn drain_incoming(
-        &mut self,
-        conn_idx: usize,
-        reg: &mut SrtlaRegistrationManager,
-        local_listener: &UdpSocket,
-        instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
-        client_addr: Option<SocketAddr>,
-    ) -> Result<SrtlaIncoming> {
-        let mut buf = [0u8; MTU];
-        let mut incoming = SrtlaIncoming::default();
-        loop {
-            match self.socket.try_recv(&mut buf) {
-                Ok(n) => {
-                    if n == 0 {
-                        break;
-                    }
-                    self.process_packet_internal(
-                        conn_idx,
-                        reg,
-                        local_listener,
-                        instant_forwarder,
-                        client_addr,
-                        &buf[..n],
-                        &mut incoming,
-                    )
-                    .await?;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => {
-                    warn!("read uplink error: {}", e);
-                    break;
-                }
-            }
-        }
-        Ok(incoming)
-    }
-
     pub async fn process_packet(
         &mut self,
         conn_idx: usize,

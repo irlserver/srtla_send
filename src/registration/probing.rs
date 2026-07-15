@@ -3,7 +3,7 @@ use tracing::{info, warn};
 
 use super::SrtlaRegistrationManager;
 use crate::connection::SrtlaConnection;
-use crate::protocol::SRTLA_ID_LEN;
+use crate::protocol::{SRTLA_ID_LEN, SRTLA_TYPE_REG2_LEN};
 use crate::utils::now_ms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,42 +22,39 @@ pub(super) struct ProbeResult {
 }
 
 impl SrtlaRegistrationManager {
-    pub async fn start_probing(&mut self, connections: &mut [SrtlaConnection]) {
+    /// Build a REG2 probe for every connection and advance into
+    /// `WaitingForProbes`. Pure: returns `(conn_idx, packet)` for each probe;
+    /// the shell transmits them on the matching sockets. Each probe is recorded
+    /// as sent at `now` (optimistic — a probe datagram the kernel drops is
+    /// handled by the probe-response timeout, not a send error). Returns empty
+    /// when probing has already started or is not applicable.
+    pub fn start_probing(
+        &mut self,
+        connections: &mut [SrtlaConnection],
+        now: u64,
+    ) -> SmallVec<(usize, [u8; SRTLA_TYPE_REG2_LEN]), 4> {
+        let mut probes = SmallVec::new();
         if self.probing_state != ProbingState::NotStarted || self.active_connections > 0 {
-            return;
+            return probes;
         }
 
         info!("Starting RTT probing for {} connections", connections.len());
         self.probing_state = ProbingState::Probing;
         self.probe_results.clear();
 
-        let probe_start_ms = now_ms();
-
         for (idx, conn) in connections.iter_mut().enumerate() {
-            let sent_ms = now_ms();
-            let pkt = conn.probe_reg2_packet(&self.probe_id, sent_ms);
-            match conn.socket.send(&pkt).await {
-                Ok(_) => {
-                    tracing::debug!(
-                        "Probe REG2 sent to connection #{} at T+{}ms",
-                        idx,
-                        sent_ms.saturating_sub(probe_start_ms)
-                    );
-                    self.probe_results.push(ProbeResult {
-                        conn_idx: idx,
-                        probe_sent_ms: sent_ms,
-                        rtt_ms: None,
-                    });
-                }
-                Err(e) => {
-                    warn!("Failed to send probe to connection #{}: {}", idx, e);
-                }
-            }
+            let pkt = conn.probe_reg2_packet(&self.probe_id, now);
+            probes.push((idx, pkt));
+            self.probe_results.push(ProbeResult {
+                conn_idx: idx,
+                probe_sent_ms: now,
+                rtt_ms: None,
+            });
         }
 
         if !self.probe_results.is_empty() {
             self.probing_state = ProbingState::WaitingForProbes;
-            self.pending_timeout_at_ms = now_ms() + 2000;
+            self.pending_timeout_at_ms = now + 2000;
             info!(
                 "Waiting for probe responses from {} connections",
                 self.probe_results.len()
@@ -65,11 +62,9 @@ impl SrtlaRegistrationManager {
         } else {
             warn!("No connections available for probing - using first connection as fallback");
             self.probing_state = ProbingState::Complete;
-            if !connections.is_empty() {
-                self.reg1_target_idx = Some(0);
-                self.reg1_next_send_at_ms = probe_start_ms;
-            }
         }
+
+        probes
     }
 
     pub fn handle_probe_response(&mut self, conn_idx: usize, now: u64) {

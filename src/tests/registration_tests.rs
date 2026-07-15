@@ -321,7 +321,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_probing_fallback_when_send_fails() {
+    async fn test_start_probing_emits_a_probe_per_connection() {
+        // Sends now lift to the shell, so `start_probing` can no longer fail to
+        // send: it optimistically records one probe per connection and enters
+        // `WaitingForProbes`. The fallback-when-no-response path is exercised by
+        // `test_check_probing_no_responses_uses_fallback` via the probe timeout.
         let mut reg = SrtlaRegistrationManager::new();
         let mut connections = vec![
             create_test_connection().await,
@@ -330,10 +334,10 @@ mod tests {
 
         assert_eq!(reg.reg1_target_idx(), None);
 
-        reg.start_probing(&mut connections).await;
+        let probes = reg.start_probing(&mut connections, now_ms());
 
-        assert_eq!(reg.reg1_target_idx(), Some(0));
-        assert!(!reg.is_probing());
+        assert_eq!(probes.len(), 2, "one probe packet queued per connection");
+        assert!(reg.is_probing(), "driver is now awaiting probe responses");
     }
 
     #[tokio::test]
@@ -346,7 +350,7 @@ mod tests {
         reg.update_active_connections(&connections);
 
         let initial_target = reg.reg1_target_idx();
-        reg.start_probing(&mut connections).await;
+        let _ = reg.start_probing(&mut connections, now_ms());
 
         assert_eq!(reg.reg1_target_idx(), initial_target);
         assert!(!reg.is_probing());

@@ -53,6 +53,11 @@ use tokio::net::UdpSocket;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{self, Duration, Instant};
 use tracing::{debug, info, warn};
+pub use uplink::ConnIoMap;
+// `ConnIo` is constructed only by tests (production builds it inside
+// `connections::connect_uplink`); re-export it just for the test surface.
+#[cfg(any(test, feature = "test-internals"))]
+pub use uplink::ConnIo;
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 
 use crate::config::DynamicConfig;
@@ -94,8 +99,12 @@ pub async fn run_sender_with_config(
         return Err(anyhow!("no IPs in list: {}", ips_file));
     }
 
+    // Shell-owned I/O half of every connection, keyed by conn_id (never by
+    // index — so no lockstep with the connections vec through add/remove).
+    let mut conn_io: ConnIoMap = std::collections::HashMap::new();
     let mut connections =
-        create_connections_from_ips(&ips, receiver_host, receiver_port, &binder).await;
+        create_connections_from_ips(&ips, receiver_host, receiver_port, &binder, &mut conn_io)
+            .await;
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
@@ -107,11 +116,19 @@ pub async fn run_sender_with_config(
 
     let mut reg = SrtlaRegistrationManager::new();
 
-    reg.start_probing(&mut connections).await;
+    // Send the initial RTT probes the (pure) probing state machine emitted.
+    let probes = reg.start_probing(&mut connections, crate::utils::now_ms());
+    for (idx, pkt) in probes {
+        if let Some(conn) = connections.get(idx)
+            && let Some(io) = conn_io.get(&conn.conn_id)
+        {
+            let _ = io.socket.send(&pkt).await;
+        }
+    }
 
     let (packet_tx, mut packet_rx) = create_uplink_channel();
     let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
-    sync_readers(&connections, &mut reader_handles, &packet_tx);
+    sync_readers(&connections, &conn_io, &mut reader_handles, &packet_tx);
 
     // Create instant ACK forwarding channel (sends client addr with packet)
     let (instant_tx, mut instant_rx) =
@@ -170,6 +187,7 @@ pub async fn run_sender_with_config(
         let classic = config.mode().is_classic();
         if let Err(err) = handle_housekeeping(
             &mut connections,
+            &mut conn_io,
             &mut reg,
             classic,
             crate::utils::now_ms(),
@@ -195,6 +213,7 @@ pub async fn run_sender_with_config(
                             res,
                             &mut recv_buf,
                             &mut connections,
+                            &conn_io,
                             &mut last_selected_idx,
                             &mut seq_tracker,
                             &mut last_client_addr,
@@ -206,6 +225,7 @@ pub async fn run_sender_with_config(
                         drain_packet_queue(
                             &mut packet_rx,
                             &mut connections,
+                            &conn_io,
                             &mut reg,
                             &instant_tx,
                             last_client_addr,
@@ -221,6 +241,7 @@ pub async fn run_sender_with_config(
                             handle_uplink_packet(
                                 packet,
                                 &mut connections,
+                                &conn_io,
                                 &mut reg,
                                 &instant_tx,
                                 last_client_addr,
@@ -231,6 +252,7 @@ pub async fn run_sender_with_config(
                             drain_packet_queue(
                                 &mut packet_rx,
                                 &mut connections,
+                                &conn_io,
                                 &mut reg,
                                 &instant_tx,
                                 last_client_addr,
@@ -246,6 +268,7 @@ pub async fn run_sender_with_config(
                         let classic = config.mode().is_classic();
                         if let Err(err) = handle_housekeeping(
                             &mut connections,
+                            &mut conn_io,
                             &mut reg,
                             classic,
                             crate::utils::now_ms(),
@@ -298,6 +321,7 @@ pub async fn run_sender_with_config(
                             info!("applying queued connection changes: {} IPs", new_ips.len());
                             apply_connection_changes(
                                 &mut connections,
+                                &mut conn_io,
                                 &new_ips,
                                 &changes.receiver_host,
                                 changes.receiver_port,
@@ -306,7 +330,7 @@ pub async fn run_sender_with_config(
                                 &binder,
                             ).await;
                             info!("connection changes applied successfully");
-                            sync_readers(&connections, &mut reader_handles, &packet_tx);
+                            sync_readers(&connections, &conn_io, &mut reader_handles, &packet_tx);
                         }
 
                         status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
@@ -315,11 +339,12 @@ pub async fn run_sender_with_config(
                             status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                         }
 
-                        sync_readers(&connections, &mut reader_handles, &packet_tx);
+                        sync_readers(&connections, &conn_io, &mut reader_handles, &packet_tx);
                         let config_snap = config.snapshot();
                         drain_packet_queue(
                             &mut packet_rx,
                             &mut connections,
+                            &conn_io,
                             &mut reg,
                             &instant_tx,
                             last_client_addr,
@@ -331,7 +356,7 @@ pub async fn run_sender_with_config(
                     }
                     $($sighup_branch)*
                     _ = batch_flush_timer.tick() => {
-                        flush_all_batches(&mut connections).await;
+                        flush_all_batches(&mut connections, &conn_io).await;
                     }
                 }
             }
@@ -370,6 +395,7 @@ pub async fn run_sender_with_config(
             drain_packet_queue(
                 &mut packet_rx,
                 &mut connections,
+                &conn_io,
                 &mut reg,
                 &instant_tx,
                 last_client_addr,

@@ -8,7 +8,7 @@ use tracing::{debug, trace, warn};
 
 use super::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
-use super::uplink::UplinkPacket;
+use super::uplink::{ConnIoMap, UplinkPacket};
 use crate::config::ConfigSnapshot;
 use crate::connection::{SrtlaConnection, SrtlaIncoming};
 use crate::protocol;
@@ -52,25 +52,15 @@ pub(crate) fn attribute_nak(
 pub async fn process_connection_events(
     idx: usize,
     connections: &mut [SrtlaConnection],
-    reg: &mut SrtlaRegistrationManager,
-    instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
     classic: bool,
-    incoming_override: Option<SrtlaIncoming>,
+    incoming: SrtlaIncoming,
 ) -> Result<()> {
     if idx >= connections.len() {
         return Ok(());
     }
-
-    let incoming = if let Some(overridden) = incoming_override {
-        overridden
-    } else {
-        connections[idx]
-            .drain_incoming(idx, reg, local_listener, instant_tx, last_client_addr)
-            .await?
-    };
 
     if !incoming.read_any
         && incoming.ack_numbers.is_empty()
@@ -118,6 +108,7 @@ pub async fn process_connection_events(
 pub async fn handle_uplink_packet(
     packet: UplinkPacket,
     connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
@@ -142,8 +133,10 @@ pub async fn handle_uplink_packet(
         {
             Ok(mut incoming) => {
                 // Flush the deferred immediate-REG1 effect on this link's socket.
-                if let Some(pkt) = incoming.reg1_send.take() {
-                    match connections[idx].socket.send(&pkt).await {
+                if let Some(pkt) = incoming.reg1_send.take()
+                    && let Some(io) = conn_io.get(&connections[idx].conn_id)
+                {
+                    match io.socket.send(&pkt).await {
                         Ok(_) => connections[idx].note_sent(crate::utils::now_ms()),
                         Err(e) => {
                             warn!("{}: failed to send immediate REG1: {e}", connections[idx].label)
@@ -153,13 +146,11 @@ pub async fn handle_uplink_packet(
                 if let Err(err) = process_connection_events(
                     idx,
                     connections,
-                    reg,
-                    instant_tx,
                     last_client_addr,
                     local_listener,
                     seq_tracker,
                     config_snap.mode.is_classic(),
-                    Some(incoming),
+                    incoming,
                 )
                 .await
                 {
@@ -183,6 +174,7 @@ const MAX_DRAIN_PACKETS: usize = 64;
 pub async fn drain_packet_queue(
     packet_rx: &mut UnboundedReceiver<UplinkPacket>,
     connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
@@ -199,6 +191,7 @@ pub async fn drain_packet_queue(
                 handle_uplink_packet(
                     packet,
                     connections,
+                    conn_io,
                     reg,
                     instant_tx,
                     last_client_addr,
@@ -256,6 +249,7 @@ pub async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
     last_selected_idx: &mut Option<usize>,
     seq_tracker: &mut SequenceTracker,
     last_client_addr: &mut Option<SocketAddr>,
@@ -282,6 +276,7 @@ pub async fn handle_srt_packet(
                         pkt,
                         seq,
                         connections,
+                        conn_io,
                         last_selected_idx,
                         seq_tracker,
                         packet_time_ms,
@@ -323,6 +318,7 @@ pub async fn handle_srt_packet(
                     pkt,
                     seq,
                     connections,
+                    conn_io,
                     last_selected_idx,
                     seq_tracker,
                     packet_time_ms,
@@ -343,6 +339,7 @@ pub async fn forward_via_connection(
     pkt: &[u8],
     seq: Option<u32>,
     connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
     last_selected_idx: &mut Option<usize>,
     seq_tracker: &mut SequenceTracker,
     packet_time_ms: u64,
@@ -394,9 +391,11 @@ pub async fn forward_via_connection(
     }
 
     // Flush if batch threshold reached
-    if needs_flush {
+    if needs_flush
+        && let Some(io) = conn_io.get(&connections[sel_idx].conn_id)
+    {
         let conn = &mut connections[sel_idx];
-        if let Err(e) = send_connection_batch(conn).await {
+        if let Err(e) = send_connection_batch(conn, &io.socket).await {
             warn!(
                 "{}: batch flush failed, marking for recovery: {}",
                 conn.label, e
@@ -411,21 +410,24 @@ pub async fn forward_via_connection(
 /// The pure `take_batch` half (queue drain + in-flight registration) lives on
 /// `SrtlaConnection`; this is the I/O half. On error the caller marks the link
 /// for recovery, which clears the optimistically-registered in-flight packets.
-async fn send_connection_batch(conn: &mut SrtlaConnection) -> std::io::Result<()> {
+async fn send_connection_batch(
+    conn: &mut SrtlaConnection,
+    socket: &crate::connection::BatchUdpSocket,
+) -> std::io::Result<()> {
     let now = crate::utils::now_ms();
     let batch = conn.take_batch(now);
     if batch.is_empty() {
         return Ok(());
     }
     let bufs: SmallVec<&[u8], 32> = batch.iter().map(|(data, _, _)| data.as_slice()).collect();
-    crate::connection::send_all_datagrams(&conn.socket, &bufs).await
+    crate::connection::send_all_datagrams(socket, &bufs).await
 }
 
 /// Flush all connection batches (called on timer or when needed)
 ///
 /// Optimized with early exit: first check if any connection has queued packets
 /// before iterating. This avoids work on the 15ms timer when traffic is idle.
-pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
+pub async fn flush_all_batches(connections: &mut [SrtlaConnection], conn_io: &ConnIoMap) {
     // One monotonic read drives the flush-window check for every connection.
     let now = crate::utils::now_ms();
 
@@ -442,7 +444,8 @@ pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
     // Now do the actual flush for connections that need it
     for conn in connections.iter_mut() {
         if (conn.needs_batch_flush(now) || conn.has_queued_packets())
-            && let Err(e) = send_connection_batch(conn).await
+            && let Some(io) = conn_io.get(&conn.conn_id)
+            && let Err(e) = send_connection_batch(conn, &io.socket).await
         {
             warn!("{}: periodic batch flush failed: {}", conn.label, e);
         }

@@ -9,10 +9,8 @@ mod reconnection;
 mod rtt;
 mod socket;
 
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::net::IpAddr;
 
-use anyhow::Result;
 pub use batch_recv::BatchUdpSocket;
 pub use batch_send::{BatchSender, DrainedPacket, send_all_datagrams};
 pub use bitrate::BitrateTracker;
@@ -32,7 +30,6 @@ pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_rem
 use tracing::debug;
 
 use crate::protocol::*;
-use crate::utils::now_ms;
 
 pub(crate) const STARTUP_GRACE_MS: u64 = 5_000;
 
@@ -139,15 +136,6 @@ impl Default for CachedQuality {
 
 pub struct SrtlaConnection {
     pub(crate) conn_id: u64,
-    #[cfg(feature = "test-internals")]
-    pub socket: Arc<BatchUdpSocket>,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) socket: Arc<BatchUdpSocket>,
-    #[allow(dead_code)]
-    #[cfg(feature = "test-internals")]
-    pub remote: SocketAddr,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) remote: SocketAddr,
     #[allow(dead_code)]
     #[cfg(feature = "test-internals")]
     pub local_ip: IpAddr,
@@ -255,35 +243,20 @@ pub struct SrtlaConnection {
     /// `is_timed_out`/`CONN_TIMEOUT`); a gated link keeps a trickle of
     /// traffic so the loss EWMA can recover and clear the latch.
     pub(crate) loss_degraded: bool,
-    /// Strategy for steering this uplink's socket onto its egress path.
-    /// Retained so reconnects re-apply the same binding (source IP on Linux,
-    /// host `Network.bindSocket` callback on Android).
-    pub(crate) binder: Arc<dyn UplinkBinder>,
 }
 
 impl SrtlaConnection {
-    pub async fn connect_from_ip(
-        ip: IpAddr,
-        host: &str,
-        port: u16,
-        binder: Arc<dyn UplinkBinder>,
-    ) -> Result<Self> {
-        use rand::RngCore;
-
-        let remote = resolve_remote(host, port).await?;
-        let sock = create_uplink_socket(ip)?;
-        binder.bind(&sock, ip)?;
-        sock.connect(&remote.into())?;
-        sock.set_nonblocking(true)?;
-        let socket = Arc::new(BatchUdpSocket::new(sock)?);
-        let now = now_ms();
-        let startup_deadline = now + STARTUP_GRACE_MS;
-        Ok(Self {
-            conn_id: rand::rng().next_u64(),
-            socket,
-            remote,
-            local_ip: ip,
-            label: format!("{}:{} via {}", host, port, ip),
+    /// Build a fresh, socket-free connection in the `Registering` phase.
+    ///
+    /// Pure: the shell creates the socket and the matching `ConnIo` separately
+    /// (see `sender::connections::connect_uplink`) and stores them under this
+    /// `conn_id`. `now` anchors the startup grace window and the bitrate
+    /// tracker; `conn_id` is generated shell-side so it can key the I/O map.
+    pub fn new_registering(conn_id: u64, label: String, local_ip: IpAddr, now: u64) -> Self {
+        Self {
+            conn_id,
+            local_ip,
+            label,
             connected: false,
             window: WINDOW_DEF * WINDOW_MULT,
             in_flight_packets: 0,
@@ -298,7 +271,7 @@ impl SrtlaConnection {
             congestion: CongestionControl::default(),
             bitrate: BitrateTracker::new(now),
             reconnection: ReconnectionState {
-                startup_grace_deadline_ms: startup_deadline,
+                startup_grace_deadline_ms: now + STARTUP_GRACE_MS,
                 ..Default::default()
             },
             quality_cache: CachedQuality::default(),
@@ -308,8 +281,7 @@ impl SrtlaConnection {
             cc_backing_off: false,
             cc_target_bps: 0,
             loss_degraded: false,
-            binder,
-        })
+        }
     }
 
     #[inline(always)]
@@ -752,10 +724,12 @@ impl SrtlaConnection {
         self.batch_sender.set_regime(regime);
     }
 
-    /// Reset connection state after socket replacement.
-    /// Full reset: clears all state including congestion/bitrate stats.
-    fn reset_state(&mut self) {
-        let now = now_ms();
+    /// Reset connection state after the shell replaced this link's socket.
+    /// Full reset: clears all state including congestion/bitrate stats. `now`
+    /// is the injected clock (was an ambient `now_ms()` read). Socket creation
+    /// and the `mark_reconnect_success`/grace-reset bookkeeping live in the
+    /// shell's `reconnect_uplink`.
+    pub fn reset_for_reconnect(&mut self, now: u64) {
         self.last_received = None;
         self.reset_core_state();
 
@@ -767,23 +741,5 @@ impl SrtlaConnection {
         // Reset reconnection tracking
         self.reconnection.last_reconnect_attempt_ms = now;
         self.reconnection.reconnect_failure_count = 0;
-    }
-
-    pub async fn reconnect(&mut self) -> Result<()> {
-        let sock = create_uplink_socket(self.local_ip)?;
-        self.binder.bind(&sock, self.local_ip)?;
-        sock.connect(&self.remote.into())?;
-        sock.set_nonblocking(true)?;
-        let socket = BatchUdpSocket::new(sock)?;
-        self.socket = Arc::new(socket);
-
-        self.reset_state();
-
-        // Don't reset connection_established_ms for reconnections - only set when REG3
-        // is received
-        self.mark_reconnect_success();
-        // Connection-layer ambient read; ReconnectionState is clock-injected.
-        self.reconnection.reset_startup_grace(now_ms());
-        Ok(())
     }
 }
