@@ -57,7 +57,7 @@ fn create_connection_from_socket(
         stall_gated: false,
         rtt: RttTracker::default(),
         congestion: CongestionControl::default(),
-        bitrate: BitrateTracker::default(),
+        bitrate: BitrateTracker::new(now_ms()),
         reconnection: ReconnectionState {
             connection_established_ms: now_ms(),
             startup_grace_deadline_ms: now_ms(),

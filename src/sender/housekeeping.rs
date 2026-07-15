@@ -98,8 +98,8 @@ pub async fn handle_housekeeping(
         if !classic {
             conn.perform_window_recovery();
         }
-        // Update bitrate calculation (from Android C implementation)
-        conn.calculate_bitrate();
+        // Update bitrate calculation
+        conn.calculate_bitrate(current_ms);
         // Drive link lifecycle phase transitions
         conn.update_phase();
         // Adapt the per-connection batch-send regime to the observed

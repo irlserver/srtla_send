@@ -276,7 +276,8 @@ impl SrtlaConnection {
         sock.connect(&remote.into())?;
         sock.set_nonblocking(true)?;
         let socket = Arc::new(BatchUdpSocket::new(sock)?);
-        let startup_deadline = now_ms() + STARTUP_GRACE_MS;
+        let now = now_ms();
+        let startup_deadline = now + STARTUP_GRACE_MS;
         Ok(Self {
             conn_id: rand::rng().next_u64(),
             socket,
@@ -295,7 +296,7 @@ impl SrtlaConnection {
             stall_gated: false,
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
-            bitrate: BitrateTracker::default(),
+            bitrate: BitrateTracker::new(now),
             reconnection: ReconnectionState {
                 startup_grace_deadline_ms: startup_deadline,
                 ..Default::default()
@@ -719,8 +720,8 @@ impl SrtlaConnection {
     }
 
     /// Calculate current bitrate
-    pub fn calculate_bitrate(&mut self) {
-        self.bitrate.calculate();
+    pub fn calculate_bitrate(&mut self, now_ms: u64) {
+        self.bitrate.calculate(now_ms);
     }
 
     /// Get current bitrate in Mbps
@@ -741,16 +742,17 @@ impl SrtlaConnection {
     /// Reset connection state after socket replacement.
     /// Full reset: clears all state including congestion/bitrate stats.
     fn reset_state(&mut self) {
+        let now = now_ms();
         self.last_received = None;
         self.reset_core_state();
 
         // Reset submodule state
         self.congestion.reset();
         self.rtt.reset();
-        self.bitrate.reset();
+        self.bitrate.reset(now);
 
         // Reset reconnection tracking
-        self.reconnection.last_reconnect_attempt_ms = now_ms();
+        self.reconnection.last_reconnect_attempt_ms = now;
         self.reconnection.reconnect_failure_count = 0;
     }
 
