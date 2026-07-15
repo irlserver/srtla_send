@@ -14,6 +14,8 @@
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod config;
+// Pure hot-path config snapshot (core), split from the shell-coupled `config`.
+pub mod config_snapshot;
 pub mod connection;
 pub mod control;
 pub mod control_socket;

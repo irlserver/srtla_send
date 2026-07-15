@@ -24,7 +24,7 @@ mod quality;
 // Re-export for backward compatibility
 pub use quality::calculate_quality_multiplier;
 
-use crate::config::ConfigSnapshot;
+use crate::config_snapshot::ConfigSnapshot;
 use crate::connection::SrtlaConnection;
 use crate::mode::SchedulingMode;
 
