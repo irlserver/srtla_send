@@ -31,7 +31,7 @@ mod tests {
         buf[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
 
         // Process REG_NGP from connection 1
-        let handled = reg.process_registration_packet(1, &buf);
+        let handled = reg.process_registration_packet(1, &buf, now_ms());
         assert!(handled.is_some());
         assert_eq!(reg.reg1_target_idx(), Some(1));
 
@@ -52,7 +52,7 @@ mod tests {
         modified_id[SRTLA_ID_LEN / 2..].fill(0xab); // Server modifies last half
         let buf = create_reg2_packet(&modified_id);
 
-        let handled = reg.process_registration_packet(0, &buf);
+        let handled = reg.process_registration_packet(0, &buf, now_ms());
         assert!(handled.is_some());
 
         // Should have updated the ID and set broadcast pending
@@ -72,7 +72,7 @@ mod tests {
         // Create REG3 packet
         let buf = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
 
-        let handled = reg.process_registration_packet(2, &buf);
+        let handled = reg.process_registration_packet(2, &buf, now_ms());
         assert!(handled.is_some());
 
         // REG3 should set has_connected flag
@@ -93,7 +93,7 @@ mod tests {
         let mut buf = vec![0u8; 4];
         buf[0..2].copy_from_slice(&SRTLA_TYPE_REG_ERR.to_be_bytes());
 
-        let handled = reg.process_registration_packet(1, &buf);
+        let handled = reg.process_registration_packet(1, &buf, now_ms());
         assert!(handled.is_some());
 
         // Should clear pending state and wait for a new REG_NGP before retrying
@@ -112,7 +112,7 @@ mod tests {
         let mut buf = vec![0u8; 4];
         buf[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
 
-        let handled = reg.process_registration_packet(0, &buf);
+        let handled = reg.process_registration_packet(0, &buf, now_ms());
         assert!(handled.is_none());
     }
 
@@ -123,7 +123,7 @@ mod tests {
 
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
-        reg.process_registration_packet(0, &ngp);
+        reg.process_registration_packet(0, &ngp, now_ms());
 
         // Should send REG1 to first connection when no connections are active
         reg.reg_driver_send_if_needed(&mut connections).await;
@@ -160,7 +160,7 @@ mod tests {
 
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
-        reg.process_registration_packet(0, &ngp);
+        reg.process_registration_packet(0, &ngp, now_ms());
 
         reg.reg_driver_send_if_needed(&mut connections).await;
         assert_eq!(reg.pending_reg2_idx(), Some(0));
@@ -248,7 +248,7 @@ mod tests {
 
         // Simulate multiple REG3 responses
         for i in 0..3 {
-            let handled = reg.process_registration_packet(i, &reg3_packet);
+            let handled = reg.process_registration_packet(i, &reg3_packet, now_ms());
             assert!(handled.is_some());
         }
 
@@ -289,7 +289,7 @@ mod tests {
 
         // After REG_NGP
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
-        reg.process_registration_packet(0, &ngp_packet);
+        reg.process_registration_packet(0, &ngp_packet, now_ms());
         assert_eq!(reg.reg1_target_idx(), Some(0));
 
         // Set up for REG2
@@ -299,14 +299,14 @@ mod tests {
         let mut modified_id = reg.srtla_id;
         modified_id[SRTLA_ID_LEN / 2..].fill(0xff);
         let reg2_packet = create_reg2_packet(&modified_id);
-        reg.process_registration_packet(0, &reg2_packet);
+        reg.process_registration_packet(0, &reg2_packet, now_ms());
 
         assert!(reg.broadcast_reg2_pending());
         assert_eq!(reg.pending_reg2_idx(), None);
 
         // Process REG3
         let reg3_packet = vec![0x92, 0x02];
-        reg.process_registration_packet(0, &reg3_packet);
+        reg.process_registration_packet(0, &reg3_packet, now_ms());
 
         assert!(reg.has_connected);
 
@@ -423,10 +423,10 @@ mod tests {
         reg.simulate_probe_result(1, 0);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
-        reg.handle_probe_response(0);
+        reg.handle_probe_response(0, now_ms());
 
         std::thread::sleep(std::time::Duration::from_millis(50));
-        reg.handle_probe_response(1);
+        reg.handle_probe_response(1, now_ms());
 
         let completed = reg.check_probing_complete();
 
@@ -444,7 +444,7 @@ mod tests {
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        reg.process_registration_packet(0, &ngp_packet);
+        reg.process_registration_packet(0, &ngp_packet, now_ms());
 
         assert!(reg.is_probing());
         assert_eq!(reg.probe_results_count(), 1);
@@ -462,7 +462,7 @@ mod tests {
         assert_eq!(reg.reg1_target_idx(), Some(0));
 
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
-        reg.process_registration_packet(1, &ngp_packet);
+        reg.process_registration_packet(1, &ngp_packet, now_ms());
 
         assert_eq!(reg.reg1_target_idx(), Some(1));
     }
@@ -479,7 +479,7 @@ mod tests {
 
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
-        reg.process_registration_packet(0, &ngp);
+        reg.process_registration_packet(0, &ngp, now_ms());
         reg.reg_driver_send_if_needed(&mut connections).await;
         assert_eq!(
             reg.pending_reg2_idx(),
@@ -490,7 +490,7 @@ mod tests {
         let sender_prefix = reg.srtla_id;
         let mut full_id = sender_prefix;
         full_id[SRTLA_ID_LEN / 2..].fill(0x5a);
-        reg.process_registration_packet(0, &create_reg2_packet(&full_id));
+        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
 
         assert_eq!(reg.srtla_id, full_id, "conn 0 adopts the receiver full_id");
         assert!(reg.broadcast_reg2_pending(), "REG2 broadcast queued");
@@ -511,7 +511,7 @@ mod tests {
         let reg3 = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
         for idx in 0..connections.len() {
             assert!(
-                reg.process_registration_packet(idx, &reg3).is_some(),
+                reg.process_registration_packet(idx, &reg3, now_ms()).is_some(),
                 "REG3 on conn {idx} handled"
             );
         }
@@ -532,7 +532,7 @@ mod tests {
         for b in full_id[half..].iter_mut() {
             *b = 0xc3;
         }
-        reg.process_registration_packet(0, &create_reg2_packet(&full_id));
+        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
 
         assert_eq!(
             &reg.srtla_id[..half],
@@ -597,7 +597,7 @@ mod tests {
         full_id[SRTLA_ID_LEN / 2..].fill(0x7e);
 
         let base = now_ms();
-        reg.process_registration_packet(0, &create_reg2_packet(&full_id));
+        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
 
         let deadline = reg.pending_timeout_at_ms();
         assert!(

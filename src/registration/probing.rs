@@ -70,12 +70,11 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    pub fn handle_probe_response(&mut self, conn_idx: usize) {
+    pub fn handle_probe_response(&mut self, conn_idx: usize, now: u64) {
         if self.probing_state != ProbingState::WaitingForProbes {
             return;
         }
 
-        let now = now_ms();
         if let Some(result) = self
             .probe_results
             .iter_mut()

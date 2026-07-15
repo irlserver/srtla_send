@@ -85,16 +85,17 @@ impl SrtlaRegistrationManager {
         &mut self,
         conn_idx: usize,
         buf: &[u8],
+        now_ms: u64,
     ) -> Option<RegistrationEvent> {
         match get_packet_type(buf) {
             Some(SRTLA_TYPE_REG_NGP) => {
                 debug!("REG_NGP from uplink #{}", conn_idx);
-                self.handle_reg_ngp(conn_idx);
+                self.handle_reg_ngp(conn_idx, now_ms);
                 Some(RegistrationEvent::RegNgp)
             }
             Some(SRTLA_TYPE_REG2) => {
                 debug!("REG2 from uplink #{} (len={})", conn_idx, buf.len());
-                self.handle_reg2(conn_idx, buf);
+                self.handle_reg2(conn_idx, buf, now_ms);
                 Some(RegistrationEvent::Reg2)
             }
             Some(SRTLA_TYPE_REG3) => {
@@ -104,7 +105,7 @@ impl SrtlaRegistrationManager {
             }
             Some(SRTLA_TYPE_REG_ERR) => {
                 debug!("REG_ERR from uplink #{}", conn_idx);
-                self.handle_reg_err(conn_idx);
+                self.handle_reg_err(conn_idx, now_ms);
                 Some(RegistrationEvent::RegErr)
             }
             _ => None,
@@ -154,16 +155,16 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    fn handle_reg_ngp(&mut self, conn_idx: usize) {
+    fn handle_reg_ngp(&mut self, conn_idx: usize, now_ms: u64) {
         if self.probing_state == ProbingState::WaitingForProbes {
-            self.handle_probe_response(conn_idx);
+            self.handle_probe_response(conn_idx, now_ms);
             return;
         }
 
         if self.active_connections == 0 && self.pending_reg2_idx.is_none() {
             debug!("REG_NGP from uplink #{} accepted as REG1 target", conn_idx);
             self.reg1_target_idx = Some(conn_idx);
-            self.reg1_next_send_at_ms = now_ms();
+            self.reg1_next_send_at_ms = now_ms;
         } else {
             debug!(
                 "REG_NGP from uplink #{} ignored (active connections present or pending)",
@@ -172,7 +173,7 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    fn handle_reg2(&mut self, conn_idx: usize, buf: &[u8]) {
+    fn handle_reg2(&mut self, conn_idx: usize, buf: &[u8], now_ms: u64) {
         if buf.len() < 2 + SRTLA_ID_LEN {
             return;
         }
@@ -184,7 +185,7 @@ impl SrtlaRegistrationManager {
                 conn_idx
             );
             self.pending_reg2_idx = None;
-            self.pending_timeout_at_ms = now_ms() + REG3_TIMEOUT * 1000;
+            self.pending_timeout_at_ms = now_ms + REG3_TIMEOUT * 1000;
             self.broadcast_reg2_pending = true;
             // stop sending REG1 until next REG_NGP
             self.reg1_target_idx = None;
@@ -196,7 +197,7 @@ impl SrtlaRegistrationManager {
         self.has_connected = true;
     }
 
-    fn handle_reg_err(&mut self, conn_idx: usize) {
+    fn handle_reg_err(&mut self, conn_idx: usize, now_ms: u64) {
         if self.pending_reg2_idx == Some(conn_idx) {
             debug!("REG_ERR for uplink #{} while awaiting REG2", conn_idx);
         } else {
@@ -207,7 +208,7 @@ impl SrtlaRegistrationManager {
         self.pending_timeout_at_ms = 0;
         self.reg1_target_idx = None;
         // Wait for a fresh REG_NGP to select the next REG1 target
-        self.reg1_next_send_at_ms = now_ms() + REG2_TIMEOUT * 1000;
+        self.reg1_next_send_at_ms = now_ms + REG2_TIMEOUT * 1000;
 
         warn!("registration failed for connection {}", conn_idx);
     }
