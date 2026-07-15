@@ -10,8 +10,8 @@
 
 // `BATCH_SEND_SIZE` is owned by the core (`connection::batch_send`) so the pure
 // drain and this socket layer agree without core depending on `net`.
-use crate::connection::BATCH_SEND_SIZE;
-use crate::protocol::MTU;
+use srtla_core::connection::BATCH_SEND_SIZE;
+use srtla_protocol::MTU;
 
 /// Number of packets to receive in a single `recvmmsg` call.
 /// 32 is a good balance between syscall reduction and memory usage.
@@ -431,7 +431,7 @@ mod unix_impl {
         use super::{
             RecvAction, RecvMmsgBuffer, recv_retry_action, sockaddr_storage_to_socket_addr,
         };
-        use crate::protocol::MTU;
+        use srtla_protocol::MTU;
 
         // Exercises the unsafe sockaddr_storage → SocketAddr pointer casts with
         // real AF_INET/AF_INET6 payloads (the iterator test only ever feeds

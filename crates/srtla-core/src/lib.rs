@@ -16,10 +16,6 @@ pub mod registration;
 pub mod selection;
 pub mod utils;
 
-// The wire protocol lives in its own dependency-free crate. Alias it as
-// `protocol` so `crate::protocol::*` keeps resolving throughout the core modules.
-pub use srtla_protocol as protocol;
-
 // Test helpers (socket-free connection builders + tokio clock seam) - available
 // when the test-internals feature is enabled so the parent crate can drive core
 // types from its own cross-crate tests.

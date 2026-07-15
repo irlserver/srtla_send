@@ -13,14 +13,6 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-// The sans-IO core (connection state, selection, registration, congestion,
-// numeric helpers) lives in its own crate. Re-export its modules at the crate
-// root so the existing `crate::connection::*`, `crate::selection::*`, … paths
-// keep resolving throughout the shell.
-pub use srtla_core::{
-    config_snapshot, connection, mode, priority, registration, selection, utils,
-};
-
 pub mod config;
 pub mod control;
 pub mod control_socket;
@@ -28,9 +20,6 @@ pub mod metrics;
 // Uplink socket I/O (shell): batched UDP socket + egress binders.
 pub mod net;
 pub mod priority_listener;
-// The wire protocol lives in its own dependency-free crate. Alias it as
-// `protocol` so `crate::protocol::*` keeps resolving throughout the codebase.
-pub use srtla_protocol as protocol;
 pub mod sender;
 pub mod stats;
 pub mod subscriptions;
@@ -43,10 +32,4 @@ pub mod test_helpers;
 #[cfg(test)]
 pub mod tests;
 
-// Re-export commonly used items
 pub use config::{ConfigSnapshot, DynamicConfig};
-pub use connection::SrtlaConnection;
-pub use mode::SchedulingMode;
-pub use protocol::*;
-pub use registration::SrtlaRegistrationManager;
-pub use utils::now_ms;

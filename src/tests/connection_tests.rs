@@ -3,12 +3,12 @@ mod tests {
     use std::time::Duration;
 
 
-    use crate::protocol::*;
+    use srtla_protocol::*;
     use crate::sender::{SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker, attribute_nak};
     use crate::test_helpers::{
         advance_test_clock, create_test_connection, create_test_connections,
     };
-    use crate::utils::now_ms;
+    use srtla_core::utils::now_ms;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_connection_score() {

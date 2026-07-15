@@ -6,8 +6,8 @@ use tracing::{debug, error, info, warn};
 
 use super::connections::reconnect_uplink;
 use super::uplink::{ConnIoMap, ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
-use crate::connection::{STARTUP_GRACE_MS, SrtlaConnection};
-use crate::registration::SrtlaRegistrationManager;
+use srtla_core::connection::{STARTUP_GRACE_MS, SrtlaConnection};
+use srtla_core::registration::SrtlaRegistrationManager;
 
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
@@ -221,7 +221,7 @@ mod tests {
     use crate::test_helpers::{
         create_test_conn_io_map, create_test_connection, create_test_connections,
     };
-    use crate::utils::now_ms;
+    use srtla_core::utils::now_ms;
 
     #[tokio::test]
     async fn dead_reader_is_restarted_for_active_connection() {

@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::warn;
 
-use crate::connection::SrtlaConnection;
+use srtla_core::connection::SrtlaConnection;
 use crate::net::{BatchUdpSocket, RecvMmsgBuffer, UplinkBinder};
 
 pub type ConnectionId = u64;

@@ -9,24 +9,24 @@
 #[cfg(test)]
 mod tests {
     use crate::config::{ConfigSnapshot, STALL_ACK_STALE_MS, STALL_MIN_IN_FLIGHT_PACKETS};
-    use crate::mode::SchedulingMode;
-    use crate::sender::select_connection_idx;
+    use srtla_core::mode::SchedulingMode;
+    use srtla_core::selection::select_connection_idx;
     use crate::test_helpers::create_test_connections;
-    use crate::utils::now_ms;
+    use srtla_core::utils::now_ms;
 
     /// Mark a connection as a stalled black hole at `now`: a backlog at the
     /// stall threshold whose last delivery proof is older than the staleness
     /// window. Kept at exactly the threshold so its raw capacity score
     /// (`window / (in_flight + 1)`) still *beats* a healthier link carrying a
     /// larger backlog — that way a pick against it proves the guard, not score.
-    fn make_stalled(conn: &mut crate::connection::SrtlaConnection, now: u64) {
+    fn make_stalled(conn: &mut srtla_core::connection::SrtlaConnection, now: u64) {
         conn.in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS;
         conn.last_ack_or_rtt_sample_ms = now.saturating_sub(STALL_ACK_STALE_MS + 1000);
     }
 
     /// A busy-but-healthy link: a larger backlog than [`make_stalled`] (so it
     /// loses on raw score) with a fresh delivery proof (so it is never stalled).
-    fn make_healthy_busy(conn: &mut crate::connection::SrtlaConnection, now: u64) {
+    fn make_healthy_busy(conn: &mut srtla_core::connection::SrtlaConnection, now: u64) {
         conn.in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS * 2;
         conn.last_ack_or_rtt_sample_ms = now;
     }

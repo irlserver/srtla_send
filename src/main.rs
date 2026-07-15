@@ -8,22 +8,12 @@ use tracing_subscriber::EnvFilter;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-// The sans-IO core modules live in the srtla-core crate. Alias them so
-// `crate::connection::*`, `crate::selection::*`, … keep resolving in the
-// binary's own module tree (main.rs compiles a module tree separate from lib.rs).
-use srtla_core::{
-    config_snapshot, connection, mode, priority, registration, selection, utils,
-};
-
 mod config;
 mod control;
 mod control_socket;
 mod metrics;
 mod net;
 mod priority_listener;
-// Wire protocol lives in its own dependency-free crate; alias it as `protocol`
-// so `crate::protocol::*` keeps resolving in the binary's module tree.
-use srtla_protocol as protocol;
 mod sender;
 mod stats;
 mod subscriptions;
@@ -33,7 +23,7 @@ mod toml_config;
 #[cfg(any(test, feature = "test-internals"))]
 mod test_helpers;
 
-use mode::SchedulingMode;
+use srtla_core::mode::SchedulingMode;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -184,7 +174,7 @@ async fn main() -> Result<()> {
 
     let subscription_hub = subscriptions::SubscriptionHub::new();
 
-    let critical_window = priority::CriticalWindow::new();
+    let critical_window = srtla_core::priority::CriticalWindow::new();
     if let Some(bind) = args.priority_bind {
         warn_if_not_loopback("priority sidecar (--priority-bind)", bind);
         priority_listener::spawn_listener(

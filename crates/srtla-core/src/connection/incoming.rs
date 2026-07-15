@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use crate::protocol::SRTLA_TYPE_REG1_LEN;
+use srtla_protocol::SRTLA_TYPE_REG1_LEN;
 
 #[derive(Default)]
 pub struct SrtlaIncoming {

@@ -9,10 +9,11 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use crate::config::{ConfigSnapshot, DynamicConfig};
-    use crate::mode::SchedulingMode;
     use crate::sender::*;
     use crate::test_helpers::{create_test_conn_io_map, create_test_connections};
-    use crate::utils::now_ms;
+    use srtla_core::mode::SchedulingMode;
+    use srtla_core::selection::{calculate_quality_multiplier, select_connection_idx};
+    use srtla_core::utils::now_ms;
 
     #[test]
     fn test_select_connection_idx_classic() {
@@ -706,7 +707,7 @@ mod tests {
         let now = now_ms();
 
         for c in connections.iter_mut() {
-            c.phase = crate::connection::LinkPhase::Warming {
+            c.phase = srtla_core::connection::LinkPhase::Warming {
                 rtt_probes: 0,
                 entered_ms: now,
             };
@@ -737,7 +738,7 @@ mod tests {
         let now = now_ms();
 
         // Warming link has the better *raw* score (fewer in flight)...
-        connections[0].phase = crate::connection::LinkPhase::Warming {
+        connections[0].phase = srtla_core::connection::LinkPhase::Warming {
             rtt_probes: 1,
             entered_ms: now,
         };
@@ -766,7 +767,7 @@ mod tests {
         let mut connections = rt.block_on(create_test_connections(2));
         let now = now_ms();
 
-        connections[0].phase = crate::connection::LinkPhase::Registering;
+        connections[0].phase = srtla_core::connection::LinkPhase::Registering;
         connections[0].in_flight_packets = 0; // would otherwise be the best score
         connections[1].in_flight_packets = 10;
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-use crate::connection::SrtlaConnection;
+use srtla_core::connection::SrtlaConnection;
 use crate::net::{BatchUdpSocket, SourceIpBinder};
 use crate::sender::{ConnIo, ConnIoMap};
 

@@ -98,7 +98,7 @@ async fn test_concurrent_udp_operations() {
 
 #[tokio::test]
 async fn test_protocol_message_flow() {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     // Simulate a registration flow
     let mut sender_id = [0u8; SRTLA_ID_LEN];
@@ -133,7 +133,7 @@ async fn test_protocol_message_flow() {
 
 #[tokio::test]
 async fn test_keepalive_timing() {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     let start_time = tokio::time::Instant::now();
 
@@ -145,7 +145,7 @@ async fn test_keepalive_timing() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let packet = create_keepalive_packet(crate::utils::now_ms());
+        let packet = create_keepalive_packet(srtla_core::utils::now_ms());
         let timestamp = extract_keepalive_timestamp(&packet).unwrap();
         timestamps.push(timestamp);
     }
@@ -169,7 +169,7 @@ async fn test_keepalive_timing() {
 
 #[tokio::test]
 async fn test_ack_nak_sequence_handling() {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     // Test sequence of ACKs and NAKs
     let sequences: SmallVec<u32, 4> = SmallVec::from_vec(vec![100u32, 101, 102, 103, 104, 105]);
@@ -202,7 +202,7 @@ async fn test_ack_nak_sequence_handling() {
 
 #[tokio::test]
 async fn test_packet_size_limits() {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     // Test that we don't create packets larger than MTU
     let max_acks = (MTU - 2) / 4; // Maximum ACKs that fit in MTU
@@ -224,7 +224,7 @@ async fn test_packet_size_limits() {
 
 #[tokio::test]
 async fn test_error_resilience() {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     // Test various malformed inputs don't crash
     let test_cases = vec![
@@ -256,7 +256,7 @@ async fn test_concurrent_packet_processing() {
 
     use tokio::sync::Mutex;
 
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     let results = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
@@ -266,7 +266,7 @@ async fn test_concurrent_packet_processing() {
         let results_clone = results.clone();
         let handle = tokio::spawn(async move {
             // Create different types of packets
-            let keepalive = create_keepalive_packet(crate::utils::now_ms());
+            let keepalive = create_keepalive_packet(srtla_core::utils::now_ms());
             let timestamp = extract_keepalive_timestamp(&keepalive).unwrap();
 
             let acks = vec![i * 100u32, i * 100 + 1, i * 100 + 2];
@@ -299,7 +299,7 @@ async fn test_concurrent_packet_processing() {
 
 #[test]
 fn test_memory_usage_bounds() {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     // Test that parsing large NAK ranges doesn't consume excessive memory
     let mut large_nak = Vec::new();

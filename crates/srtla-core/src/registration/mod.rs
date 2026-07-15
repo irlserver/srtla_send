@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 use tracing::{debug, info, warn};
 
 use crate::connection::SrtlaConnection;
-use crate::protocol::*;
+use srtla_protocol::*;
 
 #[derive(Debug)]
 pub enum RegistrationEvent {

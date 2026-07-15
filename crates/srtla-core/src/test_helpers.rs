@@ -12,7 +12,7 @@ use crate::connection::{
     BatchSender, BitrateTracker, CachedQuality, CongestionControl, LinkPhase, ReconnectionState,
     RttTracker, SrtlaConnection,
 };
-use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
+use srtla_protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
 use crate::utils::now_ms;
 
 /// Shared test connection ID counter for all helper functions

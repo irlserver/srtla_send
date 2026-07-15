@@ -4,7 +4,7 @@ mod tests {
     // contract rather than test runtime values.
     #![allow(clippy::assertions_on_constants)]
 
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     #[test]
     fn test_get_packet_type() {
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_create_keepalive_packet() {
-        let pkt = create_keepalive_packet(crate::utils::now_ms());
+        let pkt = create_keepalive_packet(srtla_core::utils::now_ms());
 
         assert_eq!(pkt.len(), 10);
         assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
@@ -246,7 +246,7 @@ mod tests {
         assert!(!is_srtla_reg2(&reg3_pkt));
         assert!(is_srtla_reg3(&reg3_pkt));
 
-        let keepalive_pkt = create_keepalive_packet(crate::utils::now_ms());
+        let keepalive_pkt = create_keepalive_packet(srtla_core::utils::now_ms());
         assert!(is_srtla_keepalive(&keepalive_pkt));
 
         let mut ack_pkt = vec![0u8; 20];
@@ -275,7 +275,7 @@ mod tests {
 // Top-level module so `cargo test protocol_tests::encode` selects exactly this group.
 #[cfg(test)]
 mod encode {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     #[test]
     fn reg1_first_two_bytes_and_total_len() {
@@ -332,7 +332,7 @@ mod encode {
 // get_packet_type discriminator plus the length-checked is_srtla_* validators.
 #[cfg(test)]
 mod decode {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     #[test]
     fn decode_reg2_valid() {
@@ -407,7 +407,7 @@ mod decode {
 
     #[test]
     fn decode_keepalive_valid() {
-        let pkt = create_keepalive_packet(crate::utils::now_ms());
+        let pkt = create_keepalive_packet(srtla_core::utils::now_ms());
 
         assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
         assert!(is_srtla_keepalive(&pkt));
@@ -420,7 +420,7 @@ mod decode {
 // these tests guard against an upstream merge regressing that into an unwrap.
 #[cfg(test)]
 mod malformed {
-    use crate::protocol::*;
+    use srtla_protocol::*;
 
     #[test]
     fn zero_length_returns_none_or_err() {

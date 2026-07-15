@@ -24,12 +24,12 @@ use std::sync::{Arc, RwLock};
 use serde::Serialize;
 
 use crate::config::ConfigSnapshot;
-use crate::connection::SrtlaConnection;
-use crate::sender::{
-    CcState, ClassificationResult, LinkCcSnapshot, WeakReason, calculate_quality_multiplier,
-    in_flight_cap_packets,
-};
-use crate::utils::now_ms;
+use srtla_core::connection::SrtlaConnection;
+use srtla_core::selection::calculate_quality_multiplier;
+use srtla_core::selection::classifier::{ClassificationResult, WeakReason};
+use srtla_core::selection::enhanced::in_flight_cap_packets;
+use srtla_core::selection::link_cc::{CcState, LinkCcSnapshot};
+use srtla_core::utils::now_ms;
 
 /// Per-link statistics.
 ///
@@ -388,7 +388,7 @@ fn cc_state_str(state: CcState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mode::SchedulingMode;
+    use srtla_core::mode::SchedulingMode;
 
     #[test]
     fn test_shared_stats_new() {

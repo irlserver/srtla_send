@@ -20,7 +20,7 @@ mod enhanced;
 
 use tracing::warn;
 
-use crate::protocol::*;
+use srtla_protocol::*;
 
 const NAK_BURST_WINDOW_MS: u64 = 1000;
 const NAK_BURST_LOG_THRESHOLD: i32 = 5;

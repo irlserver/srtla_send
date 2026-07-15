@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::ewma::Ewma;
 use crate::kalman::{KalmanConfig, KalmanFilter};
-use crate::protocol::extract_keepalive_timestamp;
+use srtla_protocol::extract_keepalive_timestamp;
 
 /// Number of samples in the fast sliding window (~3s at 300ms keepalive interval).
 const FAST_WINDOW_SAMPLES: usize = 10;
@@ -458,7 +458,7 @@ mod tests {
 
         let future_ts = T0 + 1_000_000;
         let mut pkt = [0u8; 10];
-        pkt[0..2].copy_from_slice(&crate::protocol::SRTLA_TYPE_KEEPALIVE.to_be_bytes());
+        pkt[0..2].copy_from_slice(&srtla_protocol::SRTLA_TYPE_KEEPALIVE.to_be_bytes());
         pkt[2..10].copy_from_slice(&future_ts.to_be_bytes());
 
         let rtt = tracker.handle_keepalive_response(&pkt, "test", T0);

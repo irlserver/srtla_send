@@ -17,11 +17,11 @@ pub use batch_recv::{BatchUdpSocket, RecvMmsgBuffer};
 pub use socket::CallbackBinder;
 pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};
 
-use crate::connection::BATCH_SEND_SIZE;
+use srtla_core::connection::BATCH_SEND_SIZE;
 
 /// Send every datagram to the connected peer, chunking into `sendmmsg` syscalls.
 ///
-/// This is the I/O half of a batch flush: the pure [`crate::connection::BatchSender`]
+/// This is the I/O half of a batch flush: the pure [`srtla_core::connection::BatchSender`]
 /// drains the queue, and this transmits the bytes. `sendmmsg` may accept fewer
 /// datagrams than offered (a short send once the socket buffer fills), so it
 /// loops until the whole batch is away. A no-progress send (`Ok(0)`) is treated

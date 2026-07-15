@@ -1,6 +1,6 @@
 //! Prometheus `/metrics` endpoint.
 //!
-//! Renders the current [`crate::stats::StatsSnapshot`], [`crate::priority::CriticalWindow`]
+//! Renders the current [`crate::stats::StatsSnapshot`], [`srtla_core::priority::CriticalWindow`]
 //! counters, and [`crate::config::DynamicConfig`] as Prometheus text format.
 //! Intended for scraping by prometheus / VictoriaMetrics / grafana agent.
 //!
@@ -19,8 +19,8 @@ use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
 use crate::config::DynamicConfig;
-use crate::mode::SchedulingMode;
-use crate::priority::CriticalWindow;
+use srtla_core::mode::SchedulingMode;
+use srtla_core::priority::CriticalWindow;
 use crate::stats::SharedStats;
 
 /// Render the current state as a Prometheus text-format exposition.

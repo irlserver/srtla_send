@@ -6,13 +6,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, trace, warn};
 
-use crate::selection::select_connection_idx;
+use srtla_core::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, UplinkPacket};
 use crate::config::ConfigSnapshot;
-use crate::connection::{SrtlaConnection, SrtlaIncoming};
-use crate::protocol;
-use crate::registration::SrtlaRegistrationManager;
+use srtla_core::connection::{SrtlaConnection, SrtlaIncoming};
+use srtla_core::registration::SrtlaRegistrationManager;
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -72,7 +71,7 @@ pub async fn process_connection_events(
     }
 
     // One monotonic read drives every ACK/NAK handler in this receive batch.
-    let current_time_ms = crate::utils::now_ms();
+    let current_time_ms = srtla_core::utils::now_ms();
 
     for ack in incoming.ack_numbers.iter() {
         for c in connections.iter_mut() {
@@ -137,7 +136,7 @@ pub async fn handle_uplink_packet(
                     && let Some(io) = conn_io.get(&connections[idx].conn_id)
                 {
                     match io.socket.send(&pkt).await {
-                        Ok(_) => connections[idx].note_sent(crate::utils::now_ms()),
+                        Ok(_) => connections[idx].note_sent(srtla_core::utils::now_ms()),
                         Err(e) => {
                             warn!("{}: failed to send immediate REG1: {e}", connections[idx].label)
                         }
@@ -255,7 +254,7 @@ pub async fn handle_srt_packet(
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
-    critical_window: &crate::priority::CriticalWindow,
+    critical_window: &srtla_core::priority::CriticalWindow,
 ) {
     match res {
         Ok((n, src)) => {
@@ -263,10 +262,10 @@ pub async fn handle_srt_packet(
                 return;
             }
             // Capture timestamp once at packet entry - reduces syscalls from 3-5 to 1 per packet
-            let packet_time_ms = crate::utils::now_ms();
+            let packet_time_ms = srtla_core::utils::now_ms();
 
             let pkt = &recv_buf[..n];
-            let seq = protocol::get_srt_sequence_number(pkt);
+            let seq = srtla_protocol::get_srt_sequence_number(pkt);
             if !registration_complete {
                 let sel_idx =
                     select_pre_registration_connection(connections, *last_selected_idx, packet_time_ms);
@@ -295,13 +294,13 @@ pub async fn handle_srt_packet(
             // link. The critical time window is opened over the priority
             // sidecar by the encoder front-end, which parses NAL units and
             // knows exactly when a keyframe / parameter set is in flight (see
-            // crate::priority). srtla_send sees only opaque SRT payloads, so it
+            // srtla_core::priority). srtla_send sees only opaque SRT payloads, so it
             // never guesses at keyframes itself.
             //
             // Only data packets have seq != None (control packets have MSB set).
             if seq.is_some()
                 && critical_window.is_critical_now(packet_time_ms)
-                && let Some(best_idx) = crate::priority::select_best_quality_idx(connections)
+                && let Some(best_idx) = srtla_core::priority::select_best_quality_idx(connections)
                 && sel_idx != Some(best_idx)
             {
                 trace!(
@@ -414,7 +413,7 @@ async fn send_connection_batch(
     conn: &mut SrtlaConnection,
     socket: &crate::net::BatchUdpSocket,
 ) -> std::io::Result<()> {
-    let now = crate::utils::now_ms();
+    let now = srtla_core::utils::now_ms();
     let batch = conn.take_batch(now);
     if batch.is_empty() {
         return Ok(());
@@ -429,7 +428,7 @@ async fn send_connection_batch(
 /// before iterating. This avoids work on the 15ms timer when traffic is idle.
 pub async fn flush_all_batches(connections: &mut [SrtlaConnection], conn_io: &ConnIoMap) {
     // One monotonic read drives the flush-window check for every connection.
-    let now = crate::utils::now_ms();
+    let now = srtla_core::utils::now_ms();
 
     // Quick scan to check if any connection has work to do
     // This is a fast read-only check that avoids the flush logic entirely when idle

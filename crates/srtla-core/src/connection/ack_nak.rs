@@ -1,7 +1,7 @@
 use std::cmp::min;
 
 use super::SrtlaConnection;
-use crate::protocol::*;
+use srtla_protocol::*;
 
 impl SrtlaConnection {
     /// Register a packet as in-flight. O(1) insert.

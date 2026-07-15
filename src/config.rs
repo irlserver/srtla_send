@@ -9,14 +9,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 
 use crate::control::dispatch;
-use crate::mode::SchedulingMode;
-use crate::priority::CriticalWindow;
+use srtla_core::mode::SchedulingMode;
+use srtla_core::priority::CriticalWindow;
 use crate::stats::SharedStats;
 // The hot-path snapshot type + its default constants are core; they live in
 // `config_snapshot` (free of this module's control/stats coupling). Re-exported
 // here so the existing `crate::config::{ConfigSnapshot, STALL_*}` paths keep
 // resolving across the codebase.
-pub use crate::config_snapshot::{ConfigSnapshot, STALL_ACK_STALE_MS, STALL_MIN_IN_FLIGHT_PACKETS};
+pub use srtla_core::config_snapshot::{ConfigSnapshot, STALL_ACK_STALE_MS, STALL_MIN_IN_FLIGHT_PACKETS};
 
 /// Dynamic configuration that can be modified at runtime.
 /// Uses atomic types for lock-free concurrent access.

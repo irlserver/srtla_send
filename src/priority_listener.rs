@@ -1,7 +1,7 @@
-//! Priority-sidecar UDP listener (I/O shell for [`crate::priority`]).
+//! Priority-sidecar UDP listener (I/O shell for [`srtla_core::priority`]).
 //!
 //! Consumes the 5-byte critical-window datagrams described in
-//! [`crate::priority`] off a dedicated loopback UDP socket and pushes the
+//! [`srtla_core::priority`] off a dedicated loopback UDP socket and pushes the
 //! derived deadlines into the shared [`CriticalWindow`]. Kept separate from the
 //! pure `priority` state so that module carries no `tokio`/socket dependency.
 
@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tracing::{info, trace, warn};
 
-use crate::priority::{CriticalWindow, DATAGRAM_LEN, PROTO_MAGIC};
+use srtla_core::priority::{CriticalWindow, DATAGRAM_LEN, PROTO_MAGIC};
 
 /// Spawn a listener task that consumes priority datagrams from `bind_addr`
 /// and pushes the derived deadlines into `state`. If `hub` is provided,
@@ -43,7 +43,7 @@ pub fn spawn_listener(
                         continue;
                     }
                     let window_ms = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as u64;
-                    let now = crate::utils::now_ms();
+                    let now = srtla_core::utils::now_ms();
                     state.extend_to(now + window_ms);
                     trace!(window_ms, "critical window extended");
                     if let Some(ref hub) = hub {

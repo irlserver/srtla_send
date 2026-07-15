@@ -29,19 +29,6 @@ pub(crate) use packet_handler::attribute_nak;
 use packet_handler::{
     drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
 };
-// Selection now lives in the top-level `crate::selection` (it is core logic,
-// mutually dependent with `connection`, not shell). These re-exports preserve
-// the `crate::sender::*` surface that tests and shell telemetry still import.
-#[allow(unused_imports)]
-pub use crate::selection::calculate_quality_multiplier;
-#[allow(unused_imports)]
-pub use crate::selection::classifier::{ClassificationResult, WeakReason};
-#[allow(unused_imports)]
-pub use crate::selection::enhanced::{in_flight_cap_exceeded, in_flight_cap_packets};
-#[allow(unused_imports)]
-pub use crate::selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
-#[allow(unused_imports)]
-pub use crate::selection::select_connection_idx;
 #[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
@@ -59,7 +46,7 @@ pub use uplink::ConnIo;
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 
 use crate::config::DynamicConfig;
-use crate::registration::SrtlaRegistrationManager;
+use srtla_core::registration::SrtlaRegistrationManager;
 use crate::stats::SharedStats;
 
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
@@ -73,7 +60,7 @@ pub async fn run_sender_with_config(
     ips_file: &str,
     config: DynamicConfig,
     shared_stats: SharedStats,
-    critical_window: crate::priority::CriticalWindow,
+    critical_window: srtla_core::priority::CriticalWindow,
     subscription_hub: crate::subscriptions::SubscriptionHub,
     binder: std::sync::Arc<dyn crate::net::UplinkBinder>,
 ) -> Result<()> {
@@ -115,7 +102,7 @@ pub async fn run_sender_with_config(
     let mut reg = SrtlaRegistrationManager::new();
 
     // Send the initial RTT probes the (pure) probing state machine emitted.
-    let probes = reg.start_probing(&mut connections, crate::utils::now_ms());
+    let probes = reg.start_probing(&mut connections, srtla_core::utils::now_ms());
     for (idx, pkt) in probes {
         if let Some(conn) = connections.get(idx)
             && let Some(io) = conn_io.get(&conn.conn_id)
@@ -145,7 +132,7 @@ pub async fn run_sender_with_config(
         });
     }
 
-    let mut recv_buf = vec![0u8; crate::protocol::MTU];
+    let mut recv_buf = vec![0u8; srtla_protocol::MTU];
     let mut housekeeping_timer = time::interval_at(
         Instant::now() + Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
         Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
@@ -170,10 +157,10 @@ pub async fn run_sender_with_config(
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
     // Enhanced selection as an admission gate.
-    let mut weak_link_filter = crate::selection::classifier::WeakLinkFilter::new();
+    let mut weak_link_filter = srtla_core::selection::classifier::WeakLinkFilter::new();
     // Per-link CC soft-cap controller. `cc_target_bps` feeds the soft-cap
     // multiplier and in-flight cap; `loss_degraded` feeds the loss gate.
-    let mut link_cc_controller = crate::selection::link_cc::LinkCcController::new();
+    let mut link_cc_controller = srtla_core::selection::link_cc::LinkCcController::new();
 
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
@@ -188,7 +175,7 @@ pub async fn run_sender_with_config(
             &mut conn_io,
             &mut reg,
             classic,
-            crate::utils::now_ms(),
+            srtla_core::utils::now_ms(),
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
@@ -269,7 +256,7 @@ pub async fn run_sender_with_config(
                             &mut conn_io,
                             &mut reg,
                             classic,
-                            crate::utils::now_ms(),
+                            srtla_core::utils::now_ms(),
                             &mut all_failed_at,
                             &mut reader_handles,
                             &packet_tx,
@@ -282,7 +269,7 @@ pub async fn run_sender_with_config(
                         // for selection to consume, and surface via stats.
                         let classification = weak_link_filter.classify(&connections);
                         let link_cc_snapshots = link_cc_controller
-                            .tick_all(&connections, crate::utils::now_ms());
+                            .tick_all(&connections, srtla_core::utils::now_ms());
                         for conn in connections.iter_mut() {
                             conn.weak = classification
                                 .per_link
@@ -292,7 +279,7 @@ pub async fn run_sender_with_config(
                                 .unwrap_or(false);
                             let cc_snap = link_cc_snapshots.get(&conn.conn_id);
                             conn.cc_backing_off = cc_snap
-                                .map(|s| s.state == crate::selection::link_cc::CcState::BackingOff)
+                                .map(|s| s.state == srtla_core::selection::link_cc::CcState::BackingOff)
                                 .unwrap_or(false);
                             conn.cc_target_bps = cc_snap.map(|s| s.target_bps).unwrap_or(0);
                             conn.loss_degraded =

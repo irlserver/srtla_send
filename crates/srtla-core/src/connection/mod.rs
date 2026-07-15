@@ -18,7 +18,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tracing::debug;
 
-use crate::protocol::*;
+use srtla_protocol::*;
 
 pub const STARTUP_GRACE_MS: u64 = 5_000;
 

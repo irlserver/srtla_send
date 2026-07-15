@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::config::DynamicConfig;
-    use crate::mode::SchedulingMode;
+    use srtla_core::mode::SchedulingMode;
 
     #[test]
     fn test_config_new() {

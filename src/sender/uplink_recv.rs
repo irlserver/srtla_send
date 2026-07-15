@@ -5,9 +5,9 @@ use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 use tracing::debug;
 
-use crate::connection::{SrtlaConnection, SrtlaIncoming};
-use crate::protocol::*;
-use crate::registration::{RegistrationEvent, SrtlaRegistrationManager};
+use srtla_core::connection::{SrtlaConnection, SrtlaIncoming};
+use srtla_protocol::*;
+use srtla_core::registration::{RegistrationEvent, SrtlaRegistrationManager};
 
 /// Process one received uplink datagram.
 ///
@@ -35,7 +35,7 @@ pub async fn process_uplink_packet(
         read_any: true,
         ..Default::default()
     };
-    let now = crate::utils::now_ms();
+    let now = srtla_core::utils::now_ms();
     let pt = get_packet_type(data);
     if let Some(pt) = pt {
         if let Some(event) = reg.process_registration_packet(conn_idx, data, now) {

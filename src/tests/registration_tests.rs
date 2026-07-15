@@ -2,11 +2,11 @@
 mod tests {
 
 
-    use crate::connection::STARTUP_GRACE_MS;
-    use crate::protocol::*;
-    use crate::registration::*;
+    use srtla_core::connection::STARTUP_GRACE_MS;
+    use srtla_protocol::*;
+    use srtla_core::registration::*;
     use crate::test_helpers::create_test_connection;
-    use crate::utils::now_ms;
+    use srtla_core::utils::now_ms;
 
     #[test]
     fn test_registration_manager_creation() {
