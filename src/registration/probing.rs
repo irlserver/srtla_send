@@ -34,8 +34,10 @@ impl SrtlaRegistrationManager {
         let probe_start_ms = now_ms();
 
         for (idx, conn) in connections.iter_mut().enumerate() {
-            match conn.send_probe_reg2(&self.probe_id).await {
-                Ok(sent_ms) => {
+            let sent_ms = now_ms();
+            let pkt = conn.probe_reg2_packet(&self.probe_id, sent_ms);
+            match conn.socket.send(&pkt).await {
+                Ok(_) => {
                     tracing::debug!(
                         "Probe REG2 sent to connection #{} at T+{}ms",
                         idx,

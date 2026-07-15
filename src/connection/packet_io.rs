@@ -89,7 +89,13 @@ impl SrtlaConnection {
             if let Some(event) = reg.process_registration_packet(conn_idx, data, now) {
                 match event {
                     RegistrationEvent::RegNgp => {
-                        reg.try_send_reg1_immediately(conn_idx, self).await;
+                        // Answering REG_NGP with an immediate REG1 is deferred to
+                        // the shell: build the packet here (advancing reg state)
+                        // and stash it as an effect so this method stays free of
+                        // uplink I/O.
+                        if let Some(pkt) = reg.reg1_if_ngp_immediate(conn_idx, now) {
+                            incoming.reg1_send = Some(pkt);
+                        }
                     }
                     RegistrationEvent::Reg3 => {
                         // Clear any phantom in-flight packets and NAK state

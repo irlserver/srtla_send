@@ -140,7 +140,16 @@ pub async fn handle_uplink_packet(
             )
             .await
         {
-            Ok(incoming) => {
+            Ok(mut incoming) => {
+                // Flush the deferred immediate-REG1 effect on this link's socket.
+                if let Some(pkt) = incoming.reg1_send.take() {
+                    match connections[idx].socket.send(&pkt).await {
+                        Ok(_) => connections[idx].note_sent(crate::utils::now_ms()),
+                        Err(e) => {
+                            warn!("{}: failed to send immediate REG1: {e}", connections[idx].label)
+                        }
+                    }
+                }
                 if let Err(err) = process_connection_events(
                     idx,
                     connections,
@@ -387,7 +396,7 @@ pub async fn forward_via_connection(
     // Flush if batch threshold reached
     if needs_flush {
         let conn = &mut connections[sel_idx];
-        if let Err(e) = conn.flush_batch().await {
+        if let Err(e) = send_connection_batch(conn).await {
             warn!(
                 "{}: batch flush failed, marking for recovery: {}",
                 conn.label, e
@@ -395,6 +404,21 @@ pub async fn forward_via_connection(
             conn.mark_for_recovery();
         }
     }
+}
+
+/// Drain a connection's batch queue and transmit it on the link's socket.
+///
+/// The pure `take_batch` half (queue drain + in-flight registration) lives on
+/// `SrtlaConnection`; this is the I/O half. On error the caller marks the link
+/// for recovery, which clears the optimistically-registered in-flight packets.
+async fn send_connection_batch(conn: &mut SrtlaConnection) -> std::io::Result<()> {
+    let now = crate::utils::now_ms();
+    let batch = conn.take_batch(now);
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let bufs: SmallVec<&[u8], 32> = batch.iter().map(|(data, _, _)| data.as_slice()).collect();
+    crate::connection::send_all_datagrams(&conn.socket, &bufs).await
 }
 
 /// Flush all connection batches (called on timer or when needed)
@@ -418,7 +442,7 @@ pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
     // Now do the actual flush for connections that need it
     for conn in connections.iter_mut() {
         if (conn.needs_batch_flush(now) || conn.has_queued_packets())
-            && let Err(e) = conn.flush_batch().await
+            && let Err(e) = send_connection_batch(conn).await
         {
             warn!("{}: periodic batch flush failed: {}", conn.label, e);
         }

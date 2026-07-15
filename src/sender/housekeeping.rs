@@ -69,7 +69,11 @@ pub async fn handle_housekeeping(
                 match reg.pending_reg2_idx() {
                     Some(idx) if idx == i => {
                         info!("{} marked for recovery; re-sending REG1", label);
-                        reg.send_reg1_to(i, conn).await;
+                        let pkt = reg.build_reg1_for(i, current_ms);
+                        match conn.socket.send(&pkt).await {
+                            Ok(_) => conn.note_sent(current_ms),
+                            Err(e) => warn!("Failed to send REG1 to uplink #{i}: {e:?}"),
+                        }
                     }
                     Some(_) => {
                         debug!(
@@ -79,7 +83,11 @@ pub async fn handle_housekeeping(
                     }
                     None => {
                         info!("{} marked for recovery; re-sending REG2", label);
-                        reg.send_reg2_to(i, conn).await;
+                        let pkt = reg.build_reg2(i);
+                        match conn.socket.send(&pkt).await {
+                            Ok(_) => conn.note_sent(current_ms),
+                            Err(e) => warn!("Failed to send REG2 to uplink #{i}: {e:?}"),
+                        }
                     }
                 }
             } else {
@@ -89,10 +97,12 @@ pub async fn handle_housekeeping(
         }
 
         if conn.needs_keepalive(current_ms) {
-            let _ = conn.send_keepalive().await;
+            let ka = conn.keepalive_packet(current_ms);
+            let _ = conn.socket.send(&ka).await;
         }
         if conn.needs_rtt_measurement(current_ms) {
-            let _ = conn.send_keepalive().await;
+            let ka = conn.keepalive_packet(current_ms);
+            let _ = conn.socket.send(&ka).await;
         }
         if !classic {
             conn.perform_window_recovery(current_ms);
@@ -123,7 +133,23 @@ pub async fn handle_housekeeping(
     reg.update_active_connections(connections);
 
     // drive registration (send REG1/REG2 as needed)
-    reg.reg_driver_send_if_needed(connections).await;
+    let sends = reg.reg_driver_pending_sends(connections.len(), current_ms);
+    if let Some((idx, pkt)) = sends.reg1
+        && let Some(conn) = connections.get_mut(idx)
+    {
+        match conn.socket.send(&pkt).await {
+            Ok(_) => conn.note_sent(current_ms),
+            Err(e) => warn!("Failed to send REG1 to uplink #{idx}: {e:?}"),
+        }
+    }
+    if let Some(pkt) = sends.broadcast_reg2 {
+        for (i, conn) in connections.iter_mut().enumerate() {
+            if conn.socket.send(&pkt).await.is_ok() {
+                conn.note_sent(current_ms);
+                debug!("REG2 → uplink #{i} sent");
+            }
+        }
+    }
 
     // Check for connection failures and output appropriate error messages
     // This matches the C implementation's connection_housekeeping logic

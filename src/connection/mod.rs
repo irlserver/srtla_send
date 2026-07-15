@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 pub use batch_recv::BatchUdpSocket;
-pub use batch_send::BatchSender;
+pub use batch_send::{BatchSender, DrainedPacket, send_all_datagrams};
 pub use bitrate::BitrateTracker;
 pub use congestion::CongestionControl;
 pub use incoming::SrtlaIncoming;
@@ -352,36 +352,36 @@ impl SrtlaConnection {
         self.batch_sender.has_queued_packets()
     }
 
-    /// Flush the batch queue, sending all queued packets.
+    /// Drain the batch queue for transmission.
     ///
-    /// This registers all sent packets for in-flight tracking.
-    pub async fn flush_batch(&mut self) -> Result<()> {
-        if !self.batch_sender.has_queued_packets() {
-            return Ok(());
-        }
-
-        let now = now_ms();
+    /// Pure builder: registers each tracked packet as in-flight, stamps
+    /// `last_sent`, and returns the queued datagrams. The shell sends them (see
+    /// [`batch_send::send_all_datagrams`]) and calls [`Self::mark_for_recovery`]
+    /// if the send fails. In-flight registration is optimistic — a failed send
+    /// triggers `mark_for_recovery`, which clears `packet_log` anyway, so the
+    /// registrations never leak. Empty when nothing was queued.
+    pub fn take_batch(&mut self, now: u64) -> SmallVec<DrainedPacket, 32> {
         let batch = self.batch_sender.drain(now);
         if batch.is_empty() {
-            return Ok(());
+            return batch;
         }
-        let bufs: SmallVec<&[u8], 32> = batch.iter().map(|(data, _, _)| data.as_slice()).collect();
-        match crate::connection::batch_send::send_all_datagrams(&self.socket, &bufs).await {
-            Ok(()) => {
-                // Register all sent packets for in-flight tracking
-                for (_, seq, send_time_ms) in &batch {
-                    if let Some(s) = seq {
-                        self.register_packet(*s as i32, *send_time_ms);
-                    }
-                }
-                self.last_sent = Some(now);
-                Ok(())
+        for (_, seq, send_time_ms) in &batch {
+            if let Some(s) = seq {
+                self.register_packet(*s as i32, *send_time_ms);
             }
-            Err(e) => Err(anyhow::anyhow!("batch flush failed: {}", e)),
         }
+        self.last_sent = Some(now);
+        batch
     }
 
-    pub async fn send_keepalive(&mut self) -> Result<()> {
+    /// Build an extended keepalive packet and record that it was sent.
+    ///
+    /// Pure builder: the shell transmits the returned bytes on this link's
+    /// socket. State (`last_sent`, `last_keepalive_sent`, RTT-probe arming) is
+    /// updated optimistically against the injected clock — a dropped keepalive
+    /// is just a lost UDP datagram the next tick re-sends, so there is nothing
+    /// to roll back on a failed send.
+    pub fn keepalive_packet(&mut self, now: u64) -> [u8; SRTLA_KEEPALIVE_EXT_LEN] {
         // Create extended keepalive with connection info (telemetry for receiver)
         let info = ConnectionInfo {
             conn_id: self.conn_id as u32,
@@ -392,8 +392,6 @@ impl SrtlaConnection {
             bitrate_bytes_per_sec: (self.bitrate.current_bitrate_bps / 8.0) as u32,
         };
         let pkt = create_keepalive_packet_ext(info);
-        self.socket.send(&pkt).await?;
-        let now = now_ms();
         self.last_sent = Some(now);
         self.last_keepalive_sent = Some(now);
         // Only set waiting flag and timestamp when we intend to measure RTT
@@ -403,21 +401,28 @@ impl SrtlaConnection {
         {
             self.rtt.record_keepalive_sent(now);
         }
-        Ok(())
+        pkt
     }
 
-    pub async fn send_srtla_packet(&mut self, pkt: &[u8]) -> Result<()> {
-        self.socket.send(pkt).await?;
-        self.last_sent = Some(now_ms());
-        Ok(())
+    /// Stamp `last_sent` after the shell transmits an out-of-band packet
+    /// (registration REG1/REG2) on this link's socket.
+    #[inline]
+    pub fn note_sent(&mut self, now: u64) {
+        self.last_sent = Some(now);
     }
 
-    pub async fn send_probe_reg2(&mut self, probe_id: &[u8; SRTLA_ID_LEN]) -> Result<u64> {
+    /// Build a REG2 probe packet and arm the startup grace window.
+    ///
+    /// Pure builder: the shell sends the returned bytes. `now` is both the
+    /// grace-window anchor and the probe's send timestamp.
+    pub fn probe_reg2_packet(
+        &mut self,
+        probe_id: &[u8; SRTLA_ID_LEN],
+        now: u64,
+    ) -> [u8; SRTLA_TYPE_REG2_LEN] {
         let pkt = create_reg2_packet(probe_id);
-        let sent_at = now_ms();
-        self.socket.send(&pkt).await?;
-        self.reconnection.startup_grace_deadline_ms = sent_at + STARTUP_GRACE_MS;
-        Ok(sent_at)
+        self.reconnection.startup_grace_deadline_ms = now + STARTUP_GRACE_MS;
+        pkt
     }
 
     pub fn is_rtt_stable(&self) -> bool {
