@@ -78,7 +78,7 @@ fn calculate_quality_multiplier_uncached(conn: &SrtlaConnection, current_time_ms
         };
     }
 
-    let quality_mult = if let Some(nak_age_ms) = conn.time_since_last_nak_ms() {
+    let quality_mult = if let Some(nak_age_ms) = conn.time_since_last_nak_ms(current_time_ms) {
         // Exponential decay for smooth, gradual recovery from NAKs
         // This replaces the step function with a continuous curve
         // Exponential decay formula: penalty = max_penalty * e^(-age/half_life)

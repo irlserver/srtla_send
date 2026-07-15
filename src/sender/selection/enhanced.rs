@@ -207,7 +207,7 @@ pub fn select_connection(
             let final_score = base * quality_mult * cap_mult * gate_mult;
 
             // Log quality issues and recoveries for debugging (cold path)
-            log_quality_state(c, quality_mult, base, final_score);
+            log_quality_state(c, quality_mult, base, final_score, current_time_ms);
 
             final_score
         };
@@ -270,14 +270,20 @@ pub fn select_connection(
 /// Log quality state for debugging (cold path, marked for optimizer hints)
 #[cold]
 #[inline(never)]
-fn log_quality_state(c: &SrtlaConnection, quality_mult: f64, base: f64, final_score: f64) {
+fn log_quality_state(
+    c: &SrtlaConnection,
+    quality_mult: f64,
+    base: f64,
+    final_score: f64,
+    now_ms: u64,
+) {
     if quality_mult < 0.8 {
         debug!(
             "{} quality degraded: {:.2} (NAKs: {}, last: {}ms ago, burst: {}) base: {} → final: {}",
             c.label,
             quality_mult,
             c.total_nak_count(),
-            c.time_since_last_nak_ms().unwrap_or(0),
+            c.time_since_last_nak_ms(now_ms).unwrap_or(0),
             c.nak_burst_count(),
             base as i32,
             final_score as i32

@@ -533,15 +533,15 @@ mod tests {
 
         assert_eq!(conn.congestion.nak_count, 0);
         assert_eq!(conn.congestion.nak_burst_count, 0);
-        assert_eq!(conn.time_since_last_nak_ms(), None);
+        assert_eq!(conn.time_since_last_nak_ms(current_time), None);
 
         conn.register_packet(100, current_time);
         conn.handle_nak(100);
         assert_eq!(conn.congestion.nak_count, 1);
         assert_eq!(conn.congestion.nak_burst_count, 0);
-        assert!(conn.time_since_last_nak_ms().is_some());
+        assert!(conn.time_since_last_nak_ms(now_ms()).is_some());
 
-        let time_since = conn.time_since_last_nak_ms().unwrap();
+        let time_since = conn.time_since_last_nak_ms(now_ms()).unwrap();
         assert!(time_since < 1000); // Should be very recent
     }
 

@@ -675,8 +675,8 @@ impl SrtlaConnection {
         self.reconnection.startup_grace_deadline_ms = 0;
     }
 
-    pub fn time_since_last_nak_ms(&self) -> Option<u64> {
-        self.congestion.time_since_last_nak_ms(now_ms())
+    pub fn time_since_last_nak_ms(&self, now_ms: u64) -> Option<u64> {
+        self.congestion.time_since_last_nak_ms(now_ms)
     }
 
     pub fn total_nak_count(&self) -> i32 {
