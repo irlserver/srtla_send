@@ -88,14 +88,14 @@ pub async fn handle_housekeeping(
             continue;
         }
 
-        if conn.needs_keepalive() {
+        if conn.needs_keepalive(current_ms) {
             let _ = conn.send_keepalive().await;
         }
         if conn.needs_rtt_measurement(current_ms) {
             let _ = conn.send_keepalive().await;
         }
         if !classic {
-            conn.perform_window_recovery();
+            conn.perform_window_recovery(current_ms);
         }
         // Update bitrate calculation
         conn.calculate_bitrate(current_ms);

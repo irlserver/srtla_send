@@ -185,11 +185,11 @@ mod tests {
         conn.handle_nak(102);
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_burst_start_time_ms, 0);
     }
@@ -355,18 +355,18 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
 
-        // Should need keepalive initially (last_keepalive_sent is None)
-        assert!(conn.needs_keepalive());
-
         let now = now_ms();
+
+        // Should need keepalive initially (last_keepalive_sent is None)
+        assert!(conn.needs_keepalive(now));
 
         // After sending keepalive, should not need immediately
         conn.last_keepalive_sent = Some(now);
-        assert!(!conn.needs_keepalive());
+        assert!(!conn.needs_keepalive(now));
 
         // After timeout, should need again (stamp IDLE_TIME + 1 seconds in the past)
         conn.last_keepalive_sent = Some(now - (IDLE_TIME + 1) * 1000);
-        assert!(conn.needs_keepalive());
+        assert!(conn.needs_keepalive(now));
     }
 
     #[test]
@@ -402,7 +402,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 3000;
         conn.congestion.last_window_increase_ms = now_ms() - 2500;
 
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         assert!(conn.window > reduced_window);
     }
 
@@ -606,7 +606,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 3000; // 3 seconds ago
         conn.congestion.last_window_increase_ms = now_ms() - 2500; // Allow recovery
         let before_recovery = conn.window;
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         let recovery_amount_25 = conn.window - before_recovery;
         // Should be WINDOW_INCR * 1 / 4 = 30 / 4 = 7 (rounded down)
         assert_eq!(
@@ -620,7 +620,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 6000; // 6 seconds ago
         conn.congestion.last_window_increase_ms = now_ms() - 2500; // Allow recovery
         let before_recovery = conn.window;
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         let recovery_amount_50 = conn.window - before_recovery;
         // Should be WINDOW_INCR * 1 / 2 = 30 / 2 = 15
         assert_eq!(
@@ -634,7 +634,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
         conn.congestion.last_window_increase_ms = now_ms() - 2500; // Allow recovery
         let before_recovery = conn.window;
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         let recovery_amount_100 = conn.window - before_recovery;
         // Should be WINDOW_INCR * 1 = 30
         assert_eq!(
@@ -647,7 +647,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 11000; // 11 seconds ago
         conn.congestion.last_window_increase_ms = now_ms() - 2500; // Allow recovery
         let before_recovery = conn.window;
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         let recovery_amount_200 = conn.window - before_recovery;
         // Should be WINDOW_INCR * 2 = 30 * 2 = 60
         assert_eq!(
@@ -680,7 +680,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 3000; // 3 seconds ago
         conn.congestion.last_window_increase_ms = now_ms() - 600; // Allow fast recovery timing
         let before_recovery = conn.window;
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         let fast_recovery_25 = conn.window - before_recovery;
         // Should be WINDOW_INCR * 2 / 4 = 30 * 2 / 4 = 15
         assert_eq!(
@@ -694,7 +694,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 11000; // 11 seconds ago
         conn.congestion.last_window_increase_ms = now_ms() - 600; // Allow fast recovery timing
         let before_recovery = conn.window;
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         let fast_recovery_200 = conn.window - before_recovery;
         // Should be WINDOW_INCR * 2 * 2 = 30 * 2 * 2 = 120
         assert_eq!(
@@ -722,7 +722,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago (should trigger)
         conn.congestion.last_window_increase_ms = now_ms() - 500; // Too recent
         let before = conn.window;
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         // Should NOT recover because increment wait time not met
         assert_eq!(
             conn.window, before,
@@ -731,7 +731,7 @@ mod tests {
 
         // Now allow enough time
         conn.congestion.last_window_increase_ms = now_ms() - 1500; // Enough time
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         // Should recover now
         assert!(
             conn.window > before,
@@ -744,7 +744,7 @@ mod tests {
         conn.congestion.last_nak_time_ms = now_ms() - 8000; // 8 seconds ago
         conn.congestion.last_window_increase_ms = now_ms() - 200; // Too recent even for fast mode
         let before_fast = conn.window;
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         // Should NOT recover
         assert_eq!(
             conn.window, before_fast,
@@ -753,7 +753,7 @@ mod tests {
 
         // Now allow enough time for fast mode
         conn.congestion.last_window_increase_ms = now_ms() - 400; // Enough for fast mode
-        conn.perform_window_recovery();
+        conn.perform_window_recovery(now_ms());
         // Should recover now
         assert!(
             conn.window > before_fast,

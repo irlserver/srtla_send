@@ -456,7 +456,7 @@ impl SrtlaConnection {
         )
     }
 
-    pub fn needs_keepalive(&self) -> bool {
+    pub fn needs_keepalive(&self, now_ms: u64) -> bool {
         // Send keepalive every IDLE_TIME (1s) unconditionally on all connections.
         // Moblin does this with standard 10-byte keepalives; we use extended 38-byte
         // keepalives to provide the receiver with telemetry (window, RTT, NAKs, bitrate).
@@ -466,21 +466,18 @@ impl SrtlaConnection {
 
         match self.last_keepalive_sent {
             None => true,
-            Some(last) => now_ms().saturating_sub(last) >= IDLE_TIME * 1000,
+            Some(last) => now_ms.saturating_sub(last) >= IDLE_TIME * 1000,
         }
     }
 
-    pub fn perform_window_recovery(&mut self) {
+    pub fn perform_window_recovery(&mut self, now_ms: u64) {
         let velocity = self.rtt.kalman_rtt.velocity();
-        // Connection-layer ambient read; the CongestionControl leaf below is
-        // clock-injected. Threaded from the caller when the connection layer is.
-        let now = now_ms();
         self.congestion.perform_window_recovery(
             &mut self.window,
             self.connected,
             velocity,
             &self.label,
-            now,
+            now_ms,
         );
     }
 
