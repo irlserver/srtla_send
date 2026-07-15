@@ -10,7 +10,6 @@ use std::cmp::min;
 use tracing::debug;
 
 use crate::protocol::*;
-use crate::utils::now_ms;
 
 const NORMAL_MIN_WAIT_MS: u64 = 2000;
 const FAST_MIN_WAIT_MS: u64 = 500;
@@ -28,6 +27,7 @@ pub fn handle_srtla_ack(
     fast_recovery_mode: &mut bool,
     fast_recovery_start_ms: u64,
     label: &str,
+    now_ms: u64,
 ) {
     // Enhanced mode: IDENTICAL window growth to classic mode
     // The only difference from classic is quality scoring in connection selection
@@ -50,7 +50,7 @@ pub fn handle_srtla_ack(
     }
 
     // Fast recovery mode helps connections recover from severe congestion
-    let current_time = now_ms();
+    let current_time = now_ms;
     if *fast_recovery_mode && *window >= FAST_RECOVERY_DISABLE_WINDOW {
         *fast_recovery_mode = false;
         let recovery_duration = current_time.saturating_sub(fast_recovery_start_ms);
@@ -85,12 +85,13 @@ pub fn perform_window_recovery(
     fast_recovery_mode: &mut bool,
     rtt_velocity: f64,
     label: &str,
+    now_ms: u64,
 ) {
     if !connected || *window >= WINDOW_MAX * WINDOW_MULT {
         return;
     }
 
-    let now = now_ms();
+    let now = now_ms;
 
     // Treat connections that never had NAKs as perfect connections.
     // Previously, last_nak_time_ms == 0 would skip recovery entirely, causing
@@ -190,13 +191,17 @@ pub fn perform_window_recovery(
 mod tests {
     use super::*;
 
+    // Fixed virtual clock: recovery fns take now as an argument, so these tests
+    // are deterministic with no real-clock read.
+    const T0: u64 = 1_000_000;
+
     #[test]
     fn test_enhanced_ack_increases_window() {
         let mut window = 1500;
         let in_flight = 3;
         let mut fast_recovery = false;
 
-        handle_srtla_ack(&mut window, in_flight, &mut fast_recovery, 0, "test");
+        handle_srtla_ack(&mut window, in_flight, &mut fast_recovery, 0, "test", T0);
 
         assert_eq!(window, 1500 + WINDOW_INCR - 1);
     }
@@ -210,7 +215,7 @@ mod tests {
         let in_flight = i32::MAX / WINDOW_MULT + 1;
         let mut fast_recovery = false;
 
-        handle_srtla_ack(&mut window, in_flight, &mut fast_recovery, 0, "test");
+        handle_srtla_ack(&mut window, in_flight, &mut fast_recovery, 0, "test", T0);
 
         assert_eq!(window, 1500 + WINDOW_INCR - 1);
     }
@@ -220,7 +225,7 @@ mod tests {
         let mut window = FAST_RECOVERY_DISABLE_WINDOW - 100;
         let in_flight = 100;
         let mut fast_recovery = true;
-        let start_time = now_ms();
+        let start_time = T0;
 
         // Increase window enough to trigger fast recovery disable
         for _ in 0..20 {
@@ -230,6 +235,7 @@ mod tests {
                 &mut fast_recovery,
                 start_time,
                 "test",
+                T0,
             );
             if !fast_recovery {
                 break;
@@ -243,7 +249,7 @@ mod tests {
     fn test_window_recovery_progressive() {
         // Test that recovery rate increases with time since NAK
         let mut window = 5000;
-        let last_nak = now_ms() - 10_500; // 10.5 seconds ago
+        let last_nak = T0 - 10_500; // 10.5 seconds ago
         let mut nak_burst_count = 0;
         let mut nak_burst_start = 0;
         let mut last_increase = 0;
@@ -259,6 +265,7 @@ mod tests {
             &mut fast_recovery,
             0.0, // stable RTT
             "test",
+            T0,
         );
 
         // Should have increased (aggressive recovery for 10s+)
@@ -287,6 +294,7 @@ mod tests {
             &mut fast_recovery,
             0.0, // stable RTT
             "test",
+            T0,
         );
 
         // Should have increased with aggressive recovery (treated as perfect connection)
@@ -310,7 +318,7 @@ mod tests {
         let last_nak = 0; // Never had a NAK
         let mut nak_burst_count = 0;
         let mut nak_burst_start = 0;
-        let mut last_increase = now_ms(); // Just increased
+        let mut last_increase = T0; // Just increased
         let mut fast_recovery = false;
 
         perform_window_recovery(
@@ -323,6 +331,7 @@ mod tests {
             &mut fast_recovery,
             0.0, // stable RTT
             "test",
+            T0,
         );
 
         // Should NOT have increased (increment wait not elapsed)
@@ -337,7 +346,7 @@ mod tests {
         // Test that rising RTT (high velocity) halves the recovery rate
         let mut window_stable = 5000;
         let mut window_rising = 5000;
-        let last_nak = now_ms() - 10_500; // 10.5 seconds ago
+        let last_nak = T0 - 10_500; // 10.5 seconds ago
         let mut nbc1 = 0;
         let mut nbs1 = 0;
         let mut li1 = 0;
@@ -358,6 +367,7 @@ mod tests {
             &mut fr1,
             0.0,
             "stable",
+            T0,
         );
 
         // Rising RTT: gated recovery
@@ -371,6 +381,7 @@ mod tests {
             &mut fr2,
             5.0, // well above 2.0 threshold
             "rising",
+            T0,
         );
 
         let stable_incr = window_stable - 5000;

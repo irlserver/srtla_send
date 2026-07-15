@@ -474,11 +474,15 @@ impl SrtlaConnection {
 
     pub fn perform_window_recovery(&mut self) {
         let velocity = self.rtt.kalman_rtt.velocity();
+        // Connection-layer ambient read; the CongestionControl leaf below is
+        // clock-injected. Threaded from the caller when the connection layer is.
+        let now = now_ms();
         self.congestion.perform_window_recovery(
             &mut self.window,
             self.connected,
             velocity,
             &self.label,
+            now,
         );
     }
 
@@ -678,7 +682,7 @@ impl SrtlaConnection {
     }
 
     pub fn time_since_last_nak_ms(&self) -> Option<u64> {
-        self.congestion.time_since_last_nak_ms()
+        self.congestion.time_since_last_nak_ms(now_ms())
     }
 
     pub fn total_nak_count(&self) -> i32 {

@@ -66,8 +66,12 @@ impl SrtlaConnection {
         let found = self.packet_log.remove(&seq).is_some();
         if found {
             self.in_flight_packets = self.packet_log.len() as i32;
+            // Ambient clock read at the connection layer (not the CongestionControl
+            // leaf, which is now clock-injected). This wrapper and its ~30 test
+            // callers are converted when the connection layer is threaded.
+            let now = now_ms();
             self.congestion
-                .handle_nak(&mut self.window, seq, &self.label);
+                .handle_nak(&mut self.window, seq, &self.label, now);
         }
         found
     }
@@ -83,7 +87,8 @@ impl SrtlaConnection {
             // the strongest per-link proof it is still moving data. Stamped here
             // and at the keepalive-RTT site only (see `packet_io.rs`), never on
             // generic inbound bytes, so a stalled-but-echoing link stays stale.
-            self.last_ack_or_rtt_sample_ms = now_ms();
+            let now = now_ms();
+            self.last_ack_or_rtt_sample_ms = now;
 
             if classic_mode {
                 self.congestion.handle_srtla_ack_specific_classic(
@@ -97,6 +102,7 @@ impl SrtlaConnection {
                     &mut self.window,
                     self.in_flight_packets,
                     &self.label,
+                    now,
                 );
             }
         }
