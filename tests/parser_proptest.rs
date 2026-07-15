@@ -100,7 +100,7 @@ proptest! {
     /// Extended keepalive: `extract_keepalive_conn_info(build(info)) == info`.
     #[test]
     fn keepalive_ext_roundtrips(info in arb_conn_info()) {
-        let pkt = create_keepalive_packet_ext(info);
+        let pkt = create_keepalive_packet_ext(info, 1_000_000);
         prop_assert_eq!(get_packet_type(&pkt), Some(srtla_send::protocol::SRTLA_TYPE_KEEPALIVE));
         prop_assert!(extract_keepalive_timestamp(&pkt).is_some());
         prop_assert_eq!(extract_keepalive_conn_info(&pkt), Some(info));
@@ -173,7 +173,7 @@ proptest! {
     /// is detected as a keepalive, but is NOT an extended-info frame.
     #[test]
     fn standard_keepalive_has_timestamp_no_conn_info(_ in 0u8..1) {
-        let pkt = create_keepalive_packet();
+        let pkt = create_keepalive_packet(1_000_000);
         prop_assert!(is_srtla_keepalive(&pkt));
         prop_assert!(extract_keepalive_timestamp(&pkt).is_some());
         prop_assert!(extract_keepalive_conn_info(&pkt).is_none());

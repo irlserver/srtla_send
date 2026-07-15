@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/network-sim"]
+members = ["crates/network-sim", "crates/srtla-protocol"]
 
 [package]
 resolver = "3"
@@ -17,6 +17,7 @@ categories = ["network-programming", "multimedia"]
 rust-version = "1.88"
 
 [dependencies]
+srtla-protocol = { path = "crates/srtla-protocol" }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 rand = "0.9"

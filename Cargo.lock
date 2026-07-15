@@ -710,6 +710,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "srtla-protocol"
+version = "0.1.0"
+dependencies = [
+ "smallvec 2.0.0-alpha.12",
+]
+
+[[package]]
 name = "srtla_send"
 version = "3.0.0"
 dependencies = [
@@ -727,6 +734,7 @@ dependencies = [
  "serde_json",
  "smallvec 2.0.0-alpha.12",
  "socket2",
+ "srtla-protocol",
  "tempfile",
  "tokio",
  "tokio-test",

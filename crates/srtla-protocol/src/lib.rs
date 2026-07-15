@@ -1,10 +1,15 @@
+//! SRTLA wire protocol: pure, stateless packet (de)serialization.
+//!
+//! No clock, no state, no I/O — just byte layout for the SRTLA registration
+//! handshake, SRT ACK/NAK, and keepalives. The sender crate re-exports this as
+//! `crate::protocol`, so `use crate::protocol::*` keeps working there.
+
 mod builders;
 mod constants;
 mod parsers;
 mod types;
 
-// Re-export all public items for backwards compatibility
-// Consumers can still use `use crate::protocol::*`
+// Re-export the full public surface at the crate root.
 
 // Constants
 // Builders
@@ -42,7 +47,7 @@ mod tests {
             bitrate_bytes_per_sec: 2_500_000,
         };
 
-        let pkt = create_keepalive_packet_ext(info);
+        let pkt = create_keepalive_packet_ext(info, 123_456);
 
         // Verify packet length
         assert_eq!(pkt.len(), SRTLA_KEEPALIVE_EXT_LEN);
@@ -60,7 +65,7 @@ mod tests {
 
     #[test]
     fn test_standard_keepalive_no_conn_info() {
-        let pkt = create_keepalive_packet();
+        let pkt = create_keepalive_packet(123_456);
 
         // Standard keepalive should not have connection info
         assert_eq!(pkt.len(), 10);
@@ -79,14 +84,16 @@ mod tests {
             bitrate_bytes_per_sec: 1_000_000,
         };
 
-        let ext_pkt = create_keepalive_packet_ext(info);
+        // Same injected timestamp on both so the ext/std comparison below is
+        // exact (this crate no longer reads a clock).
+        let ext_pkt = create_keepalive_packet_ext(info, 123_456);
 
         // Old receiver behavior: only reads first 10 bytes
         let timestamp_from_ext = extract_keepalive_timestamp(&ext_pkt);
         assert!(timestamp_from_ext.is_some());
 
         // Compare with standard keepalive timestamp
-        let std_pkt = create_keepalive_packet();
+        let std_pkt = create_keepalive_packet(123_456);
         let timestamp_from_std = extract_keepalive_timestamp(&std_pkt);
         assert!(timestamp_from_std.is_some());
 

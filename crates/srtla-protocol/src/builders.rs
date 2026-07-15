@@ -17,12 +17,14 @@ pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG2_LEN] 
     pkt
 }
 
+/// `now` is the monotonic-ms timestamp stamped into the wire packet; the
+/// receiver echoes it back so the sender can measure keepalive RTT. Injected by
+/// the caller (this crate is I/O- and clock-free).
 #[allow(dead_code)]
-pub fn create_keepalive_packet() -> [u8; 10] {
+pub fn create_keepalive_packet(now: u64) -> [u8; 10] {
     let mut pkt = [0u8; 10];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
-    let ts = crate::utils::now_ms();
-    pkt[2..10].copy_from_slice(&ts.to_be_bytes());
+    pkt[2..10].copy_from_slice(&now.to_be_bytes());
     pkt
 }
 
@@ -43,13 +45,15 @@ pub fn create_keepalive_packet() -> [u8; 10] {
 /// This packet is backwards compatible:
 /// - Old receivers read bytes 0-9 (type + timestamp) and ignore the rest
 /// - New receivers detect magic at bytes 10-11 and parse connection info
-pub fn create_keepalive_packet_ext(info: ConnectionInfo) -> [u8; SRTLA_KEEPALIVE_EXT_LEN] {
+pub fn create_keepalive_packet_ext(
+    info: ConnectionInfo,
+    now: u64,
+) -> [u8; SRTLA_KEEPALIVE_EXT_LEN] {
     let mut pkt = [0u8; SRTLA_KEEPALIVE_EXT_LEN];
 
-    // Standard keepalive header (bytes 0-9)
+    // Standard keepalive header (bytes 0-9). `now` is the echoed RTT timestamp.
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
-    let ts = crate::utils::now_ms();
-    pkt[2..10].copy_from_slice(&ts.to_be_bytes());
+    pkt[2..10].copy_from_slice(&now.to_be_bytes());
 
     // Extended data (bytes 10-37)
     pkt[10..12].copy_from_slice(&SRTLA_KEEPALIVE_MAGIC.to_be_bytes());

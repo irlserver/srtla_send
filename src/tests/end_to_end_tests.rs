@@ -145,7 +145,7 @@ async fn test_keepalive_timing() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let packet = create_keepalive_packet();
+        let packet = create_keepalive_packet(crate::utils::now_ms());
         let timestamp = extract_keepalive_timestamp(&packet).unwrap();
         timestamps.push(timestamp);
     }
@@ -266,7 +266,7 @@ async fn test_concurrent_packet_processing() {
         let results_clone = results.clone();
         let handle = tokio::spawn(async move {
             // Create different types of packets
-            let keepalive = create_keepalive_packet();
+            let keepalive = create_keepalive_packet(crate::utils::now_ms());
             let timestamp = extract_keepalive_timestamp(&keepalive).unwrap();
 
             let acks = vec![i * 100u32, i * 100 + 1, i * 100 + 2];

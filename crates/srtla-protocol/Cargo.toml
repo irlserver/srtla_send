@@ -1,0 +1,11 @@
+[package]
+name = "srtla-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "SRTLA wire protocol: pure, stateless packet (de)serialization for REG handshakes, SRT ACK/NAK, and keepalives"
+license = "MIT"
+repository = "https://github.com/irlserver/srtla_send"
+rust-version = "1.88"
+
+[dependencies]
+smallvec = "=2.0.0-alpha.12"

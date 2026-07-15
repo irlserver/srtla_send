@@ -41,7 +41,7 @@ mod tests {
             bitrate_bytes_per_sec: 3_125_000,
         };
 
-        let pkt = create_keepalive_packet_ext(info);
+        let pkt = create_keepalive_packet_ext(info, crate::utils::now_ms());
         assert_eq!(pkt.len(), SRTLA_KEEPALIVE_EXT_LEN);
         assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
         assert!(is_srtla_keepalive(&pkt));
@@ -60,7 +60,7 @@ mod tests {
         assert!(tracker.waiting_for_keepalive_response);
 
         let sent_ts = T0.saturating_sub(50);
-        let mut echo = create_keepalive_packet_ext(info);
+        let mut echo = create_keepalive_packet_ext(info, crate::utils::now_ms());
         echo[2..10].copy_from_slice(&sent_ts.to_be_bytes());
 
         let measured = tracker

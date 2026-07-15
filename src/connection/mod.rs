@@ -363,7 +363,7 @@ impl SrtlaConnection {
             nak_count: self.congestion.nak_count as u32,
             bitrate_bytes_per_sec: (self.bitrate.current_bitrate_bps / 8.0) as u32,
         };
-        let pkt = create_keepalive_packet_ext(info);
+        let pkt = create_keepalive_packet_ext(info, now);
         self.last_sent = Some(now);
         self.last_keepalive_sent = Some(now);
         // Only set waiting flag and timestamp when we intend to measure RTT

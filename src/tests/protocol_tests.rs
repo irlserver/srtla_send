@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_create_keepalive_packet() {
-        let pkt = create_keepalive_packet();
+        let pkt = create_keepalive_packet(crate::utils::now_ms());
 
         assert_eq!(pkt.len(), 10);
         assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
@@ -246,7 +246,7 @@ mod tests {
         assert!(!is_srtla_reg2(&reg3_pkt));
         assert!(is_srtla_reg3(&reg3_pkt));
 
-        let keepalive_pkt = create_keepalive_packet();
+        let keepalive_pkt = create_keepalive_packet(crate::utils::now_ms());
         assert!(is_srtla_keepalive(&keepalive_pkt));
 
         let mut ack_pkt = vec![0u8; 20];
@@ -407,7 +407,7 @@ mod decode {
 
     #[test]
     fn decode_keepalive_valid() {
-        let pkt = create_keepalive_packet();
+        let pkt = create_keepalive_packet(crate::utils::now_ms());
 
         assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
         assert!(is_srtla_keepalive(&pkt));

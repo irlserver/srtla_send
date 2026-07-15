@@ -16,7 +16,9 @@ mod kalman;
 mod metrics;
 mod mode;
 mod priority;
-mod protocol;
+// Wire protocol lives in its own dependency-free crate; alias it as `protocol`
+// so `crate::protocol::*` keeps resolving in the binary's module tree.
+use srtla_protocol as protocol;
 mod registration;
 mod sender;
 mod stats;
