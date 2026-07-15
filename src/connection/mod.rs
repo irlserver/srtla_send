@@ -506,7 +506,7 @@ impl SrtlaConnection {
     /// cellular turns a transient HARQ stall (400-800ms) into a
     /// self-sustaining false death. A genuinely unresponsive link is
     /// pruned by `is_timed_out`/`CONN_TIMEOUT`, not here.
-    pub fn update_phase(&mut self) {
+    pub fn update_phase(&mut self, now_ms: u64) {
         const DEGRADED_QUALITY_THRESHOLD: f64 = 0.5;
         const DEGRADED_NAK_BURST_THRESHOLD: i32 = 5;
 
@@ -523,7 +523,7 @@ impl SrtlaConnection {
         match self.phase {
             // Auto-promote to Live if warming takes too long.
             LinkPhase::Warming { entered_ms, .. }
-                if now_ms().saturating_sub(entered_ms) >= WARMING_TIMEOUT_MS =>
+                if now_ms.saturating_sub(entered_ms) >= WARMING_TIMEOUT_MS =>
             {
                 debug!(
                     "{}: warming timeout ({}ms), auto-promoting to Live",
@@ -630,7 +630,7 @@ impl SrtlaConnection {
     /// data packets, creating `packet_log` entries that will never be
     /// properly ACKed. Early NAKs from these packets would also penalize
     /// the connection's quality score during startup.
-    pub(crate) fn clear_pre_registration_state(&mut self) {
+    pub(crate) fn clear_pre_registration_state(&mut self, now_ms: u64) {
         if !self.packet_log.is_empty() || self.congestion.nak_count > 0 {
             debug!(
                 "{}: clearing pre-registration state ({} in-flight, {} NAKs)",
@@ -648,7 +648,7 @@ impl SrtlaConnection {
         // REG3 received — begin warming phase
         self.phase = LinkPhase::Warming {
             rtt_probes: 0,
-            entered_ms: now_ms(),
+            entered_ms: now_ms,
         };
     }
 

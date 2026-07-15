@@ -96,7 +96,7 @@ impl SrtlaConnection {
                     RegistrationEvent::Reg3 => {
                         // Clear any phantom in-flight packets and NAK state
                         // accumulated during pre-registration data forwarding
-                        self.clear_pre_registration_state();
+                        self.clear_pre_registration_state(now);
                         self.connected = true;
                         self.last_received = Some(recv_time);
                         if self.reconnection.connection_established_ms == 0 {

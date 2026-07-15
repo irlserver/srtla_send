@@ -101,7 +101,7 @@ pub async fn handle_housekeeping(
         // Update bitrate calculation
         conn.calculate_bitrate(current_ms);
         // Drive link lifecycle phase transitions
-        conn.update_phase();
+        conn.update_phase(current_ms);
         // Adapt the per-connection batch-send regime to the observed
         // load. Cheap; no-op when the regime hasn't changed.
         conn.recompute_batch_regime();
