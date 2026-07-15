@@ -13,32 +13,28 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// The sans-IO core (connection state, selection, registration, congestion,
+// numeric helpers) lives in its own crate. Re-export its modules at the crate
+// root so the existing `crate::connection::*`, `crate::selection::*`, … paths
+// keep resolving throughout the shell.
+pub use srtla_core::{
+    config_snapshot, connection, mode, priority, registration, selection, utils,
+};
+
 pub mod config;
-// Pure hot-path config snapshot (core), split from the shell-coupled `config`.
-pub mod config_snapshot;
-pub mod connection;
 pub mod control;
 pub mod control_socket;
-pub mod ewma;
-pub mod kalman;
 pub mod metrics;
-pub mod mode;
 // Uplink socket I/O (shell): batched UDP socket + egress binders.
 pub mod net;
-pub mod priority;
 pub mod priority_listener;
 // The wire protocol lives in its own dependency-free crate. Alias it as
 // `protocol` so `crate::protocol::*` keeps resolving throughout the codebase.
 pub use srtla_protocol as protocol;
-pub mod registration;
-// Scheduler / link selection. Core logic (mutually dependent with `connection`),
-// so it lives top-level rather than under the `sender` shell.
-pub mod selection;
 pub mod sender;
 pub mod stats;
 pub mod subscriptions;
 pub mod toml_config;
-pub mod utils;
 
 // Test helpers module - available when test-internals feature is enabled
 #[cfg(any(test, feature = "test-internals"))]

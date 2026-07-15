@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use tracing_subscriber::EnvFilter;
 
 // Use mimalloc as the global allocator for the binary (non-Windows only)
@@ -7,28 +8,26 @@ use tracing_subscriber::EnvFilter;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// The sans-IO core modules live in the srtla-core crate. Alias them so
+// `crate::connection::*`, `crate::selection::*`, … keep resolving in the
+// binary's own module tree (main.rs compiles a module tree separate from lib.rs).
+use srtla_core::{
+    config_snapshot, connection, mode, priority, registration, selection, utils,
+};
+
 mod config;
-mod config_snapshot;
-mod connection;
 mod control;
 mod control_socket;
-mod ewma;
-mod kalman;
 mod metrics;
-mod mode;
 mod net;
-mod priority;
 mod priority_listener;
 // Wire protocol lives in its own dependency-free crate; alias it as `protocol`
 // so `crate::protocol::*` keeps resolving in the binary's module tree.
 use srtla_protocol as protocol;
-mod registration;
-mod selection;
 mod sender;
 mod stats;
 mod subscriptions;
 mod toml_config;
-mod utils;
 
 // Test helpers for binary tests
 #[cfg(any(test, feature = "test-internals"))]
@@ -75,7 +74,17 @@ struct Cli {
     config_file: Option<String>,
 
     /// Scheduling mode: classic, enhanced (default)
-    #[arg(long = "mode", value_enum, default_value = "enhanced")]
+    //
+    // `SchedulingMode` is a pure core type and deliberately knows nothing about
+    // clap. The CLI coupling lives here in the shell: parse the allowed strings
+    // (which drive --help text and completion) and map through the core type's
+    // own `FromStr`.
+    #[arg(
+        long = "mode",
+        default_value = "enhanced",
+        value_parser = PossibleValuesParser::new(["classic", "enhanced"])
+            .map(|s| s.parse::<SchedulingMode>().expect("possible values are valid modes")),
+    )]
     mode: SchedulingMode,
     /// Disable quality scoring (enhanced only)
     #[arg(long = "no-quality")]

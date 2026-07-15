@@ -148,15 +148,16 @@ impl SrtlaRegistrationManager {
     }
 }
 
-// Test-only accessor methods for probing
-#[cfg(test)]
+// Test-only accessor methods for probing. Gated on `test-internals` (not just
+// `test`) so the parent srtla_send crate can reach them cross-crate.
+#[cfg(any(test, feature = "test-internals"))]
 #[allow(dead_code)]
 impl SrtlaRegistrationManager {
-    pub(crate) fn probe_results_count(&self) -> usize {
+    pub fn probe_results_count(&self) -> usize {
         self.probe_results.len()
     }
 
-    pub(crate) fn simulate_probe_result(&mut self, conn_idx: usize, rtt_ms: u64) {
+    pub fn simulate_probe_result(&mut self, conn_idx: usize, rtt_ms: u64) {
         let now = now_ms();
         self.probe_results.push(ProbeResult {
             conn_idx,
@@ -165,7 +166,7 @@ impl SrtlaRegistrationManager {
         });
     }
 
-    pub(crate) fn set_probing_state_waiting(&mut self) {
+    pub fn set_probing_state_waiting(&mut self) {
         self.probing_state = ProbingState::WaitingForProbes;
         self.pending_timeout_at_ms = now_ms() + 2000;
     }

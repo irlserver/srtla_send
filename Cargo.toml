@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/network-sim", "crates/srtla-protocol"]
+members = ["crates/network-sim", "crates/srtla-core", "crates/srtla-protocol"]
 
 [package]
 resolver = "3"
@@ -17,6 +17,7 @@ categories = ["network-programming", "multimedia"]
 rust-version = "1.88"
 
 [dependencies]
+srtla-core = { path = "crates/srtla-core" }
 srtla-protocol = { path = "crates/srtla-protocol" }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -51,8 +52,9 @@ libc = "0.2"
 # test_helpers exposes advance_test_clock(), which calls tokio::time::advance —
 # only available with tokio's test-util. Pull it here so the test-internals
 # surface compiles standalone (e.g. `cargo build --all-features`), not just under
-# `cargo test` where dev-deps happen to unify test-util in.
-test-internals = ["tokio/test-util"]
+# `cargo test` where dev-deps happen to unify test-util in. Forward to srtla-core
+# so its cross-crate test surface (public fields, construction helpers) is exposed.
+test-internals = ["srtla-core/test-internals", "tokio/test-util"]
 
 [lib]
 name = "srtla_send"
@@ -63,6 +65,9 @@ name = "srtla_send"
 path = "src/main.rs"
 
 [dev-dependencies]
+# Enable srtla-core's test-internals surface for our own cross-crate tests
+# (public struct fields, construction helpers, pub(crate) predicates).
+srtla-core = { path = "crates/srtla-core", features = ["test-internals"] }
 tokio-test = "0.4"
 tempfile = "3"
 assert_matches = "1"

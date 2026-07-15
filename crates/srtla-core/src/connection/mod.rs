@@ -20,7 +20,7 @@ use tracing::debug;
 
 use crate::protocol::*;
 
-pub(crate) const STARTUP_GRACE_MS: u64 = 5_000;
+pub const STARTUP_GRACE_MS: u64 = 5_000;
 
 /// Number of RTT probes required before a link transitions from Warming to Live.
 const WARMING_RTT_PROBES: u32 = 2;
@@ -124,25 +124,15 @@ impl Default for CachedQuality {
 }
 
 pub struct SrtlaConnection {
-    pub(crate) conn_id: u64,
+    pub conn_id: u64,
     #[allow(dead_code)]
-    #[cfg(feature = "test-internals")]
+    // Shell production API: the sender binds egress sockets to this IP and
+    // reports it in stats, so it is unconditionally public across the crate seam.
     pub local_ip: IpAddr,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) local_ip: IpAddr,
     pub label: String,
-    #[cfg(feature = "test-internals")]
     pub connected: bool,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) connected: bool,
-    #[cfg(feature = "test-internals")]
     pub window: i32,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) window: i32,
-    #[cfg(feature = "test-internals")]
     pub in_flight_packets: i32,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) in_flight_packets: i32,
     /// Packet log: maps sequence number -> send timestamp (ms).
     /// Uses FxHashMap for O(1) insert/remove instead of O(256) linear scan.
     #[cfg(feature = "test-internals")]
@@ -155,15 +145,14 @@ pub struct SrtlaConnection {
     pub highest_acked_seq: i32,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) highest_acked_seq: i32,
-    #[cfg(feature = "test-internals")]
     pub last_received: Option<u64>,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_received: Option<u64>,
-    #[cfg(feature = "test-internals")]
     pub last_sent: Option<u64>,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_sent: Option<u64>,
     /// Timestamp of the last keepalive sent (for periodic telemetry)
+    // Test-only exposure: production shell never touches this, but cross-crate
+    // liveness tests stamp it directly.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub last_keepalive_sent: Option<u64>,
+    #[cfg(not(any(test, feature = "test-internals")))]
     pub(crate) last_keepalive_sent: Option<u64>,
     /// `now_ms()` of this link's last delivery proof: an EARNED ACK (this link
     /// owned an acked seq) or a keepalive-RTT response. Stamped ONLY at those
@@ -171,18 +160,20 @@ pub struct SrtlaConnection {
     /// link that merely echoes traffic while its ACK/RTT path is dead still goes
     /// stale. `0` = no proof yet. Read only by the `stall_deselect` selection
     /// guard; never a liveness/timeout signal.
-    pub(crate) last_ack_or_rtt_sample_ms: u64,
+    pub last_ack_or_rtt_sample_ms: u64,
     /// Transient per-select flag: set by `select_connection_idx` when
     /// `stall_deselect` is on and this link is a stalled black hole while a
     /// healthier link exists. Recomputed every select call and read only by the
     /// mode selectors in that same call; it is a selection penalty ONLY and
     /// never affects `is_timed_out`/re-registration.
+    // Test-only exposure: production shell never reads this directly, but
+    // cross-crate stall-detection tests assert on it.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub stall_gated: bool,
+    #[cfg(not(any(test, feature = "test-internals")))]
     pub(crate) stall_gated: bool,
     // Sub-structs for organized state management
-    #[cfg(feature = "test-internals")]
     pub rtt: RttTracker,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) rtt: RttTracker,
     #[cfg(feature = "test-internals")]
     pub congestion: CongestionControl,
     #[cfg(not(feature = "test-internals"))]
@@ -191,16 +182,13 @@ pub struct SrtlaConnection {
     pub bitrate: BitrateTracker,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) bitrate: BitrateTracker,
-    #[cfg(feature = "test-internals")]
     pub reconnection: ReconnectionState,
-    #[cfg(not(feature = "test-internals"))]
-    pub(crate) reconnection: ReconnectionState,
     /// Cached quality multiplier for performance optimization.
     /// Recalculated every 50ms instead of on every packet.
     pub(crate) quality_cache: CachedQuality,
     /// Batch sender for optimized packet transmission.
     /// Buffers up to 16 packets before flushing, reducing syscall overhead.
-    pub(crate) batch_sender: BatchSender,
+    pub batch_sender: BatchSender,
     /// Link lifecycle phase — determines scheduler eligibility.
     #[cfg(feature = "test-internals")]
     pub phase: LinkPhase,
@@ -209,20 +197,20 @@ pub struct SrtlaConnection {
     /// Latest weak-link classifier verdict. Updated each housekeeping
     /// tick from `WeakLinkFilter::classify`. Consumed by Enhanced
     /// selection as an admission gate.
-    pub(crate) weak: bool,
+    pub weak: bool,
     /// Latest CC state from `LinkCcController::tick_all`. Drives the CC
     /// controller's own per-window bitrate backoff. It is intentionally
     /// *not* a routing-admission gate: `BackingOff` flips on a single
     /// loss window and would make selection twitchy, so the routing gate
     /// uses the sustained `loss_degraded` latch instead.
-    pub(crate) cc_backing_off: bool,
+    pub cc_backing_off: bool,
     /// Latest `target_bps` from `LinkCcController::tick_all`. Consumed
     /// by Enhanced selection as a soft cap: when the link's measured
     /// throughput approaches this value the link's score is scaled
     /// down so the scheduler routes less traffic through it before
     /// loss actually fires. `0` means "no signal" — selection skips
     /// the cap.
-    pub(crate) cc_target_bps: u64,
+    pub cc_target_bps: u64,
     /// Latched verdict from `LinkCongestionState`: the link's
     /// time-decayed loss EWMA has been sustained high (see
     /// `LOSS_DEGRADE_*`, ~4s sustain with hysteresis). Drives a graded
@@ -231,7 +219,7 @@ pub struct SrtlaConnection {
     /// scheduling (a genuinely dead link is handled by
     /// `is_timed_out`/`CONN_TIMEOUT`); a gated link keeps a trickle of
     /// traffic so the loss EWMA can recover and clear the latch.
-    pub(crate) loss_degraded: bool,
+    pub loss_degraded: bool,
 }
 
 impl SrtlaConnection {
@@ -547,7 +535,7 @@ impl SrtlaConnection {
     /// `is_timed_out`/`CONN_TIMEOUT`, not here. This is a selection penalty
     /// input ONLY — it never affects `is_timed_out`/re-registration/CONN_TIMEOUT.
     #[inline]
-    pub(crate) fn is_stalled(&self, now_ms: u64, min_in_flight: i32, stale_ms: u64) -> bool {
+    pub fn is_stalled(&self, now_ms: u64, min_in_flight: i32, stale_ms: u64) -> bool {
         self.connected
             && self.in_flight_packets >= min_in_flight
             && self.last_ack_or_rtt_sample_ms != 0
@@ -597,7 +585,7 @@ impl SrtlaConnection {
     /// data packets, creating `packet_log` entries that will never be
     /// properly ACKed. Early NAKs from these packets would also penalize
     /// the connection's quality score during startup.
-    pub(crate) fn clear_pre_registration_state(&mut self, now_ms: u64) {
+    pub fn clear_pre_registration_state(&mut self, now_ms: u64) {
         if !self.packet_log.is_empty() || self.congestion.nak_count > 0 {
             debug!(
                 "{}: clearing pre-registration state ({} in-flight, {} NAKs)",

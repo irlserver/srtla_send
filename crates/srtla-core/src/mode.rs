@@ -63,19 +63,6 @@ impl std::str::FromStr for SchedulingMode {
     }
 }
 
-impl clap::ValueEnum for SchedulingMode {
-    fn value_variants<'a>() -> &'a [Self] {
-        &[SchedulingMode::Classic, SchedulingMode::Enhanced]
-    }
-
-    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
-        match self {
-            SchedulingMode::Classic => Some(clap::builder::PossibleValue::new("classic")),
-            SchedulingMode::Enhanced => Some(clap::builder::PossibleValue::new("enhanced")),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
