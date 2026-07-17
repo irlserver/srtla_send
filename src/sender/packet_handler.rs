@@ -2,16 +2,16 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use smallvec::SmallVec;
+use srtla_core::connection::{SrtlaConnection, SrtlaIncoming};
+use srtla_core::registration::SrtlaRegistrationManager;
+use srtla_core::selection::select_connection_idx;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, trace, warn};
 
-use srtla_core::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, UplinkPacket};
 use crate::config::ConfigSnapshot;
-use srtla_core::connection::{SrtlaConnection, SrtlaIncoming};
-use srtla_core::registration::SrtlaRegistrationManager;
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -80,9 +80,24 @@ pub async fn process_connection_events(
     }
 
     for srtla_ack in incoming.srtla_ack_numbers.iter() {
-        for c in connections.iter_mut() {
-            if c.handle_srtla_ack_specific(*srtla_ack as i32, classic, current_time_ms) {
-                break;
+        // Match the arrival link's packet log FIRST. The receiver sends an
+        // SRTLA ACK back on the link that delivered the packet, and with
+        // duplicate probing the same sequence can sit in two links' logs (the
+        // unique copy and a probe). A first-log-wins scan would let the healthy
+        // link's ACK stamp delivery proof on the gated link — falsely warming
+        // its rejoin dwell. The fallback scan is kept for ACKs whose owner
+        // can't be resolved from the arrival link (e.g. after a reconnect
+        // cleared its log).
+        let found_on_arrival =
+            connections[idx].handle_srtla_ack_specific(*srtla_ack as i32, classic, current_time_ms);
+        if !found_on_arrival {
+            for (i, c) in connections.iter_mut().enumerate() {
+                if i == idx {
+                    continue;
+                }
+                if c.handle_srtla_ack_specific(*srtla_ack as i32, classic, current_time_ms) {
+                    break;
+                }
             }
         }
         for c in connections.iter_mut() {
@@ -138,7 +153,10 @@ pub async fn handle_uplink_packet(
                     match io.socket.send(&pkt).await {
                         Ok(_) => connections[idx].note_sent(srtla_core::utils::now_ms()),
                         Err(e) => {
-                            warn!("{}: failed to send immediate REG1: {e}", connections[idx].label)
+                            warn!(
+                                "{}: failed to send immediate REG1: {e}",
+                                connections[idx].label
+                            )
                         }
                     }
                 }
@@ -267,8 +285,11 @@ pub async fn handle_srt_packet(
             let pkt = &recv_buf[..n];
             let seq = srtla_protocol::get_srt_sequence_number(pkt);
             if !registration_complete {
-                let sel_idx =
-                    select_pre_registration_connection(connections, *last_selected_idx, packet_time_ms);
+                let sel_idx = select_pre_registration_connection(
+                    connections,
+                    *last_selected_idx,
+                    packet_time_ms,
+                );
                 if let Some(sel_idx) = sel_idx {
                     forward_via_connection(
                         sel_idx,
@@ -290,21 +311,28 @@ pub async fn handle_srt_packet(
             let mut sel_idx =
                 select_connection_idx(connections, *last_selected_idx, packet_time_ms, config_snap);
 
-            // Keyframe priority: route critical packets to the highest-quality
-            // link. The critical time window is opened over the priority
-            // sidecar by the encoder front-end, which parses NAL units and
-            // knows exactly when a keyframe / parameter set is in flight (see
-            // srtla_core::priority). srtla_send sees only opaque SRT payloads, so it
-            // never guesses at keyframes itself.
+            // Best-path override for must-land traffic. Two triggers share it:
+            //
+            // - Keyframe priority: the critical time window is opened over the
+            //   priority sidecar by the encoder front-end, which parses NAL
+            //   units and knows exactly when a keyframe / parameter set is in
+            //   flight (see srtla_core::priority). srtla_send sees only opaque
+            //   SRT payloads, so it never guesses at keyframes itself.
+            // - SRT retransmits (R bit in the data header): a retransmit fills
+            //   an existing hole in the receiver buffer, so it must not ride a
+            //   score-crushed link — recovery traffic that arrives late is the
+            //   steady-state glitch a degraded leg keeps causing even after
+            //   routing has mostly moved off it.
             //
             // Only data packets have seq != None (control packets have MSB set).
             if seq.is_some()
-                && critical_window.is_critical_now(packet_time_ms)
+                && (critical_window.is_critical_now(packet_time_ms)
+                    || srtla_protocol::is_srt_data_retransmit(pkt))
                 && let Some(best_idx) = srtla_core::priority::select_best_quality_idx(connections)
                 && sel_idx != Some(best_idx)
             {
                 trace!(
-                    "critical override (window): link {} -> {}",
+                    "critical override (window/retransmit): link {} -> {}",
                     sel_idx.map_or(-1, |i| i as i64),
                     best_idx as i64
                 );
@@ -323,6 +351,10 @@ pub async fn handle_srt_packet(
                     packet_time_ms,
                 )
                 .await;
+                if seq.is_some() {
+                    send_stall_probes(sel_idx, pkt, seq, connections, conn_io, packet_time_ms)
+                        .await;
+                }
             } else {
                 warn!("no available connection to forward packet from {}", src);
             }
@@ -390,13 +422,60 @@ pub async fn forward_via_connection(
     }
 
     // Flush if batch threshold reached
-    if needs_flush
-        && let Some(io) = conn_io.get(&connections[sel_idx].conn_id)
-    {
+    if needs_flush && let Some(io) = conn_io.get(&connections[sel_idx].conn_id) {
         let conn = &mut connections[sel_idx];
         if let Err(e) = send_connection_batch(conn, &io.socket).await {
             warn!(
                 "{}: batch flush failed, marking for recovery: {}",
+                conn.label, e
+            );
+            conn.mark_for_recovery();
+        }
+    }
+}
+
+/// Duplicate-packet probing on stall-gated links (librist-style warm restore).
+///
+/// A gated link carries no unique payload, so its only delivery proof would be
+/// the 1 s keepalive echo — which proves the path echoes 38-byte control
+/// frames, not that it can deliver data-sized packets. Instead, one in
+/// [`srtla_core::config_snapshot::STALL_PROBE_ONE_IN_N`] routed data packets is
+/// *also* queued on each gated link. The copy reuses the original SRT sequence
+/// number: the SRT receiver dedups it, so a lost or late probe can never stall
+/// the receiver buffer, while a delivered one earns the gated link an SRTLA ACK
+/// on its own socket — exactly the sustained proof the rejoin dwell requires.
+///
+/// Deliberately NOT inserted into `seq_tracker`: the tracker must keep mapping
+/// the sequence to the link that carried the unique copy, so a NAK still
+/// penalizes the link that actually lost stream data. The SRTLA ACK for the
+/// probe attributes correctly because `process_connection_events` matches the
+/// arrival link's packet log first.
+async fn send_stall_probes(
+    sel_idx: usize,
+    pkt: &[u8],
+    seq: Option<u32>,
+    connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
+    packet_time_ms: u64,
+) {
+    for (i, conn) in connections.iter_mut().enumerate() {
+        if i == sel_idx {
+            continue;
+        }
+        if !conn.is_stall_gated() || !conn.connected {
+            continue;
+        }
+        if !conn.stall_probe_due() {
+            continue;
+        }
+        trace!("{}: sending duplicate probe (seq {:?})", conn.label, seq);
+        let needs_flush = conn.queue_data_packet(pkt, seq, packet_time_ms);
+        if needs_flush
+            && let Some(io) = conn_io.get(&conn.conn_id)
+            && let Err(e) = send_connection_batch(conn, &io.socket).await
+        {
+            warn!(
+                "{}: probe batch flush failed, marking for recovery: {}",
                 conn.label, e
             );
             conn.mark_for_recovery();

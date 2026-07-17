@@ -82,16 +82,20 @@ struct Cli {
 
     /// Disable the stalled-link deselect guard (on by default). The guard skips
     /// a link whose in-flight backlog is high while its last delivery proof has
-    /// gone stale, provided a healthier link can carry the traffic; it recovers
-    /// the link automatically on its next keepalive round-trip.
+    /// gone stale, provided a healthier link can carry the traffic. While
+    /// gated the link carries keepalives plus a sparse duplicate-packet probe
+    /// trickle; it rejoins after delivery proof has been sustained for the
+    /// rejoin dwell (quick to drop, conservative to rejoin).
     #[arg(long = "no-stall-deselect")]
     no_stall_deselect: bool,
     /// In-flight packet backlog at or above which a link becomes a stall
     /// candidate for `--no-stall-deselect`.
     #[arg(long = "stall-min-in-flight", default_value_t = config::STALL_MIN_IN_FLIGHT_PACKETS)]
     stall_min_in_flight: i32,
-    /// Delivery-proof staleness window (ms) after which a stall-candidate link
-    /// is deselected.
+    /// Ceiling (ms) on the delivery-proof staleness window after which a
+    /// stall-candidate link is deselected. The effective window is
+    /// RTT-adaptive (4x smoothed RTT, floored at 1000 ms) and this value caps
+    /// it; links without an RTT baseline use the ceiling directly.
     #[arg(long = "stall-ack-stale-ms", default_value_t = config::STALL_ACK_STALE_MS)]
     stall_ack_stale_ms: u64,
 
@@ -213,8 +217,7 @@ async fn main() -> Result<()> {
 
     // The CLI binds each uplink by its source IP, which on a multi-homed host
     // selects the egress via source-based routing.
-    let binder: std::sync::Arc<dyn net::UplinkBinder> =
-        std::sync::Arc::new(net::SourceIpBinder);
+    let binder: std::sync::Arc<dyn net::UplinkBinder> = std::sync::Arc::new(net::SourceIpBinder);
 
     sender::run_sender_with_config(
         local_srt_port,

@@ -25,28 +25,28 @@ use housekeeping::handle_housekeeping;
 // Re-exported for the NAK-attribution conformance tests so they drive the real
 // production path rather than a mirrored copy.
 #[allow(unused_imports)]
-pub(crate) use packet_handler::attribute_nak;
+pub(crate) use packet_handler::{attribute_nak, process_connection_events};
 use packet_handler::{
     drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
 };
 #[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
+use srtla_core::registration::SrtlaRegistrationManager;
 use status::log_connection_status;
 use tokio::net::UdpSocket;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{self, Duration, Instant};
 use tracing::{debug, info, warn};
-pub use uplink::ConnIoMap;
 // `ConnIo` is constructed only by tests (production builds it inside
 // `connections::connect_uplink`); re-export it just for the test surface.
 #[cfg(any(test, feature = "test-internals"))]
 pub use uplink::ConnIo;
+pub use uplink::ConnIoMap;
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 
 use crate::config::DynamicConfig;
-use srtla_core::registration::SrtlaRegistrationManager;
 use crate::stats::SharedStats;
 
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
