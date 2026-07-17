@@ -28,7 +28,7 @@ This Rust implementation builds upon several open source projects and ideas:
 
 ### Scheduling Modes
 
-The sender supports three mutually exclusive scheduling modes:
+The sender supports two mutually exclusive scheduling modes:
 
 #### Enhanced Mode (Default)
 
@@ -44,23 +44,14 @@ The sender supports three mutually exclusive scheduling modes:
 - Pure capacity-based selection without quality awareness
 - Enable via `--mode classic`
 
-#### RTT-Threshold Mode
+### Stalled-Link Deselect (On by Default)
 
-- **Reduces Packet Reordering**: Groups links by RTT and strongly prefers low-RTT ("fast") links
-- **Threshold-Based Selection**: Links within `min_rtt + delta` are considered "fast"
-- **Quality-Aware Within Fast Links**: Applies NAK penalties when choosing among fast links
-- **Automatic Fallback**: Uses slow links only when fast links are saturated
-- **Enable via**: `--mode rtt-threshold`
-- **Configure delta**: `--rtt-delta-ms N` (default 30ms) or runtime `rtt-delta N`
-- **Use Case**: Heterogeneous networks where some links have significantly higher latency (e.g., satellite + cellular)
-
-### Optional Smart Exploration (Enhanced Mode Only)
-
-- **Context-Aware Discovery**: Tests alternative connections when current best is degrading and alternatives have recovered
-- **Periodic Fallback**: Every 30 seconds for 300ms as a safety net
-- **Smart Switching**: Tries second-best connections instead of always sticking to current best
-- **Enable via**: `--exploration` flag or runtime command `explore on`
-- **Use Case**: More aggressive connection testing in unstable network conditions
+- **What it does**: Temporarily excludes a link that is holding a large in-flight backlog while producing no fresh delivery proof (no earned ACK and no keepalive round-trip within the staleness window), as long as a healthier link can carry the traffic.
+- **Independent liveness signal**: The staleness clock is stamped only on an earned ACK or a completed keepalive round-trip, never on generic inbound bytes, so a link that merely echoes traffic while its data path is dead still goes stale.
+- **Self-recovering**: A deselected link keeps sending keepalives. Its next keepalive round-trip clears the stall on its own, so the scheduler never probes a dead link blindly. Genuinely dead links are still pruned by the normal 15 second connection timeout.
+- **Selection penalty only**: It never affects timeouts, re-registration, or connection liveness. It is a routing decision, nothing more.
+- **Disable via**: `--no-stall-deselect`, or the `set_stall_deselect` JSON-RPC method. Thresholds are tunable with `--stall-min-in-flight` and `--stall-ack-stale-ms`.
+- **Use Case**: Satellite links (Starlink) during obstructions or handovers, where a link keeps a backlog but briefly stops delivering.
 
 ## Assumptions and Prerequisites
 
@@ -136,11 +127,15 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 
 ### Options
 
-- `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default), `rtt-threshold`
-- `--no-quality`: Disable quality scoring (enhanced/rtt-threshold only)
-- `--exploration`: Enable connection exploration (enhanced only)
-- `--rtt-delta-ms <N>`: RTT delta threshold in ms (default: 30, rtt-threshold only)
+- `--mode <MODE>`: Scheduling mode: `classic`, `enhanced` (default)
+- `--no-quality`: Disable quality scoring (enhanced only)
+- `--no-stall-deselect`: Disable the stalled-link deselect guard (on by default). The guard skips a link whose in-flight backlog is high while its last delivery proof (an earned ACK or keepalive round-trip) has gone stale, provided a healthier link can carry the traffic. The link recovers automatically on its next keepalive round-trip, so nothing is probed blindly. This mainly helps satellite links (Starlink obstructions and handovers) that keep a large backlog while briefly delivering nothing.
+- `--stall-min-in-flight <N>`: In-flight backlog (packets) at or above which a link becomes a stall candidate (default 32)
+- `--stall-ack-stale-ms <MS>`: Delivery-proof staleness window in milliseconds after which a stall candidate is deselected (default 3000)
+- `--config <PATH>`: Path to a TOML config file (reloaded on SIGHUP)
 - `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `/tmp/srtla.sock`)
+- `--priority-bind <ADDR:PORT>`: UDP sidecar address for encoder keyframe priority hints
+- `--metrics-bind <ADDR:PORT>`: Expose a Prometheus scrape endpoint at `/metrics`
 - `-v, --version`: Print version and exit
 
 ## Example Usage
@@ -169,12 +164,6 @@ RUST_LOG=info ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 
 
 ```bash
 ./target/release/srtla_send --mode classic 6000 rec.example.com 5000 ./uplinks.txt
-```
-
-**With RTT-threshold mode:**
-
-```bash
-./target/release/srtla_send --mode rtt-threshold --rtt-delta-ms 50 6000 rec.example.com 5000 ./uplinks.txt
 ```
 
 **With quality scoring disabled:**
@@ -212,34 +201,53 @@ Type commands directly into the running process and press Enter.
 
 ### Method 2: Unix Domain Socket (Unix only)
 
-Use the `--control-socket` option to enable remote control via Unix socket:
+Use the `--control-socket` option to enable remote control via Unix socket. The wire format is JSON-RPC 2.0, one request per line. Full method reference lives at [docs/CONTROL_PROTOCOL.md](docs/CONTROL_PROTOCOL.md).
 
 ```bash
 # Start with Unix socket control
 ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 10.0.0.1 5000 /tmp/srtla_ips
 
-# Send commands remotely
-echo 'mode classic' | socat - UNIX-CONNECT:/tmp/srtla.sock
-echo 'status' | socat - UNIX-CONNECT:/tmp/srtla.sock
+# Fetch current status
+echo '{"jsonrpc":"2.0","id":1,"method":"get_status"}' \
+    | socat - UNIX-CONNECT:/tmp/srtla.sock
+
+# Switch scheduler mode
+echo '{"jsonrpc":"2.0","id":1,"method":"set_mode","params":{"mode":"classic"}}' \
+    | socat - UNIX-CONNECT:/tmp/srtla.sock
 ```
 
-### Available Commands
+### Available Methods
 
-- `mode classic` - Switch to classic mode
-- `mode enhanced` - Switch to enhanced mode (default)
-- `mode rtt-threshold` - Switch to RTT-threshold mode
-- `quality on|off` - Enable/disable quality scoring
-- `explore on|off` - Enable/disable connection exploration
-- `rtt-delta <ms>` - Set RTT delta threshold in milliseconds
-- `status` - Display current configuration
+- `set_mode { "mode": "classic"|"enhanced" }`
+- `set_quality { "enabled": bool }`
+- `get_status` returns the full config snapshot and priority-sidecar counters
+- `get_stats` returns per-link telemetry JSON
+- `subscribe` / `unsubscribe` to a topic (`stats` or `priority.window`) for streamed updates
+
+Keyframe priority hints travel on a dedicated UDP sidecar, not the control socket. See [docs/KEYFRAME_PRIORITY.md](docs/KEYFRAME_PRIORITY.md).
+
+## Prometheus `/metrics`
+
+Pass `--metrics-bind ADDR:PORT` to expose a Prometheus scrape endpoint at `/metrics`. No additional deps — hand-rolled over `tokio::net::TcpListener`. Serves `GET /metrics` and `GET /` with text format (version 0.0.4); anything else returns 404. Example:
+
+```
+srtla_send --metrics-bind 127.0.0.1:9099 \
+           --priority-bind 127.0.0.1:7000 \
+           --control-socket /tmp/srtla.sock \
+           6000 rec.example.com 5000 /tmp/uplinks
+```
+
+```
+curl -s 127.0.0.1:9099/metrics
+```
+
+Exposed series include `srtla_send_link_up`, `srtla_send_link_rtt_ms`, `srtla_send_link_window`, `srtla_send_link_in_flight`, `srtla_send_link_nak_total`, `srtla_send_link_bitrate_bytes_per_second`, `srtla_send_link_quality_multiplier`, plus aggregate `srtla_send_active_links`, `srtla_send_total_window`, `srtla_send_critical_windows_total`, and the current `srtla_send_mode` as a numeric gauge.
 
 ### Connection Selection Algorithm Details
 
 **Classic Mode**: Matches the original srtla_send logic without any enhancements.
 
-**Enhanced Mode** (default): Quality-based scoring that punishes connections with recent NAKs. More recent NAKs = more punishment. Additional 30% penalty (0.7x multiplier) for NAK bursts (≥5 NAKs in short time). Optional connection exploration for testing alternative connections.
-
-**RTT-Threshold Mode**: Groups links into "fast" and "slow" based on RTT measurements. Links within `min_rtt + delta` (default 30ms) are "fast" and strongly preferred. When quality scoring is also enabled, NAK penalties are applied within the fast link group. Falls back to slow links only when all fast links are saturated. Useful for reducing packet reordering in networks with heterogeneous latencies.
+**Enhanced Mode** (default): Quality-based scoring that punishes connections with recent NAKs. More recent NAKs mean more punishment. Additional 30% penalty (0.7x multiplier) for NAK bursts (≥5 NAKs in short time).
 
 ## IP List Reload (Unix only)
 
@@ -323,7 +331,6 @@ With properly configured connections, you should observe:
 - Per-packet connection selection decisions
 - Quality multiplier calculations
 - NAK burst detections and recovery
-- Exploration attempts
 - Hysteresis decisions
 
 ### Troubleshooting
@@ -331,8 +338,8 @@ With properly configured connections, you should observe:
 **If only some connections are used**:
 
 1. Check for NAKs in logs - degraded connections naturally get less traffic in enhanced mode
-2. Try classic mode: `mode classic` - disables quality awareness for pure capacity-based distribution
-3. Temporarily disable quality scoring: `quality off`
+2. Try classic mode via `set_mode { "mode": "classic" }` - disables quality awareness for pure capacity-based distribution
+3. Temporarily disable quality scoring via `set_quality { "enabled": false }`
 4. Verify all uplinks can reach the receiver (check for timeout messages)
 5. Check RTT differences - high-RTT connections get slightly less traffic in enhanced mode (3% max difference)
 
@@ -375,10 +382,6 @@ If needed, these can be adjusted in `src/sender/selection/`:
 - `MIN_RTT_MS`: 50ms - minimum RTT for calculation (prevents division issues)
 - `MAX_RTT_BONUS`: 1.03 (3% max bonus) - maximum RTT bonus multiplier
 
-**Exploration (`enhanced.rs`):**
-
-- Exploration period: `should_explore_now()` function, currently 30s - adjust exploration interval
-
 ### Runtime Optimization
 
 For maximum throughput:
@@ -391,5 +394,4 @@ For maximum throughput:
 For maximum stability:
 
 - Use classic mode (`--mode classic`) for predictable, simple behavior
-- Disable exploration (`explore off`) if not needed
 - Increase hysteresis threshold if experiencing unnecessary switching

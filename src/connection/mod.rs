@@ -21,14 +21,98 @@ pub use incoming::SrtlaIncoming;
 pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
-pub use socket::{bind_from_ip, resolve_remote};
-use tokio::time::Instant;
+// Host-side binder for platforms that steer egress by network handle (Android).
+// Exported for library consumers; the CLI binary does not construct it. Unix
+// only: it binds by raw fd, which Windows does not have.
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub use socket::CallbackBinder;
+pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};
 use tracing::debug;
 
 use crate::protocol::*;
 use crate::utils::now_ms;
 
 pub(crate) const STARTUP_GRACE_MS: u64 = 5_000;
+
+/// Number of RTT probes required before a link transitions from Warming to Live.
+const WARMING_RTT_PROBES: u32 = 2;
+/// Maximum time in ms a link may stay in Warming before auto-promoting to Live.
+/// Prevents links from getting stuck if RTT probes are slow or lost.
+const WARMING_TIMEOUT_MS: u64 = 5_000;
+
+/// Link lifecycle phase.
+///
+/// A phase *weights* a link's score; it does not remove the link. `Registering`
+/// is the sole exception, and it is not a quality judgement: the receiver has
+/// not returned REG3, so data sent on that link would be discarded by the
+/// protocol itself.
+///
+/// This mirrors the model the phase machine was ported from, where the
+/// scheduler multiplies a link's score by a per-phase weight and only a dead
+/// link is filtered out. It also matches the rule the rest of this scheduler
+/// follows: `weak` and `loss_degraded` crush a score but keep the link rankable
+/// (`GATED_LINK_PENALTY`), and `stall_gated` only ever fires when a healthier
+/// link exists. Nothing is hard-removed for quality.
+///
+/// `Warming` used to be a hard exclusion, which broke that rule in the one place
+/// it mattered most: at go-live *every* link is warming, so the candidate pool
+/// was empty and the sender dropped the stream until the first link was promoted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkPhase {
+    /// Waiting for REG3 handshake to complete.
+    #[default]
+    Registering,
+    /// REG3 received, accumulating RTT probes. Usable, but de-rated: the link's
+    /// RTT baseline is only a keepalive or two old, so the window/in-flight
+    /// signal that drives selection is still coarse.
+    Warming { rtt_probes: u32, entered_ms: u64 },
+    /// Fully operational — scheduler may use this link.
+    Live,
+    /// Quality has degraded (high NAK rate / low quality multiplier, or
+    /// a sustained loss EWMA). Scheduler still uses this link but its
+    /// score is reduced. There is no removed/cooldown phase: a link is
+    /// never excluded for quality, only de-prioritised, so it keeps the
+    /// ACK traffic that proves its recovery. Truly dead links are pruned
+    /// by `is_timed_out`/`CONN_TIMEOUT`.
+    Degraded,
+}
+
+impl LinkPhase {
+    /// Whether the scheduler is allowed to send data on this link.
+    ///
+    /// Only `Registering` is excluded, and only because the protocol forbids it
+    /// (no REG3 yet). Every other phase is schedulable and expresses itself
+    /// through [`LinkPhase::weight`] instead.
+    pub fn is_schedulable(&self) -> bool {
+        !matches!(self, LinkPhase::Registering)
+    }
+
+    /// Scheduling weight contributed by this phase, folded into the link's score.
+    ///
+    /// `Degraded` stays at 1.0 deliberately. Degradation is already priced in
+    /// twice — by the quality multiplier that demoted the link in the first
+    /// place, and by the `weak`/`loss_degraded` admission gates — so charging it
+    /// a third time here would just double-count the same signal.
+    pub fn weight(&self) -> f64 {
+        match self {
+            LinkPhase::Registering => 0.0,
+            LinkPhase::Warming { .. } => 0.8,
+            LinkPhase::Live | LinkPhase::Degraded => 1.0,
+        }
+    }
+}
+
+impl std::fmt::Display for LinkPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkPhase::Registering => write!(f, "registering"),
+            LinkPhase::Warming { rtt_probes, .. } => write!(f, "warming({rtt_probes})"),
+            LinkPhase::Live => write!(f, "live"),
+            LinkPhase::Degraded => write!(f, "degraded"),
+        }
+    }
+}
 
 /// Interval in milliseconds between quality multiplier recalculations.
 /// Caching reduces expensive exp() calls from every packet to ~20 times per second.
@@ -94,15 +178,28 @@ pub struct SrtlaConnection {
     #[cfg(not(feature = "test-internals"))]
     pub(crate) highest_acked_seq: i32,
     #[cfg(feature = "test-internals")]
-    pub last_received: Option<Instant>,
+    pub last_received: Option<u64>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_received: Option<Instant>,
+    pub(crate) last_received: Option<u64>,
     #[cfg(feature = "test-internals")]
-    pub last_sent: Option<Instant>,
+    pub last_sent: Option<u64>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) last_sent: Option<Instant>,
+    pub(crate) last_sent: Option<u64>,
     /// Timestamp of the last keepalive sent (for periodic telemetry)
-    pub(crate) last_keepalive_sent: Option<Instant>,
+    pub(crate) last_keepalive_sent: Option<u64>,
+    /// `now_ms()` of this link's last delivery proof: an EARNED ACK (this link
+    /// owned an acked seq) or a keepalive-RTT response. Stamped ONLY at those
+    /// two sites — NEVER on generic inbound bytes (unlike `last_received`), so a
+    /// link that merely echoes traffic while its ACK/RTT path is dead still goes
+    /// stale. `0` = no proof yet. Read only by the `stall_deselect` selection
+    /// guard; never a liveness/timeout signal.
+    pub(crate) last_ack_or_rtt_sample_ms: u64,
+    /// Transient per-select flag: set by `select_connection_idx` when
+    /// `stall_deselect` is on and this link is a stalled black hole while a
+    /// healthier link exists. Recomputed every select call and read only by the
+    /// mode selectors in that same call; it is a selection penalty ONLY and
+    /// never affects `is_timed_out`/re-registration.
+    pub(crate) stall_gated: bool,
     // Sub-structs for organized state management
     #[cfg(feature = "test-internals")]
     pub rtt: RttTracker,
@@ -126,18 +223,60 @@ pub struct SrtlaConnection {
     /// Batch sender for optimized packet transmission.
     /// Buffers up to 16 packets before flushing, reducing syscall overhead.
     pub(crate) batch_sender: BatchSender,
+    /// Link lifecycle phase — determines scheduler eligibility.
+    #[cfg(feature = "test-internals")]
+    pub phase: LinkPhase,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) phase: LinkPhase,
+    /// Latest weak-link classifier verdict. Updated each housekeeping
+    /// tick from `WeakLinkFilter::classify`. Consumed by Enhanced
+    /// selection as an admission gate.
+    pub(crate) weak: bool,
+    /// Latest CC state from `LinkCcController::tick_all`. Drives the CC
+    /// controller's own per-window bitrate backoff. It is intentionally
+    /// *not* a routing-admission gate: `BackingOff` flips on a single
+    /// loss window and would make selection twitchy, so the routing gate
+    /// uses the sustained `loss_degraded` latch instead.
+    pub(crate) cc_backing_off: bool,
+    /// Latest `target_bps` from `LinkCcController::tick_all`. Consumed
+    /// by Enhanced selection as a soft cap: when the link's measured
+    /// throughput approaches this value the link's score is scaled
+    /// down so the scheduler routes less traffic through it before
+    /// loss actually fires. `0` means "no signal" — selection skips
+    /// the cap.
+    pub(crate) cc_target_bps: u64,
+    /// Latched verdict from `LinkCongestionState`: the link's
+    /// time-decayed loss EWMA has been sustained high (see
+    /// `LOSS_DEGRADE_*`, ~4s sustain with hysteresis). Drives a graded
+    /// demotion to `Degraded` in the phase machine *and* the Enhanced
+    /// selection loss-admission gate. It never removes the link from
+    /// scheduling (a genuinely dead link is handled by
+    /// `is_timed_out`/`CONN_TIMEOUT`); a gated link keeps a trickle of
+    /// traffic so the loss EWMA can recover and clear the latch.
+    pub(crate) loss_degraded: bool,
+    /// Strategy for steering this uplink's socket onto its egress path.
+    /// Retained so reconnects re-apply the same binding (source IP on Linux,
+    /// host `Network.bindSocket` callback on Android).
+    pub(crate) binder: Arc<dyn UplinkBinder>,
 }
 
 impl SrtlaConnection {
-    pub async fn connect_from_ip(ip: IpAddr, host: &str, port: u16) -> Result<Self> {
+    pub async fn connect_from_ip(
+        ip: IpAddr,
+        host: &str,
+        port: u16,
+        binder: Arc<dyn UplinkBinder>,
+    ) -> Result<Self> {
         use rand::RngCore;
 
         let remote = resolve_remote(host, port).await?;
-        let sock = bind_from_ip(ip, 0)?;
+        let sock = create_uplink_socket(ip)?;
+        binder.bind(&sock, ip)?;
         sock.connect(&remote.into())?;
         sock.set_nonblocking(true)?;
         let socket = Arc::new(BatchUdpSocket::new(sock)?);
-        let startup_deadline = now_ms() + STARTUP_GRACE_MS;
+        let now = now_ms();
+        let startup_deadline = now + STARTUP_GRACE_MS;
         Ok(Self {
             conn_id: rand::rng().next_u64(),
             socket,
@@ -152,15 +291,23 @@ impl SrtlaConnection {
             last_received: None,
             last_sent: None,
             last_keepalive_sent: None,
+            last_ack_or_rtt_sample_ms: 0,
+            stall_gated: false,
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
-            bitrate: BitrateTracker::default(),
+            bitrate: BitrateTracker::new(now),
             reconnection: ReconnectionState {
                 startup_grace_deadline_ms: startup_deadline,
                 ..Default::default()
             },
             quality_cache: CachedQuality::default(),
             batch_sender: BatchSender::new(),
+            phase: LinkPhase::Registering,
+            weak: false,
+            cc_backing_off: false,
+            cc_target_bps: 0,
+            loss_degraded: false,
+            binder,
         })
     }
 
@@ -220,7 +367,7 @@ impl SrtlaConnection {
                         self.register_packet(s as i32, send_time_ms);
                     }
                 }
-                self.last_sent = Some(Instant::now());
+                self.last_sent = Some(now_ms());
                 Ok(())
             }
             Err(e) => Err(anyhow::anyhow!("batch flush failed: {}", e)),
@@ -239,23 +386,22 @@ impl SrtlaConnection {
         };
         let pkt = create_keepalive_packet_ext(info);
         self.socket.send(&pkt).await?;
-        let now_instant = Instant::now();
         let now = now_ms();
-        self.last_sent = Some(now_instant);
-        self.last_keepalive_sent = Some(now_instant);
+        self.last_sent = Some(now);
+        self.last_keepalive_sent = Some(now);
         // Only set waiting flag and timestamp when we intend to measure RTT
         if !self.rtt.waiting_for_keepalive_response
             && (self.rtt.last_rtt_measurement_ms == 0
                 || now.saturating_sub(self.rtt.last_rtt_measurement_ms) > 3000)
         {
-            self.rtt.record_keepalive_sent();
+            self.rtt.record_keepalive_sent(now);
         }
         Ok(())
     }
 
     pub async fn send_srtla_packet(&mut self, pkt: &[u8]) -> Result<()> {
         self.socket.send(pkt).await?;
-        self.last_sent = Some(Instant::now());
+        self.last_sent = Some(now_ms());
         Ok(())
     }
 
@@ -272,7 +418,11 @@ impl SrtlaConnection {
     }
 
     pub fn get_smooth_rtt_ms(&self) -> f64 {
-        self.rtt.kalman_rtt.value()
+        // The 2-state Kalman filter can overshoot negative on a sharp high->low
+        // RTT transition; a negative RTT is meaningless and would leak into the
+        // selection/CC math, so clamp it. Callers that need to tell a never-measured
+        // link from a genuine ~0 already test `smooth_rtt <= 0.0`.
+        self.rtt.kalman_rtt.value().max(0.0)
     }
 
     /// RTT velocity (trend) in ms/sample from the Kalman filter.
@@ -280,7 +430,6 @@ impl SrtlaConnection {
     pub fn get_rtt_velocity(&self) -> f64 {
         self.rtt.kalman_rtt.velocity()
     }
-
 
     pub fn get_rtt_min_ms(&self) -> f64 {
         self.rtt.rtt_min_ms
@@ -290,12 +439,24 @@ impl SrtlaConnection {
         self.rtt.rtt_jitter_ms
     }
 
-    pub fn needs_rtt_measurement(&self) -> bool {
-        self.rtt
-            .needs_measurement(self.connected, self.reconnection.connection_established_ms)
+    /// Whether this link's RTT shows a standing queue forming (the
+    /// recent propagation floor lifted above the long-term floor),
+    /// distinct from jitter. Consumed by the weak-link classifier as an
+    /// early-warning signal so the scheduler eases off before the queue
+    /// turns into loss.
+    pub fn queue_building_suspected(&self) -> bool {
+        self.rtt.queue_building_suspected()
     }
 
-    pub fn needs_keepalive(&self) -> bool {
+    pub fn needs_rtt_measurement(&self, now_ms: u64) -> bool {
+        self.rtt.needs_measurement(
+            self.connected,
+            self.reconnection.connection_established_ms,
+            now_ms,
+        )
+    }
+
+    pub fn needs_keepalive(&self, now_ms: u64) -> bool {
         // Send keepalive every IDLE_TIME (1s) unconditionally on all connections.
         // Moblin does this with standard 10-byte keepalives; we use extended 38-byte
         // keepalives to provide the receiver with telemetry (window, RTT, NAKs, bitrate).
@@ -305,39 +466,151 @@ impl SrtlaConnection {
 
         match self.last_keepalive_sent {
             None => true,
-            Some(last) => last.elapsed().as_secs() >= IDLE_TIME,
+            Some(last) => now_ms.saturating_sub(last) >= IDLE_TIME * 1000,
         }
     }
 
-    pub fn perform_window_recovery(&mut self) {
-        self.congestion
-            .perform_window_recovery(&mut self.window, self.connected, &self.label);
+    pub fn perform_window_recovery(&mut self, now_ms: u64) {
+        let velocity = self.rtt.kalman_rtt.velocity();
+        self.congestion.perform_window_recovery(
+            &mut self.window,
+            self.connected,
+            velocity,
+            &self.label,
+            now_ms,
+        );
     }
 
+    /// Record an RTT probe and advance warming → live if enough probes collected.
+    pub fn record_rtt_probe(&mut self) {
+        if let LinkPhase::Warming { rtt_probes, .. } = &mut self.phase {
+            *rtt_probes += 1;
+            if *rtt_probes >= WARMING_RTT_PROBES {
+                debug!("{}: warming complete, transitioning to Live", self.label);
+                self.phase = LinkPhase::Live;
+            }
+        }
+    }
+
+    /// Drive phase transitions based on current connection health.
+    ///
+    /// Called from housekeeping. A degraded link stays **schedulable**:
+    /// demotion only lowers its score (via quality + the `Degraded`
+    /// phase), it never removes the link. Removing a link starves it of
+    /// the ACK traffic that proves its own recovery, which on bonded
+    /// cellular turns a transient HARQ stall (400-800ms) into a
+    /// self-sustaining false death. A genuinely unresponsive link is
+    /// pruned by `is_timed_out`/`CONN_TIMEOUT`, not here.
+    pub fn update_phase(&mut self, now_ms: u64) {
+        const DEGRADED_QUALITY_THRESHOLD: f64 = 0.5;
+        const DEGRADED_NAK_BURST_THRESHOLD: i32 = 5;
+
+        // Combined degradation signal: the fast NAK-quality path catches
+        // mild degradation; the sustained loss-EWMA verdict
+        // (`loss_degraded`, latched with hysteresis in
+        // `LinkCongestionState`) catches a link that is genuinely
+        // shedding most of its traffic without a binary kill.
+        let nak_degraded = self.quality_cache.multiplier < DEGRADED_QUALITY_THRESHOLD
+            && self.congestion.nak_burst_count >= DEGRADED_NAK_BURST_THRESHOLD;
+        let nak_recovered = self.quality_cache.multiplier >= DEGRADED_QUALITY_THRESHOLD
+            && self.congestion.nak_burst_count < DEGRADED_NAK_BURST_THRESHOLD;
+
+        match self.phase {
+            // Auto-promote to Live if warming takes too long.
+            LinkPhase::Warming { entered_ms, .. }
+                if now_ms.saturating_sub(entered_ms) >= WARMING_TIMEOUT_MS =>
+            {
+                debug!(
+                    "{}: warming timeout ({}ms), auto-promoting to Live",
+                    self.label, WARMING_TIMEOUT_MS
+                );
+                self.phase = LinkPhase::Live;
+            }
+            LinkPhase::Live if nak_degraded || self.loss_degraded => {
+                debug!(
+                    "{}: Live -> Degraded (quality={:.2}, nak_burst={}, loss_degraded={})",
+                    self.label,
+                    self.quality_cache.multiplier,
+                    self.congestion.nak_burst_count,
+                    self.loss_degraded
+                );
+                self.phase = LinkPhase::Degraded;
+            }
+            // Recover to Live only when both signals clear: the fast
+            // NAK-quality path AND the latched loss-EWMA verdict.
+            LinkPhase::Degraded if nak_recovered && !self.loss_degraded => {
+                debug!(
+                    "{}: Degraded -> Live (quality={:.2})",
+                    self.label, self.quality_cache.multiplier
+                );
+                self.phase = LinkPhase::Live;
+            }
+            // Registering, plus Warming/Live/Degraded whose guards did
+            // not fire, hold their phase.
+            _ => {}
+        }
+    }
+
+    /// Whether this link is eligible for packet scheduling.
+    pub fn is_schedulable(&self) -> bool {
+        self.phase.is_schedulable()
+    }
+
+    /// Scheduling weight contributed by this link's phase
+    /// (see [`LinkPhase::weight`]).
     #[inline(always)]
-    pub fn is_timed_out(&self) -> bool {
+    pub fn phase_weight(&self) -> f64 {
+        self.phase.weight()
+    }
+
+    /// `stall_deselect` signal (pure read; never mutates). True for a connected
+    /// link whose in-flight backlog is at or above `min_in_flight` AND whose
+    /// last delivery proof (earned-ACK or keepalive-RTT sample) is older than
+    /// `stale_ms`. `now_ms` is the selection clock.
+    ///
+    /// A link that has produced no proof yet (`last_ack_or_rtt_sample_ms == 0`)
+    /// is never stalled: a fresh burst before its first ACK must not be
+    /// mistaken for a black hole. A genuinely dead-from-birth link is pruned by
+    /// `is_timed_out`/`CONN_TIMEOUT`, not here. This is a selection penalty
+    /// input ONLY — it never affects `is_timed_out`/re-registration/CONN_TIMEOUT.
+    #[inline]
+    pub(crate) fn is_stalled(&self, now_ms: u64, min_in_flight: i32, stale_ms: u64) -> bool {
+        self.connected
+            && self.in_flight_packets >= min_in_flight
+            && self.last_ack_or_rtt_sample_ms != 0
+            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) >= stale_ms
+    }
+
+    /// Whether this link has gone silent past `CONN_TIMEOUT`.
+    ///
+    /// `last_received` is a `now_ms()` monotonic millisecond stamp (the single
+    /// clock this whole codebase runs on), so the timeout is a plain difference
+    /// against the caller's `now_ms`. Tests drive it by stamping `last_received` a
+    /// chosen interval in the past (e.g. `now_ms() - (CONN_TIMEOUT + 1) * 1000`);
+    /// they no longer advance a tokio virtual clock, because this compares against
+    /// the monotonic clock, not `tokio::time::Instant`.
+    #[inline(always)]
+    pub fn is_timed_out(&self, now_ms: u64) -> bool {
+        let now = now_ms;
         // During initial registration (not yet connected), allow grace period
         if !self.connected {
             // If this connection was never established (connection_established_ms == 0),
             // check if we're still within the startup grace period
-            if self.reconnection.connection_established_ms == 0 {
-                let now = now_ms();
-                if now < self.reconnection.startup_grace_deadline_ms {
-                    return false;
-                }
+            if self.reconnection.connection_established_ms == 0
+                && now < self.reconnection.startup_grace_deadline_ms
+            {
+                return false;
             }
             // After grace period, or for connections that were previously established,
             // if we've never received anything or haven't received in a while, consider it timed out
-            return self.last_received.is_none()
-                || self
-                    .last_received
-                    .map(|lr| lr.elapsed().as_secs() >= CONN_TIMEOUT)
-                    .unwrap_or(true);
+            return self
+                .last_received
+                .is_none_or(|lr| now.saturating_sub(lr) >= CONN_TIMEOUT * 1000);
         }
 
         // For established connections, check normal timeout
         if let Some(lr) = self.last_received {
-            lr.elapsed().as_secs() >= CONN_TIMEOUT
+            now.saturating_sub(lr) >= CONN_TIMEOUT * 1000
         } else {
             false
         }
@@ -351,7 +624,7 @@ impl SrtlaConnection {
     /// data packets, creating `packet_log` entries that will never be
     /// properly ACKed. Early NAKs from these packets would also penalize
     /// the connection's quality score during startup.
-    pub(crate) fn clear_pre_registration_state(&mut self) {
+    pub(crate) fn clear_pre_registration_state(&mut self, now_ms: u64) {
         if !self.packet_log.is_empty() || self.congestion.nak_count > 0 {
             debug!(
                 "{}: clearing pre-registration state ({} in-flight, {} NAKs)",
@@ -366,6 +639,11 @@ impl SrtlaConnection {
         self.congestion.reset();
         self.batch_sender.reset();
         self.quality_cache = CachedQuality::default();
+        // REG3 received — begin warming phase
+        self.phase = LinkPhase::Warming {
+            rtt_probes: 0,
+            entered_ms: now_ms,
+        };
     }
 
     /// Reset core connection state (window, packet tracking, batch queue).
@@ -377,6 +655,11 @@ impl SrtlaConnection {
         self.packet_log.clear();
         self.highest_acked_seq = i32::MIN;
         self.batch_sender.reset();
+        self.phase = LinkPhase::Registering;
+        // A reset link has no delivery proof; clear the stall signal so it is
+        // not classed as stalled the instant it reconnects with a backlog.
+        self.last_ack_or_rtt_sample_ms = 0;
+        self.stall_gated = false;
     }
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1.
@@ -392,8 +675,8 @@ impl SrtlaConnection {
         self.reconnection.startup_grace_deadline_ms = 0;
     }
 
-    pub fn time_since_last_nak_ms(&self) -> Option<u64> {
-        self.congestion.time_since_last_nak_ms()
+    pub fn time_since_last_nak_ms(&self, now_ms: u64) -> Option<u64> {
+        self.congestion.time_since_last_nak_ms(now_ms)
     }
 
     pub fn total_nak_count(&self) -> i32 {
@@ -425,12 +708,12 @@ impl SrtlaConnection {
         self.quality_cache.multiplier
     }
 
-    pub fn should_attempt_reconnect(&self) -> bool {
-        self.reconnection.should_attempt_reconnect()
+    pub fn should_attempt_reconnect(&self, now_ms: u64) -> bool {
+        self.reconnection.should_attempt_reconnect(now_ms)
     }
 
-    pub fn record_reconnect_attempt(&mut self) {
-        self.reconnection.record_attempt(&self.label);
+    pub fn record_reconnect_attempt(&mut self, now_ms: u64) {
+        self.reconnection.record_attempt(&self.label, now_ms);
     }
 
     pub fn mark_reconnect_success(&mut self) {
@@ -438,8 +721,8 @@ impl SrtlaConnection {
     }
 
     /// Calculate current bitrate
-    pub fn calculate_bitrate(&mut self) {
-        self.bitrate.calculate();
+    pub fn calculate_bitrate(&mut self, now_ms: u64) {
+        self.bitrate.calculate(now_ms);
     }
 
     /// Get current bitrate in Mbps
@@ -447,24 +730,36 @@ impl SrtlaConnection {
         self.bitrate.mbps()
     }
 
+    /// Pick the batch regime for this connection from its observed
+    /// bitrate. Called from housekeeping each tick; the underlying
+    /// `BatchSender::set_regime` is a cheap field write — no-op cost
+    /// when the regime is unchanged.
+    pub fn recompute_batch_regime(&mut self) {
+        let regime =
+            crate::connection::batch_send::BatchRegime::from_bps(self.bitrate.current_bitrate_bps);
+        self.batch_sender.set_regime(regime);
+    }
+
     /// Reset connection state after socket replacement.
     /// Full reset: clears all state including congestion/bitrate stats.
     fn reset_state(&mut self) {
+        let now = now_ms();
         self.last_received = None;
         self.reset_core_state();
 
         // Reset submodule state
         self.congestion.reset();
         self.rtt.reset();
-        self.bitrate.reset();
+        self.bitrate.reset(now);
 
         // Reset reconnection tracking
-        self.reconnection.last_reconnect_attempt_ms = now_ms();
+        self.reconnection.last_reconnect_attempt_ms = now;
         self.reconnection.reconnect_failure_count = 0;
     }
 
     pub async fn reconnect(&mut self) -> Result<()> {
-        let sock = bind_from_ip(self.local_ip, 0)?;
+        let sock = create_uplink_socket(self.local_ip)?;
+        self.binder.bind(&sock, self.local_ip)?;
         sock.connect(&self.remote.into())?;
         sock.set_nonblocking(true)?;
         let socket = BatchUdpSocket::new(sock)?;
@@ -475,7 +770,8 @@ impl SrtlaConnection {
         // Don't reset connection_established_ms for reconnections - only set when REG3
         // is received
         self.mark_reconnect_success();
-        self.reconnection.reset_startup_grace();
+        // Connection-layer ambient read; ReconnectionState is clock-injected.
+        self.reconnection.reset_startup_grace(now_ms());
         Ok(())
     }
 }

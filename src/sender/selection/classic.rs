@@ -7,7 +7,6 @@
 //! - Pure capacity-based: score = window / (in_flight + 1)
 //! - No quality awareness (no NAK penalties)
 //! - No RTT consideration
-//! - No exploration
 //! - Simple "pick highest score" algorithm
 
 use crate::connection::SrtlaConnection;
@@ -20,12 +19,14 @@ use crate::connection::SrtlaConnection;
 /// This matches the original C implementation's behavior exactly.
 /// No time-based dampening or hysteresis is applied in classic mode.
 #[inline(always)]
-pub fn select_connection(conns: &[SrtlaConnection]) -> Option<usize> {
+pub fn select_connection(conns: &[SrtlaConnection], now_ms: u64) -> Option<usize> {
     let mut best_idx: Option<usize> = None;
     let mut best_score: i32 = -1;
 
     for (i, c) in conns.iter().enumerate() {
-        if c.is_timed_out() {
+        // `stall_gated` is only ever set when a healthier link exists (see
+        // `apply_stall_gate`), so skipping it here can never starve the pool.
+        if c.is_timed_out(now_ms) || !c.is_schedulable() || c.stall_gated {
             continue;
         }
         let score = c.get_score();

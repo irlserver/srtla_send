@@ -22,6 +22,9 @@ pub(crate) fn log_connection_status(
         return;
     }
 
+    // Telemetry is display-layer; a single monotonic read drives every elapsed
+    // computation and timeout check in this report.
+    let now = now_ms();
     let total_connections = connections.len();
 
     // Single pass over connections to collect all stats
@@ -30,7 +33,7 @@ pub(crate) fn log_connection_status(
     let mut total_in_flight = 0usize;
 
     for conn in connections.iter() {
-        if !conn.is_timed_out() {
+        if !conn.is_timed_out(now) {
             active_connections += 1;
         }
         total_bitrate_mbps += conn.current_bitrate_mbps();
@@ -68,28 +71,13 @@ pub(crate) fn log_connection_status(
     info!("  Mode: {}", snap.mode);
     match snap.mode {
         crate::mode::SchedulingMode::Classic => {
-            info!("    (quality/exploration/rtt-delta not applicable)");
+            info!("    (quality scoring not applicable)");
         }
         crate::mode::SchedulingMode::Enhanced => {
             info!(
-                "    Quality: {}, Exploration: {}",
-                if snap.quality_enabled { "ON" } else { "OFF" },
-                if snap.exploration_enabled {
-                    "ON"
-                } else {
-                    "OFF"
-                }
+                "    Quality: {}",
+                if snap.quality_enabled { "ON" } else { "OFF" }
             );
-        }
-        crate::mode::SchedulingMode::RttThreshold => {
-            info!(
-                "    Quality: {}, RTT delta: {}ms",
-                if snap.quality_enabled { "ON" } else { "OFF" },
-                snap.rtt_delta_ms
-            );
-        }
-        crate::mode::SchedulingMode::Edpf => {
-            info!("    EDPF pipeline: BLEST + IoDS + EDPF");
         }
     }
 
@@ -112,7 +100,7 @@ pub(crate) fn log_connection_status(
 
     // Show individual connection details
     for (i, conn) in connections.iter().enumerate() {
-        let status = if conn.is_timed_out() {
+        let status = if conn.is_timed_out(now) {
             "TIMED_OUT"
         } else {
             "ACTIVE"
@@ -126,15 +114,15 @@ pub(crate) fn log_connection_status(
             s => s.to_string().into(),
         };
 
-        // Use elapsed seconds directly
+        // Elapsed since the monotonic ms stamp.
         let last_recv = conn
             .last_received
-            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
+            .map(|t| format!("{:.1}s ago", now.saturating_sub(t) as f64 / 1000.0))
             .unwrap_or_else(|| "never".into());
 
         let last_send = conn
             .last_sent
-            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f64()))
+            .map(|t| format!("{:.1}s ago", now.saturating_sub(t) as f64 / 1000.0))
             .unwrap_or_else(|| "never".into());
 
         info!(
@@ -153,8 +141,8 @@ pub(crate) fn log_connection_status(
 
         if conn.rtt.estimated_rtt_ms > 0.0 {
             info!(
-                "        RTT: kalman={:.1}ms, velocity={:.2}ms/s, jitter={:.1}ms, stable={} (last: \
-                 {:.1}s ago)",
+                "        RTT: kalman={:.1}ms, velocity={:.2}ms/s, jitter={:.1}ms, stable={} \
+                 (last: {:.1}s ago)",
                 conn.get_smooth_rtt_ms(),
                 conn.get_rtt_velocity(),
                 conn.get_rtt_jitter_ms(),

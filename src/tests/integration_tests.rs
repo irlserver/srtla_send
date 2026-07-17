@@ -1,4 +1,8 @@
 #![cfg(test)]
+// These tests assert protocol invariants that happen to be compile-time
+// constants (id lengths, packet-type bit masks); the assertions document the
+// contract rather than test runtime values.
+#![allow(clippy::assertions_on_constants, clippy::needless_range_loop)]
 
 use smallvec::SmallVec;
 

@@ -1,6 +1,7 @@
 mod connections;
 mod housekeeping;
 mod packet_handler;
+mod reload;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod selection;
 #[cfg(not(any(test, feature = "test-internals")))]
@@ -12,7 +13,6 @@ mod uplink;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -25,11 +25,25 @@ pub use connections::{
 #[allow(unused_imports)]
 pub use housekeeping::GLOBAL_TIMEOUT_MS;
 use housekeeping::handle_housekeeping;
+// Re-exported for the NAK-attribution conformance tests so they drive the real
+// production path rather than a mirrored copy.
+#[allow(unused_imports)]
+pub(crate) use packet_handler::attribute_nak;
 use packet_handler::{
     drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
 };
 #[allow(unused_imports)]
-pub use selection::{calculate_quality_multiplier, select_connection_idx};
+pub use selection::calculate_quality_multiplier;
+pub use selection::classifier::{ClassificationResult, WeakReason};
+#[allow(unused_imports)]
+pub use selection::enhanced::{in_flight_cap_exceeded, in_flight_cap_packets};
+#[allow(unused_imports)]
+pub use selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
+// `select_connection_idx` is consumed by `packet_handler` via its own
+// `super::selection::select_connection_idx` path. The re-export is here
+// for tests that import the sender public surface with a glob.
+#[allow(unused_imports)]
+pub use selection::select_connection_idx;
 #[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
@@ -48,6 +62,7 @@ use crate::stats::SharedStats;
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
 const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_sender_with_config(
     local_srt_port: u16,
     receiver_host: &str,
@@ -55,6 +70,9 @@ pub async fn run_sender_with_config(
     ips_file: &str,
     config: DynamicConfig,
     shared_stats: SharedStats,
+    critical_window: crate::priority::CriticalWindow,
+    subscription_hub: crate::subscriptions::SubscriptionHub,
+    binder: std::sync::Arc<dyn crate::connection::UplinkBinder>,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}, mode={}",
@@ -76,7 +94,8 @@ pub async fn run_sender_with_config(
         return Err(anyhow!("no IPs in list: {}", ips_file));
     }
 
-    let mut connections = create_connections_from_ips(&ips, receiver_host, receiver_port).await;
+    let mut connections =
+        create_connections_from_ips(&ips, receiver_host, receiver_port, &binder).await;
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
@@ -132,9 +151,14 @@ pub async fn run_sender_with_config(
     // Zero-allocation ring buffer for sequence tracking
     let mut seq_tracker = SequenceTracker::new();
     let mut last_selected_idx: Option<usize> = None;
-    let mut last_switch_time_ms: u64 = 0; // Track time of last connection switch
-    let mut all_failed_at: Option<Instant> = None;
+    let mut all_failed_at: Option<u64> = None;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
+    // Weak-link classifier. Its per-link `weak` verdict is consumed by
+    // Enhanced selection as an admission gate.
+    let mut weak_link_filter = selection::classifier::WeakLinkFilter::new();
+    // Per-link CC soft-cap controller. `cc_target_bps` feeds the soft-cap
+    // multiplier and in-flight cap; `loss_degraded` feeds the loss gate.
+    let mut link_cc_controller = selection::link_cc::LinkCcController::new();
 
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
@@ -148,6 +172,7 @@ pub async fn run_sender_with_config(
             &mut connections,
             &mut reg,
             classic,
+            crate::utils::now_ms(),
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
@@ -171,11 +196,11 @@ pub async fn run_sender_with_config(
                             &mut recv_buf,
                             &mut connections,
                             &mut last_selected_idx,
-                            &mut last_switch_time_ms,
                             &mut seq_tracker,
                             &mut last_client_addr,
                             reg.has_connected,
                             &config_snap,
+                            &critical_window,
                         )
                         .await;
                         drain_packet_queue(
@@ -223,6 +248,7 @@ pub async fn run_sender_with_config(
                             &mut connections,
                             &mut reg,
                             classic,
+                            crate::utils::now_ms(),
                             &mut all_failed_at,
                             &mut reader_handles,
                             &packet_tx,
@@ -230,8 +256,41 @@ pub async fn run_sender_with_config(
                             warn!("housekeeping failed: {err}");
                         }
 
-                        // Update shared stats for telemetry export
-                        shared_stats.update(&connections, &config.snapshot());
+                        // Run the weak-link classifier and per-link CC
+                        // controller, stamp results onto each connection
+                        // for selection to consume, and surface via stats.
+                        let classification = weak_link_filter.classify(&connections);
+                        let link_cc_snapshots = link_cc_controller
+                            .tick_all(&connections, crate::utils::now_ms());
+                        for conn in connections.iter_mut() {
+                            conn.weak = classification
+                                .per_link
+                                .iter()
+                                .find(|e| e.conn_id == conn.conn_id)
+                                .map(|e| e.weak)
+                                .unwrap_or(false);
+                            let cc_snap = link_cc_snapshots.get(&conn.conn_id);
+                            conn.cc_backing_off = cc_snap
+                                .map(|s| s.state == selection::link_cc::CcState::BackingOff)
+                                .unwrap_or(false);
+                            conn.cc_target_bps = cc_snap.map(|s| s.target_bps).unwrap_or(0);
+                            conn.loss_degraded =
+                                cc_snap.map(|s| s.loss_degraded).unwrap_or(false);
+                        }
+                        shared_stats.update(
+                            &connections,
+                            &config.snapshot(),
+                            Some(&classification),
+                            Some(&link_cc_snapshots),
+                        );
+
+                        // Fan the fresh snapshot out to any `stats` subscribers
+                        // on the async control socket. Cheap no-op if no one
+                        // is subscribed.
+                        let snap = shared_stats.get();
+                        if let Ok(value) = serde_json::to_value(&snap) {
+                            subscription_hub.publish("stats", value).await;
+                        }
 
                         if let Some(changes) = pending_changes.take()
                             && let Some(new_ips) = changes.new_ips
@@ -244,6 +303,7 @@ pub async fn run_sender_with_config(
                                 changes.receiver_port,
                                 &mut last_selected_idx,
                                 &mut seq_tracker,
+                                &binder,
                             ).await;
                             info!("connection changes applied successfully");
                             sync_readers(&connections, &mut reader_handles, &packet_tx);
@@ -281,14 +341,30 @@ pub async fn run_sender_with_config(
     #[cfg(unix)]
     event_loop! {
         _ = sighup.recv() => {
-            info!("received SIGHUP - queuing uplink IP reload from {}", ips_file);
-            if let Ok(new_ips) = read_ip_list(ips_file).await {
-                pending_changes = Some(PendingConnectionChanges {
-                    new_ips: Some(new_ips),
-                    receiver_host: receiver_host.to_string(),
-                    receiver_port,
-                });
-                info!("uplink IP changes queued for next processing cycle");
+            info!("received SIGHUP - evaluating uplink IP reload from {}", ips_file);
+            // Guard against a reload that resolves to zero usable IPs (missing,
+            // empty, or all-garbage file): refuse it and keep the current links
+            // up rather than queuing an empty list, which would tear down every
+            // connection in apply_connection_changes. Mirrors the C sender.
+            match reload::analyze_ip_reload(ips_file) {
+                reload::IpReload::Apply { ips, first_invalid_line } => {
+                    if let Some(line) = first_invalid_line {
+                        warn!(
+                            "ips file has an invalid entry starting at line {line}; applying valid IPs only"
+                        );
+                    }
+                    pending_changes = Some(PendingConnectionChanges {
+                        new_ips: Some(ips),
+                        receiver_host: receiver_host.to_string(),
+                        receiver_port,
+                    });
+                    info!("uplink IP changes queued for next processing cycle");
+                }
+                reload::IpReload::Refuse(reason) => {
+                    warn!(
+                        "refusing SIGHUP reload ({reason:?}); keeping current connections"
+                    );
+                }
             }
             let config_snap = config.snapshot();
             drain_packet_queue(
@@ -311,16 +387,20 @@ pub async fn run_sender_with_config(
 
 pub async fn read_ip_list(path: &str) -> Result<SmallVec<IpAddr, 4>> {
     let text = std::fs::read_to_string(Path::new(path)).context("read IPs file")?;
-    let mut out = SmallVec::new();
-    for line in text.lines() {
-        let l = line.trim();
-        if l.is_empty() {
-            continue;
+    // Shares the SIGHUP reload guard's parser so startup and reload agree on what
+    // counts as a valid IP. At startup an empty or all-invalid file is tolerated
+    // (returns an empty list); the zero-valid-IP refusal only matters on reload,
+    // where dropping every live link would be worse than ignoring a bad edit.
+    match reload::analyze_ip_reload_text(&text) {
+        reload::IpReload::Apply {
+            ips,
+            first_invalid_line,
+        } => {
+            if let Some(line) = first_invalid_line {
+                warn!("ips file has an invalid entry starting at line {line}; skipping it");
+            }
+            Ok(ips)
         }
-        match IpAddr::from_str(l) {
-            Ok(ip) => out.push(ip),
-            Err(e) => warn!("skip invalid IP '{}': {}", l, e),
-        }
+        reload::IpReload::Refuse(_) => Ok(SmallVec::new()),
     }
-    Ok(out)
 }

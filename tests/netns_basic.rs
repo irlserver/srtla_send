@@ -19,8 +19,8 @@ fn test_two_link_registration() {
 
     let mut stack = SrtlaTestStack::start("reg2", 2, &[]).expect("start stack");
 
-    // Allow time for registration handshake on both links
-    thread::sleep(Duration::from_secs(5));
+    // Wait for registration to complete on both links (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     let output = stack.stop();
     common::dump_output(&output);
@@ -45,13 +45,13 @@ fn test_data_forwarding() {
 
     let mut stack = SrtlaTestStack::start("fwd", 2, &[]).expect("start stack");
 
-    // Wait for registration
-    thread::sleep(Duration::from_secs(5));
+    // Wait for registration to complete (bounded readiness poll).
+    common::wait_until_ready(&stack);
 
     // Inject UDP packets into sender's local SRT port
     common::inject_packets(&stack, 100).expect("inject packets");
 
-    // Allow data to flow through the pipeline
+    // Steady-state window: let injected data flow through the pipeline.
     thread::sleep(Duration::from_secs(3));
 
     let output = stack.stop();

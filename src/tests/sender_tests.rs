@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::assertions_on_constants)]
 
     use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};
@@ -26,12 +27,216 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
-            exploration_enabled: false,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
+        let selected = select_connection_idx(&mut connections, None, 0, &config);
         assert_eq!(selected, Some(1));
+    }
+
+    #[test]
+    fn test_enhanced_skips_weak_when_alternative_exists() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        // Connection 1 has the highest base score but is flagged weak.
+        // Connection 0 is healthy. Selection should pick 0, not 1.
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 0;
+        connections[1].weak = true;
+        connections[2].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(0),
+            "weak connection 1 must be skipped when a non-weak alternative exists"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_falls_back_when_all_weak() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        // Every link is weak. Selection must still pick the best — better
+        // a weak link than a dropped packet.
+        connections[0].weak = true;
+        connections[0].in_flight_packets = 5;
+        connections[1].weak = true;
+        connections[1].in_flight_packets = 0; // best score among the weak
+        connections[2].weak = true;
+        connections[2].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "with no non-weak alternatives, selection must fall back to the best available link"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_skips_in_flight_cap_when_alternative_exists() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        // Connection 1 would have the best base score (lowest in_flight)
+        // but is over its BDP in-flight cap: cc_target_bps = 200 kbps at
+        // the test RTT (~200 ms) gives a cap of ~5 packets, and
+        // in_flight = 6 exceeds it. Connection 0 is unconstrained, so the
+        // capped link must be skipped even though its score is higher.
+        connections[0].in_flight_packets = 12;
+        connections[1].in_flight_packets = 6;
+        connections[1].cc_target_bps = 200_000;
+        connections[2].in_flight_packets = 20;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(0),
+            "in-flight-capped link must be skipped when an un-gated alternative exists"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_falls_back_when_all_in_flight_capped() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        // Every link is over its BDP in-flight cap (cc_target = 200 kbps
+        // at ~200 ms RTT → cap ~5 packets). Fallback rule: pick the best
+        // base score rather than drop the packet.
+        for c in connections.iter_mut() {
+            c.cc_target_bps = 200_000;
+            c.in_flight_packets = 10;
+        }
+        connections[1].in_flight_packets = 6; // best score among the capped, still > cap
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "with no un-gated alternatives, selection falls back to the best capped link"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_treats_loss_degraded_as_weak() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 0;
+        // Sustained loss latch (not the raw per-window cc_backing_off) is the
+        // routing-admission gate, so a single noisy loss window can't demote.
+        connections[1].loss_degraded = true;
+        connections[2].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(0),
+            "loss-degraded link must be skipped when a healthy alternative exists"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_does_not_gate_on_raw_backing_off() {
+        // cc_backing_off drives the CC controller's bitrate backoff but is
+        // intentionally NOT a routing gate (it flips on a single loss window).
+        // A link flagged only cc_backing_off, with the best base score, still
+        // wins selection.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+        let current_time = now_ms();
+
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 0; // best base score
+        connections[1].cc_backing_off = true;
+        connections[2].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "cc_backing_off alone must not demote a link's routing weight"
+        );
+    }
+
+    #[test]
+    fn test_enhanced_weak_link_stays_rankable() {
+        // A quality-gated link is crushed in score but not removed, so it keeps
+        // a trickle of traffic and can still earn the ACK/loss samples that
+        // clear the gate. Without that it earns zero throughput share, the
+        // classifier reads NoTraffic/LowShare, and it stays weak forever: a
+        // starvation lock. This trickle is what makes an explicit re-probing
+        // mechanism unnecessary (measured: a 70%-loss link gated to 0.00 Mbps
+        // re-adopts itself ~7s after it silently heals).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let current_time = now_ms();
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            ..ConfigSnapshot::default()
+        };
+
+        // The healthy link wins while it is healthy -- the weak link is crushed
+        // by GATED_LINK_PENALTY, not removed.
+        connections[0].in_flight_packets = 0; // healthy
+        connections[1].in_flight_packets = 0;
+        connections[1].weak = true;
+        let selected = select_connection_idx(&mut connections, Some(0), current_time, &config);
+        assert_eq!(selected, Some(0), "healthy link should win over a weak one");
+
+        // Crushed, but still in the ranking: once the healthy link is loaded
+        // enough that even a 0.02x score beats it, the weak link takes the
+        // packet. An *excluded* link could never do this, and would earn zero
+        // share forever.
+        connections[0].in_flight_packets = 10_000;
+        let selected = select_connection_idx(&mut connections, Some(0), current_time, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "weak link must remain rankable so its trickle can clear the gate"
+        );
     }
 
     #[test]
@@ -54,11 +259,10 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
 
         // Should prefer connection 1 (no NAKs)
         assert_eq!(selected, Some(1));
@@ -83,18 +287,17 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, current_time, &config);
+        let selected = select_connection_idx(&mut connections, None, current_time, &config);
 
         // Should prefer connection 2 (never had NAKs, best quality)
         assert_eq!(selected, Some(2));
     }
 
     #[test]
-    fn test_time_based_switch_dampening_blocks_within_cooldown() {
+    fn test_enhanced_reselects_immediately_no_time_lock() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
@@ -103,34 +306,26 @@ mod tests {
         connections[1].in_flight_packets = 0; // Best score
         connections[2].in_flight_packets = 10; // Worst score
 
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 5; // 5ms after last switch (within 15ms cooldown)
-
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
 
-        // Per-packet selection: Should keep sending ALL packets via connection 0 during cooldown
-        // This prevents rapid thrashing between connections under bursty score changes
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
+        // There is no switch cooldown: selection must re-decide on every packet.
+        // `get_score()` counts queued packets as in-flight, so routing a packet
+        // lowers its own link's score -- that feedback loop is what bounds
+        // per-link queue depth, and a time lock would open it.
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
         assert_eq!(
             selected,
-            Some(0),
-            "Should continue routing all packets via current connection during cooldown period"
+            Some(1),
+            "Enhanced mode must be free to switch to a better link on the very next packet"
         );
     }
 
     #[test]
-    fn test_time_based_switch_dampening_allows_after_cooldown() {
+    fn test_enhanced_switches_to_clearly_better_connection() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
@@ -139,113 +334,45 @@ mod tests {
         connections[1].in_flight_packets = 0; // Best score (significantly better, exceeds 2% hysteresis)
         connections[2].in_flight_packets = 10; // Worst score
 
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 20; // 20ms after last switch (past 15ms cooldown)
-
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
 
-        // After cooldown: per-packet selection can now choose the better connection
-        // From this point forward, all subsequent packets will route via connection 1
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
-        assert_eq!(
-            selected,
-            Some(1),
-            "Should switch per-packet routing to better connection after cooldown expires"
-        );
+        // A link better by more than SWITCH_THRESHOLD wins the packet.
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
+        assert_eq!(selected, Some(1), "Should route to the better connection");
     }
 
     #[test]
-    fn test_time_based_switch_dampening_allows_if_current_invalid() {
-        use tokio::time::{Duration, Instant};
-
+    fn test_enhanced_switches_away_from_timed_out_connection() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
         // Setup: Connection 0 is currently selected but becomes timed out
         connections[0].in_flight_packets = 5;
-        // Simulate timeout by setting last_received to 6 seconds ago (CONN_TIMEOUT is 5 seconds)
-        connections[0].last_received = Some(Instant::now() - Duration::from_secs(6));
+        // Simulate timeout by stamping last_received 6 seconds ago (CONN_TIMEOUT is 5 seconds)
+        connections[0].last_received = Some(now_ms() - 6000);
         connections[1].in_flight_packets = 0; // Best score
         connections[2].in_flight_packets = 10;
 
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 5; // Within 15ms cooldown
-
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: false,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
 
-        // Cooldown is bypassed when current connection is invalid/timed out
-        // Per-packet selection immediately switches to valid connection
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
         assert_eq!(
             selected,
             Some(1),
-            "Should immediately route packets via valid connection if current is timed out, \
-             bypassing cooldown"
+            "Should route via a valid connection when the current one has timed out"
         );
     }
 
     #[test]
-    fn test_exploration_blocked_during_cooldown() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-
-        // Setup connections with distinct scores
-        connections[0].in_flight_packets = 2; // Currently selected
-        connections[1].in_flight_packets = 0; // Best
-        connections[2].in_flight_packets = 1; // Second-best
-
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 5; // Within 15ms cooldown
-
-        let config = ConfigSnapshot {
-            mode: SchedulingMode::Enhanced,
-            quality_enabled: true,
-            exploration_enabled: true, // exploration enabled
-            rtt_delta_ms: 30,
-        };
-
-        // Enable exploration, but should be blocked by cooldown
-        // This prevents exploration from causing rapid per-packet routing changes
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
-
-        // Should continue routing packets via connection 0, not explore during cooldown
-        assert_eq!(
-            selected,
-            Some(0),
-            "Exploration-triggered per-packet routing changes should be blocked during cooldown"
-        );
-    }
-
-    #[test]
-    fn test_classic_mode_ignores_time_dampening() {
+    fn test_classic_mode_picks_highest_score() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut connections = rt.block_on(create_test_connections(3));
 
@@ -254,25 +381,15 @@ mod tests {
         connections[1].in_flight_packets = 0; // Best score
         connections[2].in_flight_packets = 10; // Worst score
 
-        let last_switch_time_ms = now_ms();
-        let current_time_ms = last_switch_time_ms + 200; // 200ms after last switch (within cooldown)
-
         let config = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: false,
-            exploration_enabled: false,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
 
         // Classic mode: per-packet selection ALWAYS picks highest score connection
-        // No dampening, no hysteresis - matches original C implementation
-        let selected = select_connection_idx(
-            &mut connections,
-            Some(0),
-            last_switch_time_ms,
-            current_time_ms,
-            &config,
-        );
+        // No hysteresis - matches original C implementation
+        let selected = select_connection_idx(&mut connections, Some(0), now_ms(), &config);
 
         // Per-packet routing immediately uses connection 1 (best score)
         assert_eq!(
@@ -299,21 +416,21 @@ mod tests {
             connections[2].congestion.nak_count,
         ];
 
-        let found_0 = connections[0].handle_nak(100);
+        let found_0 = connections[0].handle_nak(100, now_ms());
         assert!(found_0);
         assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
         assert_eq!(connections[1].congestion.nak_count, initial_counts[1]);
         assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
-        let found_1 = connections[1].handle_nak(200);
+        let found_1 = connections[1].handle_nak(200, now_ms());
         assert!(found_1);
         assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
         assert_eq!(connections[1].congestion.nak_count, initial_counts[1] + 1);
         assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
-        let not_found_0 = connections[0].handle_nak(999);
-        let not_found_1 = connections[1].handle_nak(999);
-        let not_found_2 = connections[2].handle_nak(999);
+        let not_found_0 = connections[0].handle_nak(999, now_ms());
+        let not_found_1 = connections[1].handle_nak(999, now_ms());
+        let not_found_2 = connections[2].handle_nak(999, now_ms());
         assert!(!not_found_0);
         assert!(!not_found_1);
         assert!(!not_found_2);
@@ -376,6 +493,8 @@ mod tests {
         seq_tracker.insert(100, connections[1].conn_id, now);
         seq_tracker.insert(200, connections[2].conn_id, now);
 
+        let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
+            std::sync::Arc::new(crate::connection::SourceIpBinder);
         rt.block_on(apply_connection_changes(
             &mut connections,
             &new_ips,
@@ -383,6 +502,7 @@ mod tests {
             8080,
             &mut last_selected_idx,
             &mut seq_tracker,
+            &binder,
         ));
 
         // Should have removed some connections
@@ -431,7 +551,9 @@ mod tests {
         ];
 
         // This will likely fail to connect but should not panic
-        let connections = create_connections_from_ips(&ips, "127.0.0.1", 9999).await;
+        let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
+            std::sync::Arc::new(crate::connection::SourceIpBinder);
+        let connections = create_connections_from_ips(&ips, "127.0.0.1", 9999, &binder).await;
 
         // Connections may be empty due to connection failures, which is OK for testing
         assert!(connections.len() <= ips.len());
@@ -473,32 +595,13 @@ mod tests {
         let config = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: false,
-            exploration_enabled: false,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
 
-        let selected = select_connection_idx(&mut connections, None, 0, 0, &config);
+        let selected = select_connection_idx(&mut connections, None, 0, &config);
 
         // Should return None when all connections have score -1
         assert_eq!(selected, None);
-    }
-
-    #[test]
-    fn test_exploration_mode() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut connections = rt.block_on(create_test_connections(3));
-
-        let config = ConfigSnapshot {
-            mode: SchedulingMode::Enhanced,
-            quality_enabled: false,
-            exploration_enabled: true,
-            rtt_delta_ms: 30,
-        };
-
-        // Test exploration - this is time-dependent so we just test that it doesn't panic
-        let _selected = select_connection_idx(&mut connections, None, 0, 0, &config);
-
-        // The result depends on timing, but should not panic
     }
 
     #[test]
@@ -509,8 +612,6 @@ mod tests {
         // Default values from DynamicConfig::new()
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
-        assert!(!snap.exploration_enabled);
-        assert_eq!(snap.rtt_delta_ms, 30);
     }
 
     #[test]
@@ -584,6 +685,95 @@ mod tests {
             (mult_burst - 0.571).abs() < 0.02,
             "Expected ~0.571, got {}",
             mult_burst
+        );
+    }
+
+    // ---- link phase as a weight, not a gate --------------------------------
+
+    #[test]
+    fn test_warming_link_is_schedulable() {
+        // At go-live EVERY link is warming. When Warming was a hard exclusion the
+        // candidate pool was empty and the sender dropped the stream until the
+        // first link was promoted. A warming link must be usable.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        for c in connections.iter_mut() {
+            c.phase = crate::connection::LinkPhase::Warming {
+                rtt_probes: 0,
+                entered_ms: now,
+            };
+        }
+        connections[0].in_flight_packets = 5;
+        connections[1].in_flight_packets = 0; // best
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, now, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "an all-warming pool must still schedule, not drop the packet"
+        );
+    }
+
+    #[test]
+    fn test_warming_link_is_derated_against_a_live_one() {
+        // The de-rating is what Warming buys us: a link whose RTT baseline is a
+        // keepalive old should not take a full share while a characterised link
+        // is available. 0.8 x a marginally better raw score loses to Live.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        // Warming link has the better *raw* score (fewer in flight)...
+        connections[0].phase = crate::connection::LinkPhase::Warming {
+            rtt_probes: 1,
+            entered_ms: now,
+        };
+        connections[0].in_flight_packets = 4;
+        // ...but the Live link is close enough that the 0.8 weight flips it.
+        connections[1].in_flight_packets = 5;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, now, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "a warming link's 0.8 weight should cede a close call to a live link"
+        );
+    }
+
+    #[test]
+    fn test_registering_link_is_never_scheduled() {
+        // The one hard exclusion, and it is not a quality judgement: without REG3
+        // the receiver discards data on this link, so sending is pointless.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        connections[0].phase = crate::connection::LinkPhase::Registering;
+        connections[0].in_flight_packets = 0; // would otherwise be the best score
+        connections[1].in_flight_packets = 10;
+
+        let config = ConfigSnapshot {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        let selected = select_connection_idx(&mut connections, None, now, &config);
+        assert_eq!(
+            selected,
+            Some(1),
+            "a link that has not completed REG3 must never be scheduled"
         );
     }
 }

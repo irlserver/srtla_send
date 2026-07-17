@@ -15,6 +15,13 @@ use crate::protocol::MTU;
 #[cfg(target_os = "linux")]
 pub const BATCH_RECV_SIZE: usize = 32;
 
+/// Maximum datagrams per `sendmmsg` call. Matches the largest batch the
+/// send-side regime will accumulate (`BATCH_SIZE_HIGH_LOAD`), so a full
+/// batch always leaves in a single syscall. Defined on every platform, since
+/// `BatchSender::flush` chunks by it before calling `send_batch` and must
+/// compile identically on the non-Linux fallback path.
+pub const BATCH_SEND_SIZE: usize = 32;
+
 // ============================================================================
 // Linux implementation with recvmmsg
 // ============================================================================
@@ -30,10 +37,30 @@ mod unix_impl {
     use tokio::io::Interest;
     use tokio::io::unix::AsyncFd;
 
-    use super::{BATCH_RECV_SIZE, MTU};
+    use super::{BATCH_RECV_SIZE, BATCH_SEND_SIZE, MTU};
 
     const SOCKADDR_STORAGE_LENGTH: libc::socklen_t =
         std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+
+    /// What the read loop should do after `recvmmsg` returns an error.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RecvAction {
+        /// EINTR: interrupted by a signal — re-issue the syscall.
+        Retry,
+        /// EAGAIN/EWOULDBLOCK: no datagram ready — wait for readiness.
+        WouldBlock,
+        /// Any other errno — propagate to the caller.
+        Hard,
+    }
+
+    /// Classify a `recvmmsg` error. Pure so it is unit-testable with no syscall.
+    fn recv_retry_action(err: &std::io::Error) -> RecvAction {
+        match err.kind() {
+            ErrorKind::Interrupted => RecvAction::Retry,
+            ErrorKind::WouldBlock => RecvAction::WouldBlock,
+            _ => RecvAction::Hard,
+        }
+    }
 
     /// Async UDP socket with batch receive support via `recvmmsg`.
     ///
@@ -70,11 +97,17 @@ mod unix_impl {
 
                 match buffer.recvmmsg(self.as_raw_fd()) {
                     Ok(count) => return Poll::Ready(Ok(count)),
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                        guard.clear_ready();
-                        continue;
-                    }
-                    Err(e) => return Poll::Ready(Err(e)),
+                    Err(e) => match recv_retry_action(&e) {
+                        // EINTR: re-issue without dropping readiness (the fd is
+                        // still ready, so the next poll returns immediately). A
+                        // signal — e.g. our own SIGHUP — must not kill the reader.
+                        RecvAction::Retry => continue,
+                        RecvAction::WouldBlock => {
+                            guard.clear_ready();
+                            continue;
+                        }
+                        RecvAction::Hard => return Poll::Ready(Err(e)),
+                    },
                 }
             }
         }
@@ -109,6 +142,78 @@ mod unix_impl {
         #[allow(dead_code)]
         pub fn try_send(&self, buf: &[u8]) -> std::io::Result<usize> {
             self.inner.get_ref().send(buf)
+        }
+
+        /// Send several datagrams to the connected peer in one `sendmmsg` syscall.
+        ///
+        /// Returns the number of datagrams the kernel accepted, which may be
+        /// fewer than requested: `sendmmsg` reports a short send rather than
+        /// blocking once the socket buffer fills. The caller must resend the
+        /// remainder (see `BatchSender::flush`).
+        pub async fn send_batch(&self, bufs: &[&[u8]]) -> std::io::Result<usize> {
+            if bufs.is_empty() {
+                return Ok(0);
+            }
+            loop {
+                let mut guard = self.inner.ready(Interest::WRITABLE).await?;
+
+                match self.try_send_batch(bufs) {
+                    Ok(n) => return Ok(n),
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        guard.clear_ready();
+                        continue;
+                    }
+                    // A signal can interrupt the syscall before any datagram is
+                    // queued; that is not a send failure, so retry rather than
+                    // tearing the link down.
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        /// Non-blocking `sendmmsg`. Sends at most [`BATCH_SEND_SIZE`] datagrams.
+        pub fn try_send_batch(&self, bufs: &[&[u8]]) -> std::io::Result<usize> {
+            let n = bufs.len().min(BATCH_SEND_SIZE);
+            if n == 0 {
+                return Ok(0);
+            }
+
+            // SAFETY: `mmsghdr` and `iovec` are plain C structs whose all-zero
+            // bit pattern is a valid (empty) message; every field we rely on is
+            // overwritten below before the syscall reads it.
+            let mut iov: [libc::iovec; BATCH_SEND_SIZE] = unsafe { std::mem::zeroed() };
+            let mut msgs: [libc::mmsghdr; BATCH_SEND_SIZE] = unsafe { std::mem::zeroed() };
+
+            for i in 0..n {
+                iov[i] = libc::iovec {
+                    // sendmmsg only reads through this pointer; the cast to
+                    // *mut is required by the C signature, not by us.
+                    iov_base: bufs[i].as_ptr() as *mut libc::c_void,
+                    iov_len: bufs[i].len(),
+                };
+                // The socket is connected, so the destination is implicit and
+                // msg_name stays null.
+                msgs[i].msg_hdr.msg_iov = std::ptr::addr_of_mut!(iov[i]);
+                msgs[i].msg_hdr.msg_iovlen = 1;
+            }
+
+            // SAFETY: `msgs[..n]` is initialised above and each `msg_iov` points
+            // at the matching live entry of `iov`, which outlives the call. The
+            // buffers in `bufs` are borrowed for the duration of the call.
+            let ret = unsafe {
+                libc::sendmmsg(
+                    self.as_raw_fd(),
+                    msgs.as_mut_ptr(),
+                    n as libc::c_uint,
+                    0, // no flags: match the semantics of the old per-packet send()
+                )
+            };
+
+            if ret < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(ret as usize)
         }
 
         /// Try to receive data without blocking.
@@ -251,6 +356,16 @@ mod unix_impl {
         pub fn is_empty(&self) -> bool {
             self.nrecv == 0
         }
+
+        /// Test seam: forge `nrecv` "received" packets and set message `idx`'s
+        /// reported `msg_len`, so a test can feed an out-of-range length without a
+        /// live socket and prove the iterator clamps the exposed slice to MTU.
+        #[cfg(test)]
+        pub fn test_forge_packet(&mut self, idx: usize, msg_len: u32, nrecv: u32) {
+            self.mmsghdr[idx].msg_hdr.msg_namelen = SOCKADDR_STORAGE_LENGTH;
+            self.mmsghdr[idx].msg_len = msg_len;
+            self.nrecv = nrecv;
+        }
     }
 
     /// Iterator over received packets in a RecvMmsgBuffer.
@@ -277,7 +392,11 @@ mod unix_impl {
             // Convert sockaddr_storage to SocketAddr
             let addr = sockaddr_storage_to_socket_addr(storage);
 
-            let data = &self.buffer.buffers[idx][..msg.msg_len as usize];
+            // The per-message buffer is exactly MTU bytes. No MSG_TRUNC is
+            // requested so msg_len is capped at MTU in practice, but clamp
+            // defensively so a mis-reported length can never index past it.
+            let len = (msg.msg_len as usize).min(MTU);
+            let data = &self.buffer.buffers[idx][..len];
             Some((addr, data))
         }
     }
@@ -305,6 +424,94 @@ mod unix_impl {
                 }
                 _ => None,
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io::{Error, ErrorKind};
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+        use super::{
+            RecvAction, RecvMmsgBuffer, recv_retry_action, sockaddr_storage_to_socket_addr,
+        };
+        use crate::protocol::MTU;
+
+        // Exercises the unsafe sockaddr_storage → SocketAddr pointer casts with
+        // real AF_INET/AF_INET6 payloads (the iterator test only ever feeds
+        // zeroed storage, i.e. the None branch). Runs under miri in CI to vet
+        // the casts and the big-endian field decodes.
+        #[test]
+        fn sockaddr_storage_roundtrip() {
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let v4 = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: 8000u16.to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from(Ipv4Addr::new(192, 168, 1, 2)).to_be(),
+                },
+                sin_zero: [0; 8],
+            };
+            unsafe { std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in, v4) };
+            assert_eq!(
+                sockaddr_storage_to_socket_addr(&storage),
+                Some(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 168, 1, 2),
+                    8000
+                ))),
+            );
+
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let v6 = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: 9000u16.to_be(),
+                sin6_flowinfo: 7,
+                sin6_addr: libc::in6_addr {
+                    s6_addr: Ipv6Addr::LOCALHOST.octets(),
+                },
+                sin6_scope_id: 3,
+            };
+            unsafe { std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in6, v6) };
+            assert_eq!(
+                sockaddr_storage_to_socket_addr(&storage),
+                Some(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::LOCALHOST,
+                    9000,
+                    7,
+                    3
+                ))),
+            );
+
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            storage.ss_family = libc::AF_UNIX as libc::sa_family_t;
+            assert_eq!(sockaddr_storage_to_socket_addr(&storage), None);
+        }
+
+        #[test]
+        fn iter_clamps_oversized_msg_len_to_mtu() {
+            let mut buffer = RecvMmsgBuffer::new();
+            buffer.test_forge_packet(0, (MTU as u32) * 4, 1);
+
+            let mut iter = buffer.iter();
+            let (_addr, data) = iter.next().expect("one forged packet");
+            assert_eq!(data.len(), MTU, "oversized msg_len must clamp to MTU");
+            assert!(iter.next().is_none(), "only one packet was forged");
+        }
+
+        #[test]
+        fn recv_retry_action_classifies_errors() {
+            assert_eq!(
+                recv_retry_action(&Error::from(ErrorKind::Interrupted)),
+                RecvAction::Retry,
+            );
+            assert_eq!(
+                recv_retry_action(&Error::from(ErrorKind::WouldBlock)),
+                RecvAction::WouldBlock,
+            );
+            assert_eq!(
+                recv_retry_action(&Error::from_raw_os_error(libc::ECONNREFUSED)),
+                RecvAction::Hard,
+            );
         }
     }
 }
@@ -360,6 +567,28 @@ mod fallback_impl {
         /// Send data to the connected peer.
         pub async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
             self.inner.send(buf).await
+        }
+
+        /// Send several datagrams to the connected peer.
+        ///
+        /// There is no `sendmmsg` off Linux, so this sends one at a time and
+        /// exists only to keep [`BatchSender::flush`] platform-agnostic. It
+        /// reports how many datagrams were accepted before the first error, so
+        /// the caller's resend bookkeeping is identical on both paths.
+        pub async fn send_batch(&self, bufs: &[&[u8]]) -> std::io::Result<usize> {
+            let mut sent = 0;
+            for buf in bufs {
+                match self.inner.send(buf).await {
+                    Ok(_) => sent += 1,
+                    // Mirror `sendmmsg`: once at least one datagram is away, a
+                    // failure is reported as a short send, not an error. The
+                    // caller retries the remainder and will surface the error
+                    // then if it persists.
+                    Err(_) if sent > 0 => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(sent)
         }
 
         /// Try to send data without blocking.

@@ -23,6 +23,7 @@ rand = "0.9"
 rustc-hash = "2.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 tokio = { version = "1.49", features = [
 	"rt-multi-thread",
 	"macros",
@@ -46,7 +47,11 @@ mimalloc = { version = "0.1", default-features = false, features = [
 libc = "0.2"
 
 [features]
-test-internals = []
+# test_helpers exposes advance_test_clock(), which calls tokio::time::advance —
+# only available with tokio's test-util. Pull it here so the test-internals
+# surface compiles standalone (e.g. `cargo build --all-features`), not just under
+# `cargo test` where dev-deps happen to unify test-util in.
+test-internals = ["tokio/test-util"]
 
 [lib]
 name = "srtla_send"
@@ -61,6 +66,7 @@ tokio-test = "0.4"
 tempfile = "3"
 assert_matches = "1"
 network-sim = { path = "crates/network-sim" }
+proptest = "1.11.0"
 
 [profile.dev]
 opt-level = 1

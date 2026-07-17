@@ -17,7 +17,10 @@ pub fn handle_srtla_ack_specific(window: &mut i32, in_flight_packets: i32, seq: 
     // CLASSIC MODE: Exact C implementation
     // Window increase logic from C version (lines 291-293)
     // Only increase if in_flight_pkts*WINDOW_MULT > window
-    if in_flight_packets * WINDOW_MULT > *window {
+    // saturating_mul: at extreme in-flight counts the i32 product would overflow
+    // (debug panic / release wrap to negative, which silently flips the comparison).
+    // Saturating at i32::MAX preserves the "should grow" verdict in the normal range.
+    if in_flight_packets.saturating_mul(WINDOW_MULT) > *window {
         let old = *window;
         // Note: WINDOW_INCR - 1 in C code
         *window = min(*window + WINDOW_INCR - 1, WINDOW_MAX * WINDOW_MULT);
@@ -60,5 +63,19 @@ mod tests {
         handle_srtla_ack_specific(&mut window, in_flight, 100, "test");
 
         assert!(window <= WINDOW_MAX * WINDOW_MULT);
+    }
+
+    #[test]
+    fn test_classic_ack_no_overflow_at_extreme_in_flight() {
+        // in_flight just past i32::MAX / WINDOW_MULT: a plain `*` overflows i32
+        // (debug panic, release wraps negative and flips the verdict to "no grow").
+        // saturating_mul caps at i32::MAX, so the comparison still reads "grow"
+        // and the window takes one ordinary classic step.
+        let mut window = 1500;
+        let in_flight = i32::MAX / WINDOW_MULT + 1;
+
+        handle_srtla_ack_specific(&mut window, in_flight, 100, "test");
+
+        assert_eq!(window, 1500 + WINDOW_INCR - 1);
     }
 }

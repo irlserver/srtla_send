@@ -3,7 +3,6 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
-use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use super::SrtlaConnection;
@@ -84,10 +83,10 @@ impl SrtlaConnection {
         incoming: &mut SrtlaIncoming,
     ) -> Result<()> {
         incoming.read_any = true;
-        let recv_time = Instant::now();
+        let now = crate::utils::now_ms();
         let pt = get_packet_type(data);
         if let Some(pt) = pt {
-            if let Some(event) = reg.process_registration_packet(conn_idx, data) {
+            if let Some(event) = reg.process_registration_packet(conn_idx, data, now) {
                 match event {
                     RegistrationEvent::RegNgp => {
                         reg.try_send_reg1_immediately(conn_idx, self).await;
@@ -95,11 +94,11 @@ impl SrtlaConnection {
                     RegistrationEvent::Reg3 => {
                         // Clear any phantom in-flight packets and NAK state
                         // accumulated during pre-registration data forwarding
-                        self.clear_pre_registration_state();
+                        self.clear_pre_registration_state(now);
                         self.connected = true;
-                        self.last_received = Some(recv_time);
+                        self.last_received = Some(now);
                         if self.reconnection.connection_established_ms == 0 {
-                            self.reconnection.connection_established_ms = crate::utils::now_ms();
+                            self.reconnection.connection_established_ms = now;
                         }
                         self.reconnection.mark_success(&self.label);
                     }
@@ -112,7 +111,7 @@ impl SrtlaConnection {
                 return Ok(());
             }
 
-            self.last_received = Some(recv_time);
+            self.last_received = Some(now);
 
             if pt == SRT_TYPE_ACK {
                 if let Some(ack) = parse_srt_ack(data) {
@@ -160,7 +159,19 @@ impl SrtlaConnection {
                     }
                 }
             } else if pt == SRTLA_TYPE_KEEPALIVE {
-                self.rtt.handle_keepalive_response(data, &self.label);
+                if self
+                    .rtt
+                    .handle_keepalive_response(data, &self.label, now)
+                    .is_some()
+                {
+                    self.record_rtt_probe();
+                    // Delivery proof for `stall_deselect`: a completed keepalive
+                    // round-trip proves this link's path is alive even while no
+                    // data ACKs are landing. Pairs with the earned-ACK site
+                    // (see `ack_nak.rs`); together they let a recovered link
+                    // un-gate itself without the scheduler probing blindly.
+                    self.last_ack_or_rtt_sample_ms = now;
+                }
             } else {
                 incoming
                     .forward_to_client

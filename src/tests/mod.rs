@@ -11,13 +11,16 @@ pub mod config_tests;
 pub mod sender_tests;
 
 #[cfg(test)]
+pub mod stall_deselect_tests;
+
+#[cfg(test)]
 pub mod protocol_tests;
+
+#[cfg(test)]
+pub mod keepalive_interop_tests;
 
 #[cfg(test)]
 pub mod integration_tests;
 
 #[cfg(test)]
 pub mod end_to_end_tests;
-
-#[cfg(test)]
-pub mod rtt_threshold_tests;

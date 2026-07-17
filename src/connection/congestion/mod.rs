@@ -21,7 +21,6 @@ mod enhanced;
 use tracing::warn;
 
 use crate::protocol::*;
-use crate::utils::now_ms;
 
 const NAK_BURST_WINDOW_MS: u64 = 1000;
 const NAK_BURST_LOG_THRESHOLD: i32 = 5;
@@ -56,8 +55,8 @@ impl CongestionControl {
     /// Handle NAK reception (common to both classic and enhanced)
     ///
     /// Returns true if the NAK was handled successfully
-    pub fn handle_nak(&mut self, window: &mut i32, seq: i32, label: &str) -> bool {
-        let current_time = now_ms();
+    pub fn handle_nak(&mut self, window: &mut i32, seq: i32, label: &str, now_ms: u64) -> bool {
+        let current_time = now_ms;
         self.nak_count = self.nak_count.saturating_add(1);
 
         let time_since_last_nak = current_time.saturating_sub(self.last_nak_time_ms);
@@ -133,6 +132,7 @@ impl CongestionControl {
         window: &mut i32,
         in_flight_packets: i32,
         label: &str,
+        now_ms: u64,
     ) {
         enhanced::handle_srtla_ack(
             window,
@@ -140,11 +140,23 @@ impl CongestionControl {
             &mut self.fast_recovery_mode,
             self.fast_recovery_start_ms,
             label,
+            now_ms,
         );
     }
 
     /// Perform window recovery (enhanced mode only)
-    pub fn perform_window_recovery(&mut self, window: &mut i32, connected: bool, label: &str) {
+    ///
+    /// `rtt_velocity` is the Kalman velocity (ms/sample). Positive = rising RTT.
+    /// When velocity exceeds the gate threshold, recovery rate is halved to
+    /// avoid inflating in-flight during active congestion.
+    pub fn perform_window_recovery(
+        &mut self,
+        window: &mut i32,
+        connected: bool,
+        rtt_velocity: f64,
+        label: &str,
+        now_ms: u64,
+    ) {
         enhanced::perform_window_recovery(
             window,
             connected,
@@ -153,16 +165,18 @@ impl CongestionControl {
             &mut self.nak_burst_start_time_ms,
             &mut self.last_window_increase_ms,
             &mut self.fast_recovery_mode,
+            rtt_velocity,
             label,
+            now_ms,
         );
     }
 
     /// Get time since last NAK in milliseconds
-    pub fn time_since_last_nak_ms(&self) -> Option<u64> {
+    pub fn time_since_last_nak_ms(&self, now_ms: u64) -> Option<u64> {
         if self.last_nak_time_ms == 0 {
             None
         } else {
-            Some(now_ms().saturating_sub(self.last_nak_time_ms))
+            Some(now_ms.saturating_sub(self.last_nak_time_ms))
         }
     }
 }

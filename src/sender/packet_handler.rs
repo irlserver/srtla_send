@@ -4,7 +4,7 @@ use anyhow::Result;
 use smallvec::SmallVec;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use super::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
@@ -16,6 +16,37 @@ use crate::registration::SrtlaRegistrationManager;
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
+
+/// Attribute a NAK to the uplink that sent the lost packet and shrink its window.
+///
+/// Prefers the O(1) sequence-tracker mapping (the link that actually sent `nak`);
+/// once that link is found we never fall through, so a duplicate NAK for an
+/// already-cleared sequence can't be re-counted against a different link. Only
+/// when the tracker has no record do we fall back to the first link that still
+/// recognizes the sequence in its own packet log. Returns the index of the link
+/// that counted the NAK, or `None` if none did. Production ignores the return;
+/// it exists so the attribution path is unit-testable directly instead of mirrored.
+pub(crate) fn attribute_nak(
+    connections: &mut [SrtlaConnection],
+    seq_tracker: &SequenceTracker,
+    nak: u32,
+    current_time_ms: u64,
+) -> Option<usize> {
+    if let Some(conn_id) = seq_tracker.get(nak, current_time_ms)
+        && let Some(pos) = connections.iter().position(|c| c.conn_id == conn_id)
+    {
+        return connections[pos]
+            .handle_nak(nak as i32, current_time_ms)
+            .then_some(pos);
+    }
+
+    for (i, conn) in connections.iter_mut().enumerate() {
+        if conn.handle_nak(nak as i32, current_time_ms) {
+            return Some(i);
+        }
+    }
+    None
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn process_connection_events(
@@ -50,15 +81,18 @@ pub async fn process_connection_events(
         return Ok(());
     }
 
+    // One monotonic read drives every ACK/NAK handler in this receive batch.
+    let current_time_ms = crate::utils::now_ms();
+
     for ack in incoming.ack_numbers.iter() {
         for c in connections.iter_mut() {
-            c.handle_srt_ack(*ack as i32);
+            c.handle_srt_ack(*ack as i32, current_time_ms);
         }
     }
 
     for srtla_ack in incoming.srtla_ack_numbers.iter() {
         for c in connections.iter_mut() {
-            if c.handle_srtla_ack_specific(*srtla_ack as i32, classic) {
+            if c.handle_srtla_ack_specific(*srtla_ack as i32, classic, current_time_ms) {
                 break;
             }
         }
@@ -67,26 +101,8 @@ pub async fn process_connection_events(
         }
     }
 
-    // Get current time once for all NAK processing
-    let current_time_ms = crate::utils::now_ms();
     for nak in incoming.nak_numbers.iter() {
-        let mut handled = false;
-
-        // O(1) lookup in the ring buffer
-        if let Some(conn_id) = seq_tracker.get(*nak, current_time_ms)
-            && let Some(conn) = connections.iter_mut().find(|c| c.conn_id == conn_id)
-        {
-            conn.handle_nak(*nak as i32);
-            handled = true;
-        }
-
-        if !handled {
-            for conn in connections.iter_mut() {
-                if conn.handle_nak(*nak as i32) {
-                    break;
-                }
-            }
-        }
+        attribute_nak(connections, seq_tracker, *nak, current_time_ms);
     }
 
     if let Some(client) = last_client_addr {
@@ -198,12 +214,13 @@ pub async fn drain_packet_queue(
 fn select_pre_registration_connection(
     connections: &[SrtlaConnection],
     last_selected_idx: Option<usize>,
+    now_ms: u64,
 ) -> Option<usize> {
     // Try to reuse the last selected connection if it's still valid
     if let Some(idx) = last_selected_idx
         && let Some(conn) = connections.get(idx)
         && conn.connected
-        && !conn.is_timed_out()
+        && !conn.is_timed_out(now_ms)
     {
         return Some(idx);
     }
@@ -212,7 +229,7 @@ fn select_pre_registration_connection(
     connections
         .iter()
         .enumerate()
-        .find(|(_, c)| !c.is_timed_out())
+        .find(|(_, c)| !c.is_timed_out(now_ms))
         .map(|(i, _)| i)
 }
 
@@ -220,17 +237,22 @@ fn select_pre_registration_connection(
 ///
 /// Uses a pre-cached `ConfigSnapshot` to avoid atomic loads per packet.
 /// The caller should create a snapshot once per select iteration for optimal performance.
+///
+/// When a keyframe burst is detected (runs of consecutive max-MTU 1316-byte data
+/// packets), the scheduler overrides normal selection and routes to the
+/// highest-quality link. This ensures I-frame data — which is critical for
+/// decoder recovery — travels over the most reliable path.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
-    last_switch_time_ms: &mut u64,
     seq_tracker: &mut SequenceTracker,
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
+    critical_window: &crate::priority::CriticalWindow,
 ) {
     match res {
         Ok((n, src)) => {
@@ -243,7 +265,8 @@ pub async fn handle_srt_packet(
             let pkt = &recv_buf[..n];
             let seq = protocol::get_srt_sequence_number(pkt);
             if !registration_complete {
-                let sel_idx = select_pre_registration_connection(connections, *last_selected_idx);
+                let sel_idx =
+                    select_pre_registration_connection(connections, *last_selected_idx, packet_time_ms);
                 if let Some(sel_idx) = sel_idx {
                     forward_via_connection(
                         sel_idx,
@@ -251,7 +274,6 @@ pub async fn handle_srt_packet(
                         seq,
                         connections,
                         last_selected_idx,
-                        last_switch_time_ms,
                         seq_tracker,
                         packet_time_ms,
                     )
@@ -261,13 +283,31 @@ pub async fn handle_srt_packet(
                 return;
             }
 
-            let sel_idx = select_connection_idx(
-                connections,
-                *last_selected_idx,
-                *last_switch_time_ms,
-                packet_time_ms,
-                config_snap,
-            );
+            // Normal scheduler selection
+            let mut sel_idx =
+                select_connection_idx(connections, *last_selected_idx, packet_time_ms, config_snap);
+
+            // Keyframe priority: route critical packets to the highest-quality
+            // link. The critical time window is opened over the priority
+            // sidecar by the encoder front-end, which parses NAL units and
+            // knows exactly when a keyframe / parameter set is in flight (see
+            // crate::priority). srtla_send sees only opaque SRT payloads, so it
+            // never guesses at keyframes itself.
+            //
+            // Only data packets have seq != None (control packets have MSB set).
+            if seq.is_some()
+                && critical_window.is_critical_now(packet_time_ms)
+                && let Some(best_idx) = crate::priority::select_best_quality_idx(connections)
+                && sel_idx != Some(best_idx)
+            {
+                trace!(
+                    "critical override (window): link {} -> {}",
+                    sel_idx.map_or(-1, |i| i as i64),
+                    best_idx as i64
+                );
+                sel_idx = Some(best_idx);
+            }
+
             if let Some(sel_idx) = sel_idx {
                 forward_via_connection(
                     sel_idx,
@@ -275,7 +315,6 @@ pub async fn handle_srt_packet(
                     seq,
                     connections,
                     last_selected_idx,
-                    last_switch_time_ms,
                     seq_tracker,
                     packet_time_ms,
                 )
@@ -296,7 +335,6 @@ pub async fn forward_via_connection(
     seq: Option<u32>,
     connections: &mut [SrtlaConnection],
     last_selected_idx: &mut Option<usize>,
-    last_switch_time_ms: &mut u64,
     seq_tracker: &mut SequenceTracker,
     packet_time_ms: u64,
 ) {
@@ -306,15 +344,20 @@ pub async fn forward_via_connection(
     if *last_selected_idx != Some(sel_idx) {
         if let Some(prev_idx) = *last_selected_idx {
             if prev_idx < connections.len() {
-                // Flush the previous connection's batch before switching
-                if connections[prev_idx].has_queued_packets()
-                    && let Err(e) = connections[prev_idx].flush_batch().await
-                {
-                    warn!(
-                        "{}: batch flush on switch failed: {}",
-                        connections[prev_idx].label, e
-                    );
-                }
+                // Deliberately does not flush the previous link's batch. Each
+                // connection owns its BatchSender and drains it with a single
+                // `sendmmsg` on its own size threshold or 15ms timer, so
+                // interleaved routing just fills several per-link batches
+                // concurrently instead of one serially — no syscall is lost.
+                //
+                // Flushing here emitted a one-packet batch on every switch,
+                // which made per-packet scheduling expensive and is what the
+                // `MIN_SWITCH_INTERVAL_MS` cooldown existed to suppress. That
+                // cooldown freezes the selector for ~15ms, and since
+                // `get_score()` counts queued packets as in-flight precisely so
+                // routing a packet immediately de-prioritises its link, freezing
+                // it opens that feedback loop and lets in-flight run away on one
+                // link.
                 debug!(
                     "Connection switch: {} → {} (seq: {:?})",
                     connections[prev_idx].label, connections[sel_idx].label, seq
@@ -327,7 +370,6 @@ pub async fn forward_via_connection(
             );
         }
         *last_selected_idx = Some(sel_idx);
-        *last_switch_time_ms = packet_time_ms; // Track when switch occurred (use cached timestamp)
     }
 
     // Get conn_id before mutable borrow for seq_tracker

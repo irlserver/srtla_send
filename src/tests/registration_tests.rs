@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
 
+
+    use crate::connection::STARTUP_GRACE_MS;
     use crate::protocol::*;
     use crate::registration::*;
     use crate::test_helpers::create_test_connection;
@@ -29,7 +31,7 @@ mod tests {
         buf[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
 
         // Process REG_NGP from connection 1
-        let handled = reg.process_registration_packet(1, &buf);
+        let handled = reg.process_registration_packet(1, &buf, now_ms());
         assert!(handled.is_some());
         assert_eq!(reg.reg1_target_idx(), Some(1));
 
@@ -50,7 +52,7 @@ mod tests {
         modified_id[SRTLA_ID_LEN / 2..].fill(0xab); // Server modifies last half
         let buf = create_reg2_packet(&modified_id);
 
-        let handled = reg.process_registration_packet(0, &buf);
+        let handled = reg.process_registration_packet(0, &buf, now_ms());
         assert!(handled.is_some());
 
         // Should have updated the ID and set broadcast pending
@@ -70,7 +72,7 @@ mod tests {
         // Create REG3 packet
         let buf = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
 
-        let handled = reg.process_registration_packet(2, &buf);
+        let handled = reg.process_registration_packet(2, &buf, now_ms());
         assert!(handled.is_some());
 
         // REG3 should set has_connected flag
@@ -91,7 +93,7 @@ mod tests {
         let mut buf = vec![0u8; 4];
         buf[0..2].copy_from_slice(&SRTLA_TYPE_REG_ERR.to_be_bytes());
 
-        let handled = reg.process_registration_packet(1, &buf);
+        let handled = reg.process_registration_packet(1, &buf, now_ms());
         assert!(handled.is_some());
 
         // Should clear pending state and wait for a new REG_NGP before retrying
@@ -110,7 +112,7 @@ mod tests {
         let mut buf = vec![0u8; 4];
         buf[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
 
-        let handled = reg.process_registration_packet(0, &buf);
+        let handled = reg.process_registration_packet(0, &buf, now_ms());
         assert!(handled.is_none());
     }
 
@@ -121,7 +123,7 @@ mod tests {
 
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
-        reg.process_registration_packet(0, &ngp);
+        reg.process_registration_packet(0, &ngp, now_ms());
 
         // Should send REG1 to first connection when no connections are active
         reg.reg_driver_send_if_needed(&mut connections).await;
@@ -158,7 +160,7 @@ mod tests {
 
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
-        reg.process_registration_packet(0, &ngp);
+        reg.process_registration_packet(0, &ngp, now_ms());
 
         reg.reg_driver_send_if_needed(&mut connections).await;
         assert_eq!(reg.pending_reg2_idx(), Some(0));
@@ -246,7 +248,7 @@ mod tests {
 
         // Simulate multiple REG3 responses
         for i in 0..3 {
-            let handled = reg.process_registration_packet(i, &reg3_packet);
+            let handled = reg.process_registration_packet(i, &reg3_packet, now_ms());
             assert!(handled.is_some());
         }
 
@@ -287,7 +289,7 @@ mod tests {
 
         // After REG_NGP
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
-        reg.process_registration_packet(0, &ngp_packet);
+        reg.process_registration_packet(0, &ngp_packet, now_ms());
         assert_eq!(reg.reg1_target_idx(), Some(0));
 
         // Set up for REG2
@@ -297,14 +299,14 @@ mod tests {
         let mut modified_id = reg.srtla_id;
         modified_id[SRTLA_ID_LEN / 2..].fill(0xff);
         let reg2_packet = create_reg2_packet(&modified_id);
-        reg.process_registration_packet(0, &reg2_packet);
+        reg.process_registration_packet(0, &reg2_packet, now_ms());
 
         assert!(reg.broadcast_reg2_pending());
         assert_eq!(reg.pending_reg2_idx(), None);
 
         // Process REG3
         let reg3_packet = vec![0x92, 0x02];
-        reg.process_registration_packet(0, &reg3_packet);
+        reg.process_registration_packet(0, &reg3_packet, now_ms());
 
         assert!(reg.has_connected);
 
@@ -344,7 +346,7 @@ mod tests {
         let mut connections = vec![create_test_connection().await];
 
         connections[0].connected = true;
-        connections[0].last_received = Some(tokio::time::Instant::now());
+        connections[0].last_received = Some(now_ms());
         reg.update_active_connections(&connections);
 
         let initial_target = reg.reg1_target_idx();
@@ -421,10 +423,10 @@ mod tests {
         reg.simulate_probe_result(1, 0);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
-        reg.handle_probe_response(0);
+        reg.handle_probe_response(0, now_ms());
 
         std::thread::sleep(std::time::Duration::from_millis(50));
-        reg.handle_probe_response(1);
+        reg.handle_probe_response(1, now_ms());
 
         let completed = reg.check_probing_complete();
 
@@ -442,7 +444,7 @@ mod tests {
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        reg.process_registration_packet(0, &ngp_packet);
+        reg.process_registration_packet(0, &ngp_packet, now_ms());
 
         assert!(reg.is_probing());
         assert_eq!(reg.probe_results_count(), 1);
@@ -460,8 +462,188 @@ mod tests {
         assert_eq!(reg.reg1_target_idx(), Some(0));
 
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
-        reg.process_registration_packet(1, &ngp_packet);
+        reg.process_registration_packet(1, &ngp_packet, now_ms());
 
         assert_eq!(reg.reg1_target_idx(), Some(1));
+    }
+
+    // Two-phase SRTLA v2 handshake, driven from the sender side:
+    // REG1 -> REG2(full_id) -> REG2 broadcast -> REG3.
+    #[tokio::test]
+    async fn reg_handshake_two_phase_flow() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
+
+        let mut ngp = vec![0u8; 2];
+        ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
+        reg.process_registration_packet(0, &ngp, now_ms());
+        reg.reg_driver_send_if_needed(&mut connections).await;
+        assert_eq!(
+            reg.pending_reg2_idx(),
+            Some(0),
+            "REG1 sent on conn 0 -> awaiting REG2"
+        );
+
+        let sender_prefix = reg.srtla_id;
+        let mut full_id = sender_prefix;
+        full_id[SRTLA_ID_LEN / 2..].fill(0x5a);
+        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
+
+        assert_eq!(reg.srtla_id, full_id, "conn 0 adopts the receiver full_id");
+        assert!(reg.broadcast_reg2_pending(), "REG2 broadcast queued");
+        assert_eq!(reg.pending_reg2_idx(), None, "REG2 received clears pending");
+
+        let broadcast = create_reg2_packet(&reg.srtla_id);
+        assert_eq!(
+            &broadcast[2..],
+            &full_id[..],
+            "broadcast REG2 carries the full_id to conn N (not just conn 0)"
+        );
+        reg.reg_driver_send_if_needed(&mut connections).await;
+        assert!(
+            !reg.broadcast_reg2_pending(),
+            "REG2 broadcast consumed after sending to all uplinks"
+        );
+
+        let reg3 = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
+        for idx in 0..connections.len() {
+            assert!(
+                reg.process_registration_packet(idx, &reg3, now_ms()).is_some(),
+                "REG3 on conn {idx} handled"
+            );
+        }
+        assert!(reg.has_connected(), "REG3 marks the handshake complete");
+    }
+
+    // REG2 reply echoes the client id in full_id: the first SRTLA_ID_LEN/2 bytes
+    // echo the sender id, the tail is receiver-substituted.
+    #[test]
+    fn full_id_propagation_byte_wise() {
+        let mut reg = SrtlaRegistrationManager::new();
+        reg.set_pending_reg2_idx(Some(0));
+
+        let sender_id = reg.srtla_id;
+        let half = SRTLA_ID_LEN / 2;
+
+        let mut full_id = sender_id;
+        for b in full_id[half..].iter_mut() {
+            *b = 0xc3;
+        }
+        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
+
+        assert_eq!(
+            &reg.srtla_id[..half],
+            &sender_id[..half],
+            "first half (sender prefix) must be preserved byte-for-byte"
+        );
+        assert_eq!(
+            &reg.srtla_id[half..],
+            &full_id[half..],
+            "second half must equal the receiver-substituted tail"
+        );
+        for (i, &b) in reg.srtla_id[half..].iter().enumerate() {
+            assert_eq!(b, 0xc3, "tail byte {i} not substituted");
+        }
+    }
+
+    // Registration timing is wall-clock (now_ms == SystemTime), so the timeout is
+    // exercised through the production seam clear_pending_if_timed_out with explicit
+    // logical now values — never a real sleep; the paused clock keeps it deterministic.
+    #[tokio::test(start_paused = true)]
+    async fn reg2_timeout_fires_at_4s_logical() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut conn = create_test_connection().await;
+
+        let base = now_ms();
+        reg.send_reg1_to(0, &mut conn).await;
+        assert_eq!(reg.pending_reg2_idx(), Some(0));
+
+        let deadline = reg.pending_timeout_at_ms();
+        assert!(
+            deadline >= base + REG2_TIMEOUT * 1000 && deadline <= now_ms() + REG2_TIMEOUT * 1000,
+            "REG2 deadline must be REG2_TIMEOUT (4s) past the REG1 send"
+        );
+
+        assert_eq!(
+            reg.clear_pending_if_timed_out(deadline - 1),
+            None,
+            "must not time out before REG2_TIMEOUT"
+        );
+        assert_eq!(
+            reg.clear_pending_if_timed_out(deadline),
+            Some(0),
+            "REG2 wait must time out at REG2_TIMEOUT (4s)"
+        );
+        assert_eq!(reg.pending_reg2_idx(), None, "timeout clears pending");
+        assert_eq!(
+            reg.pending_timeout_at_ms(),
+            0,
+            "timeout clears the deadline"
+        );
+    }
+
+    // handle_reg2 arms the REG3 deadline (REG3_TIMEOUT, 4s) and clears pending on
+    // success; re-arming pending models "REG3 never arrived" so the same seam can be
+    // driven to the REG3 boundary in logical time.
+    #[tokio::test(start_paused = true)]
+    async fn reg3_timeout_fires_at_4s_logical() {
+        let mut reg = SrtlaRegistrationManager::new();
+
+        reg.set_pending_reg2_idx(Some(0));
+        let mut full_id = reg.srtla_id;
+        full_id[SRTLA_ID_LEN / 2..].fill(0x7e);
+
+        let base = now_ms();
+        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
+
+        let deadline = reg.pending_timeout_at_ms();
+        assert!(
+            deadline >= base + REG3_TIMEOUT * 1000 && deadline <= now_ms() + REG3_TIMEOUT * 1000,
+            "REG3 deadline must be REG3_TIMEOUT (4s) past the received REG2"
+        );
+
+        reg.set_pending_reg2_idx(Some(0));
+        assert_eq!(
+            reg.clear_pending_if_timed_out(deadline - 1),
+            None,
+            "must not time out before REG3_TIMEOUT"
+        );
+        assert_eq!(
+            reg.clear_pending_if_timed_out(deadline),
+            Some(0),
+            "REG3 wait must time out at REG3_TIMEOUT (4s)"
+        );
+    }
+
+    // A fresh link (last_received == None, not yet connected) drives registration,
+    // never reconnection, while it is inside its startup grace window. is_timed_out
+    // compares now_ms() against the grace deadline, so the test picks the deadline
+    // rather than advancing a virtual clock.
+    #[tokio::test]
+    async fn fresh_link_not_timed_out() {
+        let mut conn = create_test_connection().await;
+
+        conn.connected = false;
+        conn.last_received = None;
+        conn.reconnection.connection_established_ms = 0;
+
+        // Within the grace window: never-received link is not timed out, so
+        // housekeeping keeps driving registration instead of reconnection.
+        conn.reconnection.startup_grace_deadline_ms = now_ms() + STARTUP_GRACE_MS;
+        assert!(
+            !conn.is_timed_out(now_ms()),
+            "fresh never-received link within grace must NOT be timed out"
+        );
+
+        // Past the grace deadline: a never-established link that never received
+        // data is now timed out, which is what drives re-registration.
+        conn.reconnection.startup_grace_deadline_ms = now_ms().saturating_sub(1);
+        assert!(
+            conn.is_timed_out(now_ms()),
+            "a fresh link past its startup grace deadline must be timed out"
+        );
     }
 }

@@ -1,25 +1,28 @@
 //! Runtime configuration for SRTLA sender.
 //!
-//! Manages dynamic settings that can be changed at runtime via stdin or Unix socket.
+//! `DynamicConfig` holds atomic state that can be flipped at runtime. The
+//! actual wire protocol lives in [`crate::control`] — this module exposes
+//! plain getters/setters that the control dispatcher calls into.
 
-#[cfg(unix)]
-use std::io::Write;
 use std::io::{BufRead, BufReader};
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 
-#[cfg(unix)]
-use tracing::debug;
-use tracing::{info, warn};
-
+use crate::control::dispatch;
 use crate::mode::SchedulingMode;
+use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;
 
-/// Default RTT delta threshold in milliseconds.
-/// Links within min_rtt + delta are considered "fast" and preferred.
-pub const DEFAULT_RTT_DELTA_MS: u32 = 30;
+/// In-flight packet backlog at or above which a link is a stall candidate
+/// under the `stall_deselect` guard (default on).
+pub const STALL_MIN_IN_FLIGHT_PACKETS: i32 = 32;
+
+/// Staleness window (ms) for a link's last delivery proof (earned-ACK or
+/// keepalive-RTT sample) under `stall_deselect`. A stall candidate whose last
+/// proof is older than this is treated as stalled. Kept well below
+/// `CONN_TIMEOUT` (15 s): deselect is a selection penalty ONLY, never a
+/// liveness/timeout shortcut.
+pub const STALL_ACK_STALE_MS: u64 = 3000;
 
 /// Snapshot of configuration for efficient hot-path access.
 /// Call `DynamicConfig::snapshot()` once per select iteration to avoid
@@ -28,23 +31,36 @@ pub const DEFAULT_RTT_DELTA_MS: u32 = 30;
 pub struct ConfigSnapshot {
     pub mode: SchedulingMode,
     pub quality_enabled: bool,
-    pub exploration_enabled: bool,
-    pub rtt_delta_ms: u32,
+    /// Stalled-link deselect (default ON). On, the selection layer excludes a
+    /// link whose in-flight backlog is high while its last delivery proof has
+    /// gone stale, provided at least one healthier link can carry the traffic.
+    /// Off (`--no-stall-deselect`), selection is byte-for-byte unchanged.
+    pub stall_deselect: bool,
+    /// In-flight threshold for `stall_deselect` (default [`STALL_MIN_IN_FLIGHT_PACKETS`]).
+    pub stall_min_in_flight: i32,
+    /// Delivery-proof staleness window in ms for `stall_deselect`
+    /// (default [`STALL_ACK_STALE_MS`]).
+    pub stall_ack_stale_ms: u64,
+}
+
+impl Default for ConfigSnapshot {
+    fn default() -> Self {
+        Self {
+            mode: SchedulingMode::Enhanced,
+            quality_enabled: true,
+            stall_deselect: true,
+            stall_min_in_flight: STALL_MIN_IN_FLIGHT_PACKETS,
+            stall_ack_stale_ms: STALL_ACK_STALE_MS,
+        }
+    }
 }
 
 impl ConfigSnapshot {
     /// Check if quality scoring is effective for the current mode.
-    /// Quality scoring only applies to enhanced and rtt-threshold modes.
+    /// Quality scoring only applies to enhanced mode.
     #[inline]
     pub fn effective_quality_enabled(&self) -> bool {
         self.quality_enabled && !self.mode.is_classic()
-    }
-
-    /// Check if exploration is effective for the current mode.
-    /// Exploration only applies to enhanced mode.
-    #[inline]
-    pub fn effective_exploration_enabled(&self) -> bool {
-        self.exploration_enabled && self.mode.is_enhanced()
     }
 }
 
@@ -54,8 +70,9 @@ impl ConfigSnapshot {
 pub struct DynamicConfig {
     mode: Arc<AtomicU8>,
     quality_enabled: Arc<AtomicBool>,
-    exploration_enabled: Arc<AtomicBool>,
-    rtt_delta_ms: Arc<AtomicU32>,
+    stall_deselect: Arc<AtomicBool>,
+    stall_min_in_flight: Arc<AtomicI32>,
+    stall_ack_stale_ms: Arc<AtomicU64>,
 }
 
 impl Default for DynamicConfig {
@@ -69,8 +86,9 @@ impl DynamicConfig {
         Self {
             mode: Arc::new(AtomicU8::new(SchedulingMode::Enhanced.as_u8())),
             quality_enabled: Arc::new(AtomicBool::new(true)),
-            exploration_enabled: Arc::new(AtomicBool::new(false)),
-            rtt_delta_ms: Arc::new(AtomicU32::new(DEFAULT_RTT_DELTA_MS)),
+            stall_deselect: Arc::new(AtomicBool::new(true)),
+            stall_min_in_flight: Arc::new(AtomicI32::new(STALL_MIN_IN_FLIGHT_PACKETS)),
+            stall_ack_stale_ms: Arc::new(AtomicU64::new(STALL_ACK_STALE_MS)),
         }
     }
 
@@ -78,14 +96,16 @@ impl DynamicConfig {
     pub fn from_cli(
         mode: SchedulingMode,
         no_quality: bool,
-        exploration: bool,
-        rtt_delta_ms: u32,
+        no_stall_deselect: bool,
+        stall_min_in_flight: i32,
+        stall_ack_stale_ms: u64,
     ) -> Self {
         Self {
             mode: Arc::new(AtomicU8::new(mode.as_u8())),
             quality_enabled: Arc::new(AtomicBool::new(!no_quality)),
-            exploration_enabled: Arc::new(AtomicBool::new(exploration)),
-            rtt_delta_ms: Arc::new(AtomicU32::new(rtt_delta_ms)),
+            stall_deselect: Arc::new(AtomicBool::new(!no_stall_deselect)),
+            stall_min_in_flight: Arc::new(AtomicI32::new(stall_min_in_flight)),
+            stall_ack_stale_ms: Arc::new(AtomicU64::new(stall_ack_stale_ms)),
         }
     }
 
@@ -97,8 +117,9 @@ impl DynamicConfig {
         ConfigSnapshot {
             mode: SchedulingMode::from_u8(self.mode.load(Ordering::Relaxed)),
             quality_enabled: self.quality_enabled.load(Ordering::Relaxed),
-            exploration_enabled: self.exploration_enabled.load(Ordering::Relaxed),
-            rtt_delta_ms: self.rtt_delta_ms.load(Ordering::Relaxed),
+            stall_deselect: self.stall_deselect.load(Ordering::Relaxed),
+            stall_min_in_flight: self.stall_min_in_flight.load(Ordering::Relaxed),
+            stall_ack_stale_ms: self.stall_ack_stale_ms.load(Ordering::Relaxed),
         }
     }
 
@@ -118,271 +139,31 @@ impl DynamicConfig {
         self.quality_enabled.store(enabled, Ordering::Relaxed);
     }
 
-    /// Set whether exploration is enabled.
-    pub fn set_exploration_enabled(&self, enabled: bool) {
-        self.exploration_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    /// Set the RTT delta threshold in milliseconds.
-    pub fn set_rtt_delta_ms(&self, delta: u32) {
-        self.rtt_delta_ms.store(delta, Ordering::Relaxed);
+    /// Toggle the stalled-link deselect guard at runtime.
+    pub fn set_stall_deselect(&self, enabled: bool) {
+        self.stall_deselect.store(enabled, Ordering::Relaxed);
     }
 }
 
-pub fn spawn_config_listener(
+/// Spawn the stdin command reader in a std::thread. Stdin on Linux
+/// doesn't have a clean async story — easier to stay blocking here.
+/// The Unix control socket, which actually needs subscriptions, lives
+/// in an async tokio task launched by main instead.
+pub fn spawn_stdin_listener(
     config: DynamicConfig,
-    socket_path: Option<String>,
     stats: SharedStats,
+    critical_window: CriticalWindow,
 ) {
-    if let Some(sock_path) = socket_path {
-        // Socket path specified: use Unix socket on Unix, fallback to stdin on other platforms
-        #[cfg(unix)]
-        {
-            let config_clone = config.clone();
-            let stats_clone = stats.clone();
-            std::thread::spawn(move || {
-                unix_socket_loop(&config_clone, &sock_path, &stats_clone);
-            });
-        }
-        #[cfg(not(unix))]
-        {
-            // Unix sockets not available; fall back to stdin listener
-            let _ = sock_path; // suppress unused warning
-            let _ = stats; // suppress unused warning
-            let config_clone = config.clone();
-            std::thread::spawn(move || {
-                let stdin = std::io::stdin();
-                let reader = BufReader::new(stdin);
-                for cmd in reader.lines().map_while(Result::ok) {
-                    apply_cmd(&config_clone, cmd.trim(), None);
-                }
-            });
-        }
-    } else {
-        // No socket path: use stdin listener (backward compatibility)
-        let config_clone = config.clone();
-        std::thread::spawn(move || {
-            let stdin = std::io::stdin();
-            let reader = BufReader::new(stdin);
-            for cmd in reader.lines().map_while(Result::ok) {
-                apply_cmd(&config_clone, cmd.trim(), None);
-            }
-        });
-    }
-}
-
-/// Response from apply_cmd that can be sent back to the client.
-#[allow(dead_code)] // Json variant's inner value is read in #[cfg(unix)] code
-pub enum CmdResponse {
-    /// No response needed (command logged via tracing)
-    None,
-    /// JSON response to send back
-    Json(String),
-}
-
-/// Apply a runtime command to the configuration.
-///
-/// Commands:
-/// - `mode classic|enhanced|rtt-threshold` - switch scheduling mode
-/// - `quality on|off` - toggle quality scoring
-/// - `explore on|off` - toggle exploration
-/// - `rtt-delta <ms>` - set RTT delta threshold
-/// - `status` - show current configuration
-/// - `stats` - get per-link telemetry as JSON
-pub fn apply_cmd(config: &DynamicConfig, cmd: &str, stats: Option<&SharedStats>) -> CmdResponse {
-    let cmd = cmd.trim();
-    if cmd.is_empty() {
-        return CmdResponse::None;
-    }
-
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.is_empty() {
-        return CmdResponse::None;
-    }
-
-    match parts[0] {
-        "mode" => {
-            if parts.len() != 2 {
-                warn!("usage: mode classic|enhanced|rtt-threshold|edpf");
-                return CmdResponse::None;
-            }
-            match parts[1] {
-                "classic" => {
-                    config.set_mode(SchedulingMode::Classic);
-                    info!("mode: classic");
-                }
-                "enhanced" => {
-                    config.set_mode(SchedulingMode::Enhanced);
-                    info!("mode: enhanced");
-                }
-                "rtt-threshold" => {
-                    config.set_mode(SchedulingMode::RttThreshold);
-                    info!("mode: rtt-threshold");
-                }
-                "edpf" => {
-                    config.set_mode(SchedulingMode::Edpf);
-                    info!("mode: edpf");
-                }
-                other => {
-                    warn!(
-                        "unknown mode '{}': use classic, enhanced, rtt-threshold, or edpf",
-                        other
-                    );
-                }
+    std::thread::spawn(move || {
+        let reader = BufReader::new(std::io::stdin());
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(resp) = dispatch(&config, Some(&stats), Some(&critical_window), line.trim())
+            {
+                // Responses on stdin just go to stdout so scripts can pipe.
+                println!("{}", resp.to_json());
             }
         }
-
-        "quality" => {
-            if parts.len() != 2 {
-                warn!("usage: quality on|off");
-                return CmdResponse::None;
-            }
-            match parts[1] {
-                "on" => {
-                    config.set_quality_enabled(true);
-                    info!("quality: on");
-                }
-                "off" => {
-                    config.set_quality_enabled(false);
-                    info!("quality: off");
-                }
-                other => {
-                    warn!("invalid value '{}': use on or off", other);
-                }
-            }
-        }
-
-        "explore" => {
-            if parts.len() != 2 {
-                warn!("usage: explore on|off");
-                return CmdResponse::None;
-            }
-            match parts[1] {
-                "on" => {
-                    config.set_exploration_enabled(true);
-                    info!("explore: on");
-                }
-                "off" => {
-                    config.set_exploration_enabled(false);
-                    info!("explore: off");
-                }
-                other => {
-                    warn!("invalid value '{}': use on or off", other);
-                }
-            }
-        }
-
-        "rtt-delta" => {
-            if parts.len() != 2 {
-                warn!("usage: rtt-delta <ms>");
-                return CmdResponse::None;
-            }
-            match parts[1].parse::<u32>() {
-                Ok(delta) => {
-                    config.set_rtt_delta_ms(delta);
-                    info!("rtt-delta: {}ms", delta);
-                }
-                Err(_) => {
-                    warn!("invalid rtt-delta value: {}", parts[1]);
-                }
-            }
-        }
-
-        "status" => {
-            let snap = config.snapshot();
-            info!("mode: {}", snap.mode);
-            info!(
-                "  quality: {}",
-                if snap.quality_enabled { "on" } else { "off" }
-            );
-            info!(
-                "  explore: {}",
-                if snap.exploration_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            );
-            info!("  rtt-delta: {}ms", snap.rtt_delta_ms);
-        }
-
-        "stats" => {
-            if let Some(stats) = stats {
-                let json = stats.to_json();
-                info!("stats requested, returning {} bytes", json.len());
-                return CmdResponse::Json(json);
-            } else {
-                warn!("stats not available (no stats provider)");
-            }
-        }
-
-        other => {
-            warn!("unknown command: {}", other);
-        }
-    }
-
-    CmdResponse::None
-}
-
-#[cfg(unix)]
-fn unix_socket_loop(config: &DynamicConfig, socket_path: &str, stats: &SharedStats) {
-    // Remove existing socket file if it exists
-    let _ = std::fs::remove_file(socket_path);
-
-    let listener = match UnixListener::bind(socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            warn!("failed to bind unix socket {}: {}", socket_path, e);
-            return;
-        }
-    };
-
-    info!("unix socket listening at: {}", socket_path);
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let config_clone = config.clone();
-                let stats_clone = stats.clone();
-                std::thread::spawn(move || {
-                    handle_unix_client(config_clone, stream, stats_clone);
-                });
-            }
-            Err(e) => {
-                debug!("unix socket accept error: {}", e);
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn handle_unix_client(config: DynamicConfig, mut stream: UnixStream, stats: SharedStats) {
-    // Clone stream for reading (we need separate read/write handles)
-    let read_stream = match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let reader = BufReader::new(read_stream);
-
-    for line in reader.lines() {
-        match line {
-            Ok(cmd) => {
-                let response = apply_cmd(&config, cmd.trim(), Some(&stats));
-                if let CmdResponse::Json(json) = response {
-                    // Write JSON response followed by newline
-                    if let Err(e) = writeln!(stream, "{}", json) {
-                        debug!("failed to write response: {}", e);
-                        break;
-                    }
-                    if let Err(e) = stream.flush() {
-                        debug!("failed to flush response: {}", e);
-                        break;
-                    }
-                }
-            }
-            Err(_) => break,
-        }
-    }
+    });
 }
 
 #[cfg(test)]
@@ -395,98 +176,40 @@ mod tests {
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
         assert!(snap.quality_enabled);
-        assert!(!snap.exploration_enabled);
-        assert_eq!(snap.rtt_delta_ms, DEFAULT_RTT_DELTA_MS);
     }
 
     #[test]
     fn test_config_from_cli() {
-        let config = DynamicConfig::from_cli(SchedulingMode::Classic, true, true, 50);
+        let config = DynamicConfig::from_cli(
+            SchedulingMode::Classic,
+            true,
+            false,
+            STALL_MIN_IN_FLIGHT_PACKETS,
+            STALL_ACK_STALE_MS,
+        );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);
         assert!(!snap.quality_enabled); // no_quality=true means disabled
-        assert!(snap.exploration_enabled);
-        assert_eq!(snap.rtt_delta_ms, 50);
-    }
-
-    #[test]
-    fn test_mode_commands() {
-        let config = DynamicConfig::new();
-
-        apply_cmd(&config, "mode classic", None);
-        assert_eq!(config.mode(), SchedulingMode::Classic);
-
-        apply_cmd(&config, "mode enhanced", None);
-        assert_eq!(config.mode(), SchedulingMode::Enhanced);
-
-        apply_cmd(&config, "mode rtt-threshold", None);
-        assert_eq!(config.mode(), SchedulingMode::RttThreshold);
-    }
-
-    #[test]
-    fn test_quality_commands() {
-        let config = DynamicConfig::new();
-
-        apply_cmd(&config, "quality off", None);
-        assert!(!config.snapshot().quality_enabled);
-
-        apply_cmd(&config, "quality on", None);
-        assert!(config.snapshot().quality_enabled);
-    }
-
-    #[test]
-    fn test_exploration_commands() {
-        let config = DynamicConfig::new();
-
-        apply_cmd(&config, "explore on", None);
-        assert!(config.snapshot().exploration_enabled);
-
-        apply_cmd(&config, "explore off", None);
-        assert!(!config.snapshot().exploration_enabled);
-    }
-
-    #[test]
-    fn test_rtt_delta_commands() {
-        let config = DynamicConfig::new();
-
-        apply_cmd(&config, "rtt-delta 50", None);
-        assert_eq!(config.snapshot().rtt_delta_ms, 50);
-
-        apply_cmd(&config, "rtt-delta 100", None);
-        assert_eq!(config.snapshot().rtt_delta_ms, 100);
+        assert!(snap.stall_deselect); // on by default (no_stall_deselect=false)
     }
 
     #[test]
     fn test_effective_quality() {
-        // Classic mode - quality never effective
+        // Classic mode - quality scoring never effective
         let snap = ConfigSnapshot {
             mode: SchedulingMode::Classic,
             quality_enabled: true,
-            exploration_enabled: true,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
         assert!(!snap.effective_quality_enabled());
-        assert!(!snap.effective_exploration_enabled());
 
-        // Enhanced mode - both can be effective
+        // Enhanced mode - effective
         let snap = ConfigSnapshot {
             mode: SchedulingMode::Enhanced,
             quality_enabled: true,
-            exploration_enabled: true,
-            rtt_delta_ms: 30,
+            ..ConfigSnapshot::default()
         };
         assert!(snap.effective_quality_enabled());
-        assert!(snap.effective_exploration_enabled());
-
-        // RTT-threshold mode - quality effective, exploration not
-        let snap = ConfigSnapshot {
-            mode: SchedulingMode::RttThreshold,
-            quality_enabled: true,
-            exploration_enabled: true,
-            rtt_delta_ms: 30,
-        };
-        assert!(snap.effective_quality_enabled());
-        assert!(!snap.effective_exploration_enabled());
     }
 
     #[test]
@@ -500,7 +223,6 @@ mod tests {
             for _ in 0..100 {
                 config_clone.set_mode(SchedulingMode::Classic);
                 config_clone.set_mode(SchedulingMode::Enhanced);
-                config_clone.set_mode(SchedulingMode::RttThreshold);
             }
         });
 

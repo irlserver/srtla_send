@@ -20,6 +20,9 @@ target/
 # but don't want them in the repo
 *.c
 *.h
+# ...except the harness's own C source, which is a real tracked file that
+# the network-sim crate embeds via include_str! and compiles on demand.
+!crates/network-sim/src/adaptive_srt_send.c
 bond-bunny-main/
 moblin/
 /.claude

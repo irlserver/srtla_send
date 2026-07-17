@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use smallvec::SmallVec;
 use tracing::{info, warn};
 
 use super::sequence::SequenceTracker;
-use crate::connection::SrtlaConnection;
+use crate::connection::{SrtlaConnection, UplinkBinder};
 
 pub struct PendingConnectionChanges {
     pub new_ips: Option<SmallVec<IpAddr, 4>>,
@@ -20,6 +21,7 @@ pub async fn apply_connection_changes(
     receiver_port: u16,
     last_selected_idx: &mut Option<usize>,
     seq_tracker: &mut SequenceTracker,
+    binder: &Arc<dyn UplinkBinder>,
 ) {
     let current_labels: HashSet<String> = connections.iter().map(|c| c.label.clone()).collect();
     let desired_labels: HashSet<String> = new_ips
@@ -62,7 +64,8 @@ pub async fn apply_connection_changes(
 
     if !new_ips_needed.is_empty() {
         let mut new_connections =
-            create_connections_from_ips(&new_ips_needed, receiver_host, receiver_port).await;
+            create_connections_from_ips(&new_ips_needed, receiver_host, receiver_port, binder)
+                .await;
         let added_count = new_connections.len();
         connections.append(&mut new_connections);
 
@@ -81,10 +84,13 @@ pub async fn create_connections_from_ips(
     ips: &[IpAddr],
     receiver_host: &str,
     receiver_port: u16,
+    binder: &Arc<dyn UplinkBinder>,
 ) -> SmallVec<SrtlaConnection, 4> {
     let mut connections = SmallVec::new();
     for ip in ips {
-        match SrtlaConnection::connect_from_ip(*ip, receiver_host, receiver_port).await {
+        match SrtlaConnection::connect_from_ip(*ip, receiver_host, receiver_port, binder.clone())
+            .await
+        {
             Ok(conn) => {
                 info!("added uplink {}", conn.label);
                 connections.push(conn);

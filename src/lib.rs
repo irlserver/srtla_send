@@ -4,21 +4,30 @@
 //! aggregation) sender implementation. It includes protocol handling,
 //! connection management, and dynamic configuration.
 
-// Use mimalloc as the global allocator for tests (non-Windows only)
+// Use mimalloc as the global allocator for tests (non-Windows only). Excluded
+// under miri: the batch_recv miri CI lane interprets the test binary, and miri
+// cannot execute mimalloc's C FFI, so those runs fall back to miri's own
+// allocator instead.
 #[cfg(not(windows))]
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod config;
 pub mod connection;
+pub mod control;
+pub mod control_socket;
 pub mod ewma;
 pub mod kalman;
+pub mod metrics;
 pub mod mode;
+pub mod priority;
 pub mod protocol;
 pub mod registration;
 pub mod sender;
 pub mod stats;
+pub mod subscriptions;
+pub mod toml_config;
 pub mod utils;
 
 // Test helpers module - available when test-internals feature is enabled

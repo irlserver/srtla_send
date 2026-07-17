@@ -1,35 +1,43 @@
 //! Utility functions shared across the codebase
 
-use std::sync::LazyLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::time::Instant;
+/// Process-wide monotonic clock anchor.
+///
+/// `now_ms()` must never move backwards: every timeout, RTT sample, and
+/// congestion-window deadline in this codebase is a difference between two
+/// `now_ms()` reads (see the keepalive-echo RTT path in `connection::rtt`,
+/// where `rtt = now_ms() - echoed_stamp` and *both* stamps are ours). A wall
+/// clock (`SystemTime`) can step backwards on an NTP correction, which would
+/// clamp an RTT to zero or falsely reset a link's timeout. `Instant` is
+/// monotonic, so we anchor to it once and report `base_ms + elapsed`.
+///
+/// `base_ms` is captured from the wall clock at first read purely so the value
+/// keeps an epoch-scale magnitude. Nothing depends on the absolute base (no
+/// `now_ms()` value is interpreted by a peer or persisted), only on differences.
+struct Clock {
+    anchor: Instant,
+    base_ms: u64,
+}
 
-/// Static startup instant for stable epoch-based timing calculations
-/// This is initialized once at program startup and used for periodic operations
-/// that need to be based on a stable reference point.
-pub static STARTUP_INSTANT: LazyLock<Instant> = LazyLock::new(Instant::now);
+fn clock() -> &'static Clock {
+    static CLOCK: OnceLock<Clock> = OnceLock::new();
+    CLOCK.get_or_init(|| Clock {
+        anchor: Instant::now(),
+        base_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    })
+}
 
-/// Get current time in milliseconds since Unix epoch
-/// Returns 0 if system time is before Unix epoch (fallback behavior)
+/// Monotonic time in milliseconds, anchored to an epoch-scale base.
+///
+/// Guaranteed non-decreasing within a process. Not a true wall clock: use it
+/// only for measuring elapsed time between two reads, never as a timestamp to
+/// compare against another machine's clock.
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| std::time::Duration::from_millis(0))
-        .as_millis() as u64
-}
-
-/// Get elapsed milliseconds since program startup
-/// Uses the stable STARTUP_INSTANT for consistent periodic timing
-pub fn elapsed_ms() -> u64 {
-    STARTUP_INSTANT.elapsed().as_millis() as u64
-}
-
-/// Get elapsed milliseconds since program startup for a given Instant
-/// Uses the stable STARTUP_INSTANT for consistent periodic timing
-pub fn instant_to_elapsed_ms(instant: Instant) -> u64 {
-    STARTUP_INSTANT
-        .elapsed()
-        .saturating_sub(instant.elapsed())
-        .as_millis() as u64
+    let c = clock();
+    c.base_ms + c.anchor.elapsed().as_millis() as u64
 }
