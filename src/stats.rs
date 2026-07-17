@@ -22,14 +22,14 @@ use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
-
-use crate::config::ConfigSnapshot;
 use srtla_core::connection::SrtlaConnection;
 use srtla_core::selection::calculate_quality_multiplier;
 use srtla_core::selection::classifier::{ClassificationResult, WeakReason};
 use srtla_core::selection::enhanced::in_flight_cap_packets;
 use srtla_core::selection::link_cc::{CcState, LinkCcSnapshot};
 use srtla_core::utils::now_ms;
+
+use crate::config::ConfigSnapshot;
 
 /// Per-link statistics.
 ///
@@ -141,6 +141,19 @@ pub struct LinkStats {
     /// bitrate in housekeeping; dashboards can use it to explain why
     /// one link is batching more aggressively than another.
     pub batch_regime: String,
+
+    // --- Stalled-link deselect (`stall_deselect`, default on) ---
+    //
+    // Mirrors librist's `rtt_muted` / `rtt_mute_events`: the live flag says
+    // whether this link is pulled out of rotation right now, the counter says
+    // how often it has happened over the link's life — the pair is what lets a
+    // field run distinguish one clean failover from a flapping link.
+    /// Whether this link is currently stall-gated (out of the payload
+    /// rotation; carries keepalives plus a 1-in-N duplicate-packet probe
+    /// trickle until its rejoin dwell completes).
+    pub stall_gated: bool,
+    /// Cumulative stall-latch engagements since the link was created.
+    pub stall_gate_events: u64,
 
     // --- In-flight cap soft admission gate ---
     //
@@ -338,6 +351,8 @@ impl SharedStats {
                 cc_loss_ewma,
                 cc_loss_degraded,
                 batch_regime: conn.batch_sender.regime().as_str().to_string(),
+                stall_gated: conn.is_stall_gated(),
+                stall_gate_events: conn.stall_gate_events(),
                 in_flight_cap_packets: in_flight_cap_pkts,
                 in_flight_cap_active,
             };
@@ -387,8 +402,9 @@ fn cc_state_str(state: CcState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use srtla_core::mode::SchedulingMode;
+
+    use super::*;
 
     #[test]
     fn test_shared_stats_new() {
