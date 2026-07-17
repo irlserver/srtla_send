@@ -24,12 +24,12 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use srtla_core::mode::SchedulingMode;
+use srtla_core::priority::CriticalWindow;
 #[cfg(unix)]
 use tokio::sync::mpsc;
 
 use crate::config::DynamicConfig;
-use srtla_core::mode::SchedulingMode;
-use srtla_core::priority::CriticalWindow;
 use crate::stats::SharedStats;
 #[cfg(unix)]
 use crate::subscriptions::SubscriptionHub;

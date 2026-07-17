@@ -1,9 +1,9 @@
+use srtla_core::connection::SrtlaConnection;
+use srtla_core::utils::now_ms;
+use srtla_protocol::PKT_LOG_SIZE;
 use tracing::{info, warn};
 
 use crate::config::DynamicConfig;
-use srtla_core::connection::SrtlaConnection;
-use srtla_protocol::PKT_LOG_SIZE;
-use srtla_core::utils::now_ms;
 
 /// Comprehensive status monitoring for connections
 ///

@@ -5,7 +5,6 @@
 #![allow(clippy::assertions_on_constants, clippy::needless_range_loop)]
 
 use smallvec::SmallVec;
-
 use srtla_protocol::*;
 
 #[tokio::test]

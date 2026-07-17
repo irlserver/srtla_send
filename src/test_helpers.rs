@@ -7,17 +7,16 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use socket2::{Domain, Protocol, Socket, Type};
-
 use srtla_core::connection::SrtlaConnection;
-use crate::net::{BatchUdpSocket, SourceIpBinder};
-use crate::sender::{ConnIo, ConnIoMap};
-
 // The socket-free connection builders (create_test_connection[s]) and the tokio
 // clock seam (advance_test_clock) live in srtla-core's test-internals surface,
 // re-exported here so `crate::test_helpers::*` keeps resolving for shell tests.
 pub use srtla_core::test_helpers::{
     advance_test_clock, create_test_connection, create_test_connections,
 };
+
+use crate::net::{BatchUdpSocket, SourceIpBinder};
+use crate::sender::{ConnIo, ConnIoMap};
 
 /// Build the I/O half for a test connection: a real localhost UDP socket
 /// wrapped in a `BatchUdpSocket`. Used by tests that drive reader/reconnect I/O.

@@ -6,14 +6,14 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use smallvec::SmallVec;
+    use srtla_core::mode::SchedulingMode;
+    use srtla_core::selection::{calculate_quality_multiplier, select_connection_idx};
+    use srtla_core::utils::now_ms;
     use tempfile::NamedTempFile;
 
     use crate::config::{ConfigSnapshot, DynamicConfig};
     use crate::sender::*;
     use crate::test_helpers::{create_test_conn_io_map, create_test_connections};
-    use srtla_core::mode::SchedulingMode;
-    use srtla_core::selection::{calculate_quality_multiplier, select_connection_idx};
-    use srtla_core::utils::now_ms;
 
     #[test]
     fn test_select_connection_idx_classic() {

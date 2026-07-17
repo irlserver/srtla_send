@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 
+use srtla_protocol::extract_keepalive_timestamp;
 use tracing::debug;
 
 use crate::ewma::Ewma;
 use crate::kalman::{KalmanConfig, KalmanFilter};
-use srtla_protocol::extract_keepalive_timestamp;
 
 /// Number of samples in the fast sliding window (~3s at 300ms keepalive interval).
 const FAST_WINDOW_SAMPLES: usize = 10;

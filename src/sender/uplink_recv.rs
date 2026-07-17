@@ -2,12 +2,11 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use smallvec::SmallVec;
+use srtla_core::connection::{SrtlaConnection, SrtlaIncoming};
+use srtla_core::registration::{RegistrationEvent, SrtlaRegistrationManager};
+use srtla_protocol::*;
 use tokio::net::UdpSocket;
 use tracing::debug;
-
-use srtla_core::connection::{SrtlaConnection, SrtlaIncoming};
-use srtla_protocol::*;
-use srtla_core::registration::{RegistrationEvent, SrtlaRegistrationManager};
 
 /// Process one received uplink datagram.
 ///

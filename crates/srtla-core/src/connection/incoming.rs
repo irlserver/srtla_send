@@ -1,5 +1,4 @@
 use smallvec::SmallVec;
-
 use srtla_protocol::SRTLA_TYPE_REG1_LEN;
 
 #[derive(Default)]

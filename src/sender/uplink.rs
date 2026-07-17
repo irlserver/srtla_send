@@ -3,12 +3,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
+use srtla_core::connection::SrtlaConnection;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::warn;
 
-use srtla_core::connection::SrtlaConnection;
 use crate::net::{BatchUdpSocket, RecvMmsgBuffer, UplinkBinder};
 
 pub type ConnectionId = u64;

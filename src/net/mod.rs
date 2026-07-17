@@ -16,7 +16,6 @@ pub use batch_recv::{BatchUdpSocket, RecvMmsgBuffer};
 #[allow(unused_imports)]
 pub use socket::CallbackBinder;
 pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};
-
 use srtla_core::connection::BATCH_SEND_SIZE;
 
 /// Send every datagram to the connected peer, chunking into `sendmmsg` syscalls.

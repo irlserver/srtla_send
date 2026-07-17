@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests {
 
-
     use srtla_core::connection::STARTUP_GRACE_MS;
-    use srtla_protocol::*;
     use srtla_core::registration::*;
-    use crate::test_helpers::create_test_connection;
     use srtla_core::utils::now_ms;
+    use srtla_protocol::*;
+
+    use crate::test_helpers::create_test_connection;
 
     #[test]
     fn test_registration_manager_creation() {
@@ -511,7 +511,8 @@ mod tests {
         let reg3 = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
         for idx in 0..connections.len() {
             assert!(
-                reg.process_registration_packet(idx, &reg3, now_ms()).is_some(),
+                reg.process_registration_packet(idx, &reg3, now_ms())
+                    .is_some(),
                 "REG3 on conn {idx} handled"
             );
         }

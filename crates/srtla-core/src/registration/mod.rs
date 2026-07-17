@@ -3,10 +3,10 @@ mod probing;
 use probing::{ProbeResult, ProbingState, default_probing_state, new_probe_id, new_probe_results};
 use rand::RngCore;
 use smallvec::SmallVec;
+use srtla_protocol::*;
 use tracing::{debug, info, warn};
 
 use crate::connection::SrtlaConnection;
-use srtla_protocol::*;
 
 #[derive(Debug)]
 pub enum RegistrationEvent {

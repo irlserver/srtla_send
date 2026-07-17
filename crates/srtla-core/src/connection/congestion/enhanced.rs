@@ -7,9 +7,8 @@
 
 use std::cmp::min;
 
-use tracing::debug;
-
 use srtla_protocol::*;
+use tracing::debug;
 
 const NORMAL_MIN_WAIT_MS: u64 = 2000;
 const FAST_MIN_WAIT_MS: u64 = 500;

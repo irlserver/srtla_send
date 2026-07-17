@@ -254,9 +254,8 @@ async fn test_error_resilience() {
 async fn test_concurrent_packet_processing() {
     use std::sync::Arc;
 
-    use tokio::sync::Mutex;
-
     use srtla_protocol::*;
+    use tokio::sync::Mutex;
 
     let results = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();

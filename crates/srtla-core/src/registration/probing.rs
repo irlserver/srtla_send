@@ -1,9 +1,9 @@
 use smallvec::SmallVec;
+use srtla_protocol::{SRTLA_ID_LEN, SRTLA_TYPE_REG2_LEN};
 use tracing::{info, warn};
 
 use super::SrtlaRegistrationManager;
 use crate::connection::SrtlaConnection;
-use srtla_protocol::{SRTLA_ID_LEN, SRTLA_TYPE_REG2_LEN};
 use crate::utils::now_ms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

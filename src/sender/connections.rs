@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use smallvec::SmallVec;
+use srtla_core::connection::SrtlaConnection;
+use srtla_core::utils::now_ms;
 use tracing::{info, warn};
 
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIo, ConnIoMap};
-use srtla_core::connection::SrtlaConnection;
 use crate::net::{BatchUdpSocket, UplinkBinder, create_uplink_socket, resolve_remote};
-use srtla_core::utils::now_ms;
 
 pub struct PendingConnectionChanges {
     pub new_ips: Option<SmallVec<IpAddr, 4>>,
@@ -151,11 +151,7 @@ async fn connect_uplink(
 /// reset the connection's protocol state. The pure state reset lives on
 /// [`SrtlaConnection::reset_for_reconnect`]; only the socket work is here. The
 /// caller must respawn the reader from the new `io.socket`.
-pub async fn reconnect_uplink(
-    conn: &mut SrtlaConnection,
-    io: &mut ConnIo,
-    now: u64,
-) -> Result<()> {
+pub async fn reconnect_uplink(conn: &mut SrtlaConnection, io: &mut ConnIo, now: u64) -> Result<()> {
     let sock = create_uplink_socket(conn.local_ip)?;
     io.binder.bind(&sock, conn.local_ip)?;
     sock.connect(&io.remote.into())?;

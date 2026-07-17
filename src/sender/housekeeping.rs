@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
+use srtla_core::connection::{STARTUP_GRACE_MS, SrtlaConnection};
+use srtla_core::registration::SrtlaRegistrationManager;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
 use super::connections::reconnect_uplink;
 use super::uplink::{ConnIoMap, ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
-use srtla_core::connection::{STARTUP_GRACE_MS, SrtlaConnection};
-use srtla_core::registration::SrtlaRegistrationManager;
 
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 
@@ -141,9 +141,7 @@ pub async fn handle_housekeeping(
         let reader_dead = reader_handles
             .get(&conn.conn_id)
             .is_some_and(|reader| reader.handle.is_finished());
-        if reader_dead
-            && let Some(io) = conn_io.get(&conn.conn_id)
-        {
+        if reader_dead && let Some(io) = conn_io.get(&conn.conn_id) {
             warn!("{}: uplink reader task ended; restarting", conn.label);
             restart_reader_for(conn, io.socket.clone(), reader_handles, packet_tx);
         }
@@ -177,7 +175,10 @@ pub async fn handle_housekeeping(
 
     // Check for connection failures and output appropriate error messages
     // This matches the C implementation's connection_housekeeping logic
-    let active_connections = connections.iter().filter(|c| !c.is_timed_out(current_ms)).count();
+    let active_connections = connections
+        .iter()
+        .filter(|c| !c.is_timed_out(current_ms))
+        .count();
 
     if active_connections == 0 {
         if all_failed_at.is_none() {
@@ -216,12 +217,13 @@ pub async fn handle_housekeeping(
 
 #[cfg(test)]
 mod tests {
+    use srtla_core::utils::now_ms;
+
     use super::*;
     use crate::sender::uplink::{create_uplink_channel, sync_readers};
     use crate::test_helpers::{
         create_test_conn_io_map, create_test_connection, create_test_connections,
     };
-    use srtla_core::utils::now_ms;
 
     #[tokio::test]
     async fn dead_reader_is_restarted_for_active_connection() {

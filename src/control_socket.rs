@@ -14,6 +14,7 @@
 #[cfg(unix)]
 use std::path::PathBuf;
 
+use srtla_core::priority::CriticalWindow;
 #[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
@@ -26,7 +27,6 @@ use tracing::{debug, info, warn};
 use crate::config::DynamicConfig;
 #[cfg(unix)]
 use crate::control::{SubscriptionContext, dispatch_async};
-use srtla_core::priority::CriticalWindow;
 use crate::stats::SharedStats;
 use crate::subscriptions::SubscriptionHub;
 

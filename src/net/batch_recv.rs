@@ -428,10 +428,11 @@ mod unix_impl {
         use std::io::{Error, ErrorKind};
         use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
+        use srtla_protocol::MTU;
+
         use super::{
             RecvAction, RecvMmsgBuffer, recv_retry_action, sockaddr_storage_to_socket_addr,
         };
-        use srtla_protocol::MTU;
 
         // Exercises the unsafe sockaddr_storage → SocketAddr pointer casts with
         // real AF_INET/AF_INET6 payloads (the iterator test only ever feeds

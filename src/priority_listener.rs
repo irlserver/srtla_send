@@ -7,10 +7,9 @@
 
 use std::net::SocketAddr;
 
+use srtla_core::priority::{CriticalWindow, DATAGRAM_LEN, PROTO_MAGIC};
 use tokio::net::UdpSocket;
 use tracing::{info, trace, warn};
-
-use srtla_core::priority::{CriticalWindow, DATAGRAM_LEN, PROTO_MAGIC};
 
 /// Spawn a listener task that consumes priority datagrams from `bind_addr`
 /// and pushes the derived deadlines into `state`. If `hub` is provided,
