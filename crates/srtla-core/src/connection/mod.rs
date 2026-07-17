@@ -16,9 +16,8 @@ pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use tracing::debug;
-
 use srtla_protocol::*;
+use tracing::debug;
 
 pub const STARTUP_GRACE_MS: u64 = 5_000;
 
@@ -162,7 +161,7 @@ pub struct SrtlaConnection {
     /// guard; never a liveness/timeout signal.
     pub last_ack_or_rtt_sample_ms: u64,
     /// Transient per-select flag: set by `select_connection_idx` when
-    /// `stall_deselect` is on and this link is a stalled black hole while a
+    /// `stall_deselect` is on and this link's stall latch is engaged while a
     /// healthier link exists. Recomputed every select call and read only by the
     /// mode selectors in that same call; it is a selection penalty ONLY and
     /// never affects `is_timed_out`/re-registration.
@@ -172,6 +171,25 @@ pub struct SrtlaConnection {
     pub stall_gated: bool,
     #[cfg(not(any(test, feature = "test-internals")))]
     pub(crate) stall_gated: bool,
+    /// `now_ms()` when the stall latch engaged; `0` = not latched. The latch
+    /// outlives the raw [`Self::is_stalled`] signal on purpose: once a link
+    /// stalls, cumulative SRT ACKs (delivered via the healthy links) drain its
+    /// backlog below the in-flight threshold, which clears `is_stalled` without
+    /// the link having proven anything — un-gating on that alone re-feeds the
+    /// black hole and flaps. Rejoin instead requires sustained delivery proof
+    /// (see [`Self::update_stall_latch`]).
+    pub(crate) stall_latched_since_ms: u64,
+    /// Start of the current uninterrupted run of fresh delivery proof on a
+    /// latched link; `0` = no run in progress. The latch clears once this run
+    /// spans the rejoin dwell.
+    pub(crate) stall_recovery_since_ms: u64,
+    /// Cumulative count of stall-latch engagements. Monotonic over the
+    /// connection's life (survives soft resets); exported in stats so field
+    /// runs can tell a link that gated once from one that flaps.
+    pub(crate) stall_gate_events: u64,
+    /// Rolling counter driving the 1-in-N duplicate-probe cadence while gated
+    /// (see [`crate::config_snapshot::STALL_PROBE_ONE_IN_N`]).
+    pub(crate) stall_probe_counter: u32,
     // Sub-structs for organized state management
     pub rtt: RttTracker,
     #[cfg(feature = "test-internals")]
@@ -244,6 +262,10 @@ impl SrtlaConnection {
             last_keepalive_sent: None,
             last_ack_or_rtt_sample_ms: 0,
             stall_gated: false,
+            stall_latched_since_ms: 0,
+            stall_recovery_since_ms: 0,
+            stall_gate_events: 0,
+            stall_probe_counter: 0,
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
             bitrate: BitrateTracker::new(now),
@@ -524,10 +546,30 @@ impl SrtlaConnection {
         self.phase.weight()
     }
 
+    /// Effective delivery-proof staleness window in ms: RTT-adaptive between
+    /// [`crate::config_snapshot::STALL_STALE_FLOOR_MS`] and the configured
+    /// ceiling. Proof on a loaded link arrives every RTT (earned SRTLA ACKs),
+    /// so the window scales with the path instead of always waiting a fixed
+    /// 3 s — on a 50 ms link that fixed wait was ~3 s of payload committed to
+    /// a black hole. No RTT baseline yet falls back to the ceiling; a ceiling
+    /// configured below the floor wins (operator override).
+    #[inline]
+    pub fn effective_stall_stale_ms(&self, ceiling_ms: u64) -> u64 {
+        use crate::config_snapshot::{STALL_STALE_FLOOR_MS, STALL_STALE_RTT_MULT};
+        let srtt = self.get_smooth_rtt_ms();
+        if srtt <= 0.0 {
+            return ceiling_ms;
+        }
+        ((srtt as u64).saturating_mul(STALL_STALE_RTT_MULT))
+            .max(STALL_STALE_FLOOR_MS)
+            .min(ceiling_ms)
+    }
+
     /// `stall_deselect` signal (pure read; never mutates). True for a connected
     /// link whose in-flight backlog is at or above `min_in_flight` AND whose
     /// last delivery proof (earned-ACK or keepalive-RTT sample) is older than
-    /// `stale_ms`. `now_ms` is the selection clock.
+    /// the effective staleness window ([`Self::effective_stall_stale_ms`] of
+    /// `stale_ceiling_ms`). `now_ms` is the selection clock.
     ///
     /// A link that has produced no proof yet (`last_ack_or_rtt_sample_ms == 0`)
     /// is never stalled: a fresh burst before its first ACK must not be
@@ -535,11 +577,94 @@ impl SrtlaConnection {
     /// `is_timed_out`/`CONN_TIMEOUT`, not here. This is a selection penalty
     /// input ONLY — it never affects `is_timed_out`/re-registration/CONN_TIMEOUT.
     #[inline]
-    pub fn is_stalled(&self, now_ms: u64, min_in_flight: i32, stale_ms: u64) -> bool {
+    pub fn is_stalled(&self, now_ms: u64, min_in_flight: i32, stale_ceiling_ms: u64) -> bool {
         self.connected
             && self.in_flight_packets >= min_in_flight
             && self.last_ack_or_rtt_sample_ms != 0
-            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) >= stale_ms
+            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms)
+                >= self.effective_stall_stale_ms(stale_ceiling_ms)
+    }
+
+    /// Drive the asymmetric stall latch: quick to drop, conservative to
+    /// rejoin. Called by `apply_stall_gate` on every selection pass.
+    ///
+    /// Engaging is immediate once [`Self::is_stalled`] fires. Rejoining
+    /// requires an *uninterrupted* run of fresh delivery proof spanning
+    /// [`crate::config_snapshot::STALL_REJOIN_DWELL_MULT`] x the effective
+    /// staleness window: a single keepalive echo (or the backlog draining via
+    /// cumulative ACKs carried by the healthy links) is not evidence the path
+    /// can deliver again, and un-gating on it flaps payload back onto a
+    /// still-marginal link. Proof going stale mid-run resets the run.
+    pub fn update_stall_latch(&mut self, now_ms: u64, min_in_flight: i32, stale_ceiling_ms: u64) {
+        if self.is_stalled(now_ms, min_in_flight, stale_ceiling_ms) {
+            if self.stall_latched_since_ms == 0 {
+                debug!("{}: stall latch engaged", self.label);
+                self.stall_latched_since_ms = now_ms;
+                self.stall_gate_events += 1;
+            }
+            self.stall_recovery_since_ms = 0;
+            return;
+        }
+        if self.stall_latched_since_ms == 0 {
+            return;
+        }
+
+        let stale_ms = self.effective_stall_stale_ms(stale_ceiling_ms);
+        let proof_fresh = self.last_ack_or_rtt_sample_ms != 0
+            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) < stale_ms;
+        if !proof_fresh {
+            self.stall_recovery_since_ms = 0;
+            return;
+        }
+        if self.stall_recovery_since_ms == 0 {
+            self.stall_recovery_since_ms = now_ms;
+        }
+        let dwell_ms = stale_ms.saturating_mul(crate::config_snapshot::STALL_REJOIN_DWELL_MULT);
+        if now_ms.saturating_sub(self.stall_recovery_since_ms) >= dwell_ms {
+            debug!("{}: stall latch released after sustained proof", self.label);
+            self.stall_latched_since_ms = 0;
+            self.stall_recovery_since_ms = 0;
+        }
+    }
+
+    /// Whether the stall latch is currently engaged (independent of whether a
+    /// healthy alternative exists to make it an active routing gate).
+    #[inline(always)]
+    pub fn stall_latched(&self) -> bool {
+        self.stall_latched_since_ms != 0
+    }
+
+    /// Clear the stall latch without touching the event counter. Used when the
+    /// guard is disabled at runtime so selection returns to baseline instantly.
+    pub(crate) fn clear_stall_latch(&mut self) {
+        self.stall_latched_since_ms = 0;
+        self.stall_recovery_since_ms = 0;
+    }
+
+    /// Whether this link is currently stall-gated (routing view; stats export).
+    #[inline(always)]
+    pub fn is_stall_gated(&self) -> bool {
+        self.stall_gated
+    }
+
+    /// Cumulative stall-latch engagements over this connection's life.
+    #[inline(always)]
+    pub fn stall_gate_events(&self) -> u64 {
+        self.stall_gate_events
+    }
+
+    /// Duplicate-probe cadence on a gated link: true once per
+    /// [`crate::config_snapshot::STALL_PROBE_ONE_IN_N`] calls. The caller
+    /// invokes this once per routed data packet for each gated link, mirroring
+    /// librist's per-leg trickle counter.
+    #[inline]
+    pub fn stall_probe_due(&mut self) -> bool {
+        self.stall_probe_counter += 1;
+        if self.stall_probe_counter >= crate::config_snapshot::STALL_PROBE_ONE_IN_N {
+            self.stall_probe_counter = 0;
+            return true;
+        }
+        false
     }
 
     /// Whether this link has gone silent past `CONN_TIMEOUT`.
@@ -619,8 +744,14 @@ impl SrtlaConnection {
         self.phase = LinkPhase::Registering;
         // A reset link has no delivery proof; clear the stall signal so it is
         // not classed as stalled the instant it reconnects with a backlog.
+        // The `stall_gate_events` counter deliberately survives: it counts
+        // engagements over the link's life, and a reset is often the *result*
+        // of the stall it just latched on.
         self.last_ack_or_rtt_sample_ms = 0;
         self.stall_gated = false;
+        self.stall_latched_since_ms = 0;
+        self.stall_recovery_since_ms = 0;
+        self.stall_probe_counter = 0;
     }
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1.

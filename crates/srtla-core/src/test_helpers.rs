@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use srtla_protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
 use tokio::time::Duration;
 
 use crate::connection::{
     BatchSender, BitrateTracker, CachedQuality, CongestionControl, LinkPhase, ReconnectionState,
     RttTracker, SrtlaConnection,
 };
-use srtla_protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
 use crate::utils::now_ms;
 
 /// Shared test connection ID counter for all helper functions
@@ -39,6 +39,10 @@ fn build_connection(local_ip: IpAddr, label: String) -> SrtlaConnection {
         last_keepalive_sent: None,
         last_ack_or_rtt_sample_ms: 0,
         stall_gated: false,
+        stall_latched_since_ms: 0,
+        stall_recovery_since_ms: 0,
+        stall_gate_events: 0,
+        stall_probe_counter: 0,
         rtt: RttTracker::default(),
         congestion: CongestionControl::default(),
         bitrate: BitrateTracker::new(now_ms()),

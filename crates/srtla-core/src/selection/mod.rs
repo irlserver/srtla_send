@@ -45,14 +45,16 @@ pub fn select_connection_idx(
     current_time_ms: u64,
     config: &ConfigSnapshot,
 ) -> Option<usize> {
-    // Stalled-link deselect (default on). A link is gated only when it is a
-    // stalled black hole AND at least one healthier link can carry the traffic,
+    // Stalled-link deselect (default on). A link is gated only when its stall
+    // latch is engaged AND at least one healthier link can carry the traffic,
     // so the last usable link is never gated — the mode selectors then skip
     // `stall_gated` links exactly as they skip timed-out ones. Gating is a pure
-    // selection penalty: a gated link keeps sending keepalives, and its next
-    // keepalive-RTT sample clears the stall on its own (no blind reprobe).
-    // Recomputed for every link on every call so the transient flag can never go
-    // stale; collapses to clearing the flag when the guard is off.
+    // selection penalty: a gated link keeps sending keepalives plus a 1-in-N
+    // duplicate-packet trickle (shell-side, see `handle_srt_packet`), and the
+    // latch releases after a sustained run of fresh delivery proof (asymmetric
+    // hysteresis — no blind reprobe, no single-sample flap). Recomputed for
+    // every link on every call so the flag can never go stale; collapses to
+    // clearing flag and latch when the guard is off.
     apply_stall_gate(conns, current_time_ms, config);
 
     match config.mode {
@@ -72,31 +74,39 @@ pub fn select_connection_idx(
     }
 }
 
-/// Recompute the transient `stall_gated` flag on every link.
+/// Drive every link's stall latch and recompute its `stall_gated` flag.
 ///
-/// A link is gated when the guard is on, the link is stalled
-/// ([`SrtlaConnection::is_stalled`]), and at least one non-stalled schedulable
-/// link exists to carry the traffic. That "any healthy" guard guarantees we
-/// never gate the last usable link, so the mode selectors can treat a gated
-/// link as unschedulable without a fallback pass. When the guard is off (or no
-/// link is stalled) every flag is cleared, restoring byte-for-byte baseline
-/// selection.
+/// A link is gated when the guard is on, the link's latch is engaged
+/// ([`SrtlaConnection::update_stall_latch`] — engages the instant
+/// [`SrtlaConnection::is_stalled`] fires, releases only after a sustained run
+/// of fresh delivery proof), and at least one un-latched schedulable link
+/// exists to carry the traffic. That "any healthy" guard guarantees we never
+/// gate the last usable link, so the mode selectors can treat a gated link as
+/// unschedulable without a fallback pass. When the guard is off, flag and
+/// latch are both cleared, restoring byte-for-byte baseline selection.
 #[inline]
 fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config: &ConfigSnapshot) {
-    let min_in_flight = config.stall_min_in_flight;
-    let stale_ms = config.stall_ack_stale_ms;
+    if !config.stall_deselect {
+        for c in conns.iter_mut() {
+            c.stall_gated = false;
+            c.clear_stall_latch();
+        }
+        return;
+    }
 
-    let any_healthy = config.stall_deselect
-        && conns.iter().any(|c| {
-            !c.is_timed_out(current_time_ms)
-                && c.is_schedulable()
-                && !c.is_stalled(current_time_ms, min_in_flight, stale_ms)
-        });
+    let min_in_flight = config.stall_min_in_flight;
+    let stale_ceiling_ms = config.stall_ack_stale_ms;
 
     for c in conns.iter_mut() {
-        // Short-circuit keeps `is_stalled` off the hot path when the guard is
-        // off or nothing healthy exists to fail over to.
-        c.stall_gated = any_healthy && c.is_stalled(current_time_ms, min_in_flight, stale_ms);
+        c.update_stall_latch(current_time_ms, min_in_flight, stale_ceiling_ms);
+    }
+
+    let any_healthy = conns
+        .iter()
+        .any(|c| !c.is_timed_out(current_time_ms) && c.is_schedulable() && !c.stall_latched());
+
+    for c in conns.iter_mut() {
+        c.stall_gated = any_healthy && c.stall_latched();
     }
 }
 
