@@ -12,7 +12,6 @@
 // drain and this socket layer agree without core depending on `net`.
 #[cfg(target_os = "linux")]
 use srtla_core::connection::BATCH_SEND_SIZE;
-
 use srtla_protocol::MTU;
 
 /// Number of packets to receive in a single `recvmmsg` call.
