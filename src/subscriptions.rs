@@ -138,7 +138,10 @@ impl SubscriptionHub {
     }
 }
 
-#[cfg(test)]
+// Every test here drives `subscribe`/`unsubscribe`, which are unix-gated with
+// the control socket that owns them, so the module is too — `cargo test` must
+// keep compiling on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

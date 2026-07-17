@@ -99,9 +99,15 @@ pub fn analyze_ip_reload(path: &str) -> IpReload {
 
 #[cfg(test)]
 mod tests {
+    // Only the two file-reading tests exercise the SIGHUP-only
+    // `analyze_ip_reload`; they and their imports are unix-gated like it,
+    // so `cargo test` still compiles on Windows.
+    #[cfg(unix)]
     use std::io::Write;
+    #[cfg(unix)]
     use std::net::Ipv4Addr;
 
+    #[cfg(unix)]
     use tempfile::NamedTempFile;
 
     use super::*;
@@ -190,6 +196,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_file_refuses_as_not_found() {
         assert_eq!(
@@ -198,6 +205,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn reads_and_parses_a_real_file() {
         let mut f = NamedTempFile::new().unwrap();
