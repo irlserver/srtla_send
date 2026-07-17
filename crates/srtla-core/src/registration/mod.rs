@@ -3,11 +3,10 @@ mod probing;
 use probing::{ProbeResult, ProbingState, default_probing_state, new_probe_id, new_probe_results};
 use rand::RngCore;
 use smallvec::SmallVec;
+use srtla_protocol::*;
 use tracing::{debug, info, warn};
 
 use crate::connection::SrtlaConnection;
-use crate::protocol::*;
-use crate::utils::now_ms;
 
 #[derive(Debug)]
 pub enum RegistrationEvent {
@@ -15,6 +14,18 @@ pub enum RegistrationEvent {
     Reg2,
     Reg3,
     RegErr,
+}
+
+/// Packets the registration driver decided to send this tick, for the shell to
+/// transmit. Keeps the manager sans-IO: `reg_driver_pending_sends` mutates the
+/// handshake state machine and returns *what* to send; the caller owns the
+/// sockets and does the sending.
+#[derive(Default)]
+pub struct RegDriverSends {
+    /// REG1 to a single target uplink: `(conn_idx, packet)`.
+    pub reg1: Option<(usize, [u8; SRTLA_TYPE_REG1_LEN])>,
+    /// REG2 to broadcast to every uplink.
+    pub broadcast_reg2: Option<[u8; SRTLA_TYPE_REG2_LEN]>,
 }
 
 pub struct SrtlaRegistrationManager {
@@ -56,29 +67,29 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    pub async fn send_reg1_to(&mut self, conn_idx: usize, conn: &mut SrtlaConnection) {
+    /// Build a REG1 packet for `conn_idx` and advance into the "awaiting REG2"
+    /// state. Pure: the caller transmits the returned bytes on the uplink and
+    /// stamps [`SrtlaConnection::note_sent`].
+    pub fn build_reg1_for(&mut self, conn_idx: usize, now: u64) -> [u8; SRTLA_TYPE_REG1_LEN] {
         let pkt = create_reg1_packet(&self.srtla_id);
         debug!("queueing REG1 for uplink #{}", conn_idx);
         info!("REG1 → uplink #{} ({} bytes)", conn_idx, pkt.len());
-        if let Err(e) = conn.send_srtla_packet(&pkt).await {
-            warn!("Failed to send REG1 to uplink #{}: {:?}", conn_idx, e);
-        }
 
-        let now = now_ms();
         self.pending_reg2_idx = Some(conn_idx);
         self.reg1_target_idx = Some(conn_idx);
         self.pending_timeout_at_ms = now + REG2_TIMEOUT * 1000;
         // Allow the driver to retry at a 1s cadence while waiting on REG2
         self.reg1_next_send_at_ms = now + 1000;
+        pkt
     }
 
-    pub async fn send_reg2_to(&mut self, conn_idx: usize, conn: &mut SrtlaConnection) {
+    /// Build a REG2 packet from the current SRTLA id. Pure and stateless; the
+    /// caller transmits it on the uplink.
+    pub fn build_reg2(&self, conn_idx: usize) -> [u8; SRTLA_TYPE_REG2_LEN] {
         let pkt = create_reg2_packet(&self.srtla_id);
         debug!("queueing REG2 for uplink #{}", conn_idx);
         info!("REG2 → uplink #{} ({} bytes)", conn_idx, pkt.len());
-        if let Err(e) = conn.send_srtla_packet(&pkt).await {
-            warn!("Failed to send REG2 to uplink #{}: {:?}", conn_idx, e);
-        }
+        pkt
     }
 
     pub fn process_registration_packet(
@@ -112,22 +123,29 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    pub async fn reg_driver_send_if_needed(&mut self, connections: &mut [SrtlaConnection]) {
+    /// Decide the registration driver's sends for this tick and advance the
+    /// handshake state machine. Pure: returns the packets; the caller (which
+    /// owns the sockets) transmits REG1 to `reg1.0` and broadcasts REG2 to
+    /// every uplink. `connection_count` is used only for logging.
+    pub fn reg_driver_pending_sends(
+        &mut self,
+        connection_count: usize,
+        now: u64,
+    ) -> RegDriverSends {
+        let mut sends = RegDriverSends::default();
+
         // If nothing connected yet, send REG1. Prefer target from REG_NGP; otherwise,
         // pick the first uplink.
         if self.active_connections == 0 {
             if let Some(idx) = self.reg1_target_idx {
-                let now = now_ms();
                 if self.pending_reg2_idx.is_none() && now >= self.reg1_next_send_at_ms {
                     let pkt = create_reg1_packet(&self.srtla_id);
                     info!("REG1 → uplink #{} ({} bytes)", idx, pkt.len());
-                    if let Err(e) = connections[idx].send_srtla_packet(&pkt).await {
-                        warn!("Failed to send REG1 to uplink #{}: {:?}", idx, e);
-                    }
                     self.pending_reg2_idx = Some(idx);
                     self.pending_timeout_at_ms = now + REG2_TIMEOUT * 1000;
                     // throttle retries until next REG_NGP/timeout
                     self.reg1_next_send_at_ms = now + REG2_TIMEOUT * 1000;
+                    sends.reg1 = Some((idx, pkt));
                 } else if self.pending_reg2_idx.is_some() {
                     debug!(
                         "REG1 pending for uplink #{} (timeout at {}), skipping send",
@@ -144,15 +162,14 @@ impl SrtlaRegistrationManager {
             let pkt = create_reg2_packet(&self.srtla_id);
             info!(
                 "broadcast REG2 to {} uplinks ({} bytes)",
-                connections.len(),
+                connection_count,
                 pkt.len()
             );
-            for (i, c) in connections.iter_mut().enumerate() {
-                let _ = c.send_srtla_packet(&pkt).await;
-                debug!("REG2 → uplink #{} sent", i);
-            }
+            sends.broadcast_reg2 = Some(pkt);
             self.broadcast_reg2_pending = false;
         }
+
+        sends
     }
 
     fn handle_reg_ngp(&mut self, conn_idx: usize, now_ms: u64) {
@@ -213,14 +230,23 @@ impl SrtlaRegistrationManager {
         warn!("registration failed for connection {}", conn_idx);
     }
 
-    pub async fn try_send_reg1_immediately(&mut self, conn_idx: usize, conn: &mut SrtlaConnection) {
+    /// If a REG_NGP just arrived and we should immediately answer this uplink
+    /// with REG1, build it (advancing state) and return it for the shell to
+    /// send. Pure; returns `None` when no immediate REG1 is due.
+    pub fn reg1_if_ngp_immediate(
+        &mut self,
+        conn_idx: usize,
+        now: u64,
+    ) -> Option<[u8; SRTLA_TYPE_REG1_LEN]> {
         if self.active_connections == 0
             && self.pending_reg2_idx.is_none()
             && self.reg1_target_idx == Some(conn_idx)
-            && now_ms() >= self.reg1_next_send_at_ms
+            && now >= self.reg1_next_send_at_ms
         {
             debug!("REG_NGP immediate send for uplink #{}", conn_idx);
-            self.send_reg1_to(conn_idx, conn).await;
+            Some(self.build_reg1_for(conn_idx, now))
+        } else {
+            None
         }
     }
 
@@ -242,7 +268,7 @@ impl SrtlaRegistrationManager {
         self.active_connections = new_count;
     }
 
-    pub(crate) fn pending_reg2_idx(&self) -> Option<usize> {
+    pub fn pending_reg2_idx(&self) -> Option<usize> {
         self.pending_reg2_idx
     }
 
@@ -270,56 +296,58 @@ impl SrtlaRegistrationManager {
     }
 }
 
-// Test-only accessor methods for controlled field access
-#[cfg(test)]
+// Test-only accessor methods for controlled field access. Gated on
+// `test-internals` (not just `test`) so the parent srtla_send crate can reach
+// them from its own cross-crate registration tests.
+#[cfg(any(test, feature = "test-internals"))]
 #[allow(dead_code)]
 impl SrtlaRegistrationManager {
-    pub(crate) fn srtla_id(&self) -> &[u8; SRTLA_ID_LEN] {
+    pub fn srtla_id(&self) -> &[u8; SRTLA_ID_LEN] {
         &self.srtla_id
     }
 
-    pub(crate) fn active_connections(&self) -> usize {
+    pub fn active_connections(&self) -> usize {
         self.active_connections
     }
 
-    pub(crate) fn has_connected(&self) -> bool {
+    pub fn has_connected(&self) -> bool {
         self.has_connected
     }
 
-    pub(crate) fn broadcast_reg2_pending(&self) -> bool {
+    pub fn broadcast_reg2_pending(&self) -> bool {
         self.broadcast_reg2_pending
     }
 
-    pub(crate) fn reg1_target_idx(&self) -> Option<usize> {
+    pub fn reg1_target_idx(&self) -> Option<usize> {
         self.reg1_target_idx
     }
 
-    pub(crate) fn set_reg1_target_idx(&mut self, value: Option<usize>) {
+    pub fn set_reg1_target_idx(&mut self, value: Option<usize>) {
         self.reg1_target_idx = value;
     }
 
-    pub(crate) fn reg1_next_send_at_ms(&self) -> u64 {
+    pub fn reg1_next_send_at_ms(&self) -> u64 {
         self.reg1_next_send_at_ms
     }
 
-    pub(crate) fn pending_timeout_at_ms(&self) -> u64 {
+    pub fn pending_timeout_at_ms(&self) -> u64 {
         self.pending_timeout_at_ms
     }
 
     // Mutable accessors for tests that need to modify state
-    pub(crate) fn set_pending_reg2_idx(&mut self, value: Option<usize>) {
+    pub fn set_pending_reg2_idx(&mut self, value: Option<usize>) {
         self.pending_reg2_idx = value;
     }
 
-    pub(crate) fn set_pending_timeout_at_ms(&mut self, value: u64) {
+    pub fn set_pending_timeout_at_ms(&mut self, value: u64) {
         self.pending_timeout_at_ms = value;
     }
 
-    pub(crate) fn set_reg1_next_send_at_ms(&mut self, value: u64) {
+    pub fn set_reg1_next_send_at_ms(&mut self, value: u64) {
         self.reg1_next_send_at_ms = value;
     }
 
-    pub(crate) fn set_broadcast_reg2_pending(&mut self, value: bool) {
+    pub fn set_broadcast_reg2_pending(&mut self, value: bool) {
         self.broadcast_reg2_pending = value;
     }
 }

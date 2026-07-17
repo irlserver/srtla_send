@@ -1,113 +1,43 @@
 #![cfg(any(test, feature = "test-internals"))]
-#![allow(dead_code)] // Allow unused helpers - they're used by library tests but not binary tests
+// Allow unused helpers/re-exports: they're used by library tests but not binary
+// tests (the re-exports below export nothing in the binary crate).
+#![allow(dead_code, unused_imports)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::time::Duration;
-
-use crate::connection::{
-    BatchSender, BatchUdpSocket, BitrateTracker, CachedQuality, CongestionControl, LinkPhase,
-    ReconnectionState, RttTracker, SrtlaConnection,
+use srtla_core::connection::SrtlaConnection;
+// The socket-free connection builders (create_test_connection[s]) and the tokio
+// clock seam (advance_test_clock) live in srtla-core's test-internals surface,
+// re-exported here so `crate::test_helpers::*` keeps resolving for shell tests.
+pub use srtla_core::test_helpers::{
+    advance_test_clock, create_test_connection, create_test_connections,
 };
-use crate::protocol::{PKT_LOG_SIZE, WINDOW_DEF, WINDOW_MULT};
-use crate::utils::now_ms;
 
-/// Shared test connection ID counter for all helper functions
-static NEXT_TEST_CONN_ID: AtomicU64 = AtomicU64::new(1000);
+use crate::net::{BatchUdpSocket, SourceIpBinder};
+use crate::sender::{ConnIo, ConnIoMap};
 
-/// Create a test UDP socket bound to localhost.
-fn create_test_socket() -> Socket {
+/// Build the I/O half for a test connection: a real localhost UDP socket
+/// wrapped in a `BatchUdpSocket`. Used by tests that drive reader/reconnect I/O.
+pub fn create_test_conn_io() -> ConnIo {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
     socket
         .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
         .unwrap();
     socket.set_nonblocking(true).unwrap();
-    socket
-}
-
-/// Create a SrtlaConnection from a socket and connection parameters.
-fn create_connection_from_socket(
-    socket: Socket,
-    remote: SocketAddr,
-    local_ip: IpAddr,
-    label: String,
-) -> SrtlaConnection {
-    let batch_socket = BatchUdpSocket::new(socket).unwrap();
-
-    SrtlaConnection {
-        conn_id: NEXT_TEST_CONN_ID.fetch_add(1, Ordering::Relaxed),
-        socket: Arc::new(batch_socket),
-        remote,
-        local_ip,
-        label,
-        connected: true,
-        window: WINDOW_DEF * WINDOW_MULT,
-        in_flight_packets: 0,
-        packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
-        highest_acked_seq: i32::MIN,
-        last_received: Some(now_ms()),
-        last_sent: None,
-        last_keepalive_sent: None,
-        last_ack_or_rtt_sample_ms: 0,
-        stall_gated: false,
-        rtt: RttTracker::default(),
-        congestion: CongestionControl::default(),
-        bitrate: BitrateTracker::new(now_ms()),
-        reconnection: ReconnectionState {
-            connection_established_ms: now_ms(),
-            startup_grace_deadline_ms: now_ms(),
-            ..Default::default()
-        },
-        quality_cache: CachedQuality::default(),
-        batch_sender: BatchSender::new(),
-        phase: LinkPhase::Live,
-        weak: false,
-        cc_backing_off: false,
-        cc_target_bps: 0,
-        loss_degraded: false,
-        binder: Arc::new(crate::connection::SourceIpBinder),
+    ConnIo {
+        socket: Arc::new(BatchUdpSocket::new(socket).unwrap()),
+        binder: Arc::new(SourceIpBinder),
+        remote: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
     }
 }
 
-pub async fn create_test_connection() -> SrtlaConnection {
-    let socket = create_test_socket();
-    let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-    let local_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-
-    create_connection_from_socket(socket, remote, local_ip, "test-connection".to_string())
-}
-
-pub async fn create_test_connections(count: usize) -> SmallVec<SrtlaConnection, 4> {
-    let mut connections = SmallVec::new();
-
-    for i in 0..count {
-        let socket = create_test_socket();
-        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080 + i as u16);
-        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10 + i as u8));
-        let label = format!("test-connection-{}", i);
-
-        connections.push(create_connection_from_socket(
-            socket, remote, local_ip, label,
-        ));
-    }
-
+/// Build a `ConnIoMap` giving each connection its own localhost socket, keyed by
+/// `conn_id` (matching the shell's real lifecycle).
+pub fn create_test_conn_io_map(connections: &[SrtlaConnection]) -> ConnIoMap {
     connections
-}
-
-/// Advance the paused Tokio virtual clock by `by`.
-///
-/// Only meaningful inside `#[tokio::test(start_paused = true)]`. Connection
-/// liveness timing (`last_received`, `last_keepalive_sent`, the `all_failed_at`
-/// timer, `is_timed_out`) now runs on the `now_ms()` monotonic clock, which is
-/// NOT tokio-controlled: those tests stamp explicit past timestamps instead of
-/// advancing this clock. This seam remains for the send-coalescing layer
-/// (`BatchSender::last_flush_time`), which still uses `tokio::time::Instant` and
-/// whose 15ms flush window is driven by the tokio timer.
-pub async fn advance_test_clock(by: Duration) {
-    tokio::time::advance(by).await;
+        .iter()
+        .map(|c| (c.conn_id, create_test_conn_io()))
+        .collect()
 }

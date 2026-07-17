@@ -6,13 +6,14 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use smallvec::SmallVec;
+    use srtla_core::mode::SchedulingMode;
+    use srtla_core::selection::{calculate_quality_multiplier, select_connection_idx};
+    use srtla_core::utils::now_ms;
     use tempfile::NamedTempFile;
 
     use crate::config::{ConfigSnapshot, DynamicConfig};
-    use crate::mode::SchedulingMode;
     use crate::sender::*;
-    use crate::test_helpers::create_test_connections;
-    use crate::utils::now_ms;
+    use crate::test_helpers::{create_test_conn_io_map, create_test_connections};
 
     #[test]
     fn test_select_connection_idx_classic() {
@@ -493,10 +494,14 @@ mod tests {
         seq_tracker.insert(100, connections[1].conn_id, now);
         seq_tracker.insert(200, connections[2].conn_id, now);
 
-        let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
-            std::sync::Arc::new(crate::connection::SourceIpBinder);
+        let binder: std::sync::Arc<dyn crate::net::UplinkBinder> =
+            std::sync::Arc::new(crate::net::SourceIpBinder);
+        // BatchUdpSocket::new registers with the Tokio reactor, so build the map
+        // inside the runtime context.
+        let mut conn_io = rt.block_on(async { create_test_conn_io_map(&connections) });
         rt.block_on(apply_connection_changes(
             &mut connections,
+            &mut conn_io,
             &new_ips,
             "127.0.0.1",
             8080,
@@ -551,9 +556,11 @@ mod tests {
         ];
 
         // This will likely fail to connect but should not panic
-        let binder: std::sync::Arc<dyn crate::connection::UplinkBinder> =
-            std::sync::Arc::new(crate::connection::SourceIpBinder);
-        let connections = create_connections_from_ips(&ips, "127.0.0.1", 9999, &binder).await;
+        let binder: std::sync::Arc<dyn crate::net::UplinkBinder> =
+            std::sync::Arc::new(crate::net::SourceIpBinder);
+        let mut conn_io = ConnIoMap::new();
+        let connections =
+            create_connections_from_ips(&ips, "127.0.0.1", 9999, &binder, &mut conn_io).await;
 
         // Connections may be empty due to connection failures, which is OK for testing
         assert!(connections.len() <= ips.len());
@@ -700,7 +707,7 @@ mod tests {
         let now = now_ms();
 
         for c in connections.iter_mut() {
-            c.phase = crate::connection::LinkPhase::Warming {
+            c.phase = srtla_core::connection::LinkPhase::Warming {
                 rtt_probes: 0,
                 entered_ms: now,
             };
@@ -731,7 +738,7 @@ mod tests {
         let now = now_ms();
 
         // Warming link has the better *raw* score (fewer in flight)...
-        connections[0].phase = crate::connection::LinkPhase::Warming {
+        connections[0].phase = srtla_core::connection::LinkPhase::Warming {
             rtt_probes: 1,
             entered_ms: now,
         };
@@ -760,7 +767,7 @@ mod tests {
         let mut connections = rt.block_on(create_test_connections(2));
         let now = now_ms();
 
-        connections[0].phase = crate::connection::LinkPhase::Registering;
+        connections[0].phase = srtla_core::connection::LinkPhase::Registering;
         connections[0].in_flight_packets = 0; // would otherwise be the best score
         connections[1].in_flight_packets = 10;
 

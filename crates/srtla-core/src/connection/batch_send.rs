@@ -33,13 +33,18 @@
 //! The `set_regime` setter is called from `housekeeping` based on each
 //! connection's `current_bitrate_bps` snapshot.
 
-use std::sync::Arc;
-
 use smallvec::SmallVec;
-use tokio::time::Instant;
 use tracing::debug;
 
-use super::batch_recv::{BATCH_SEND_SIZE, BatchUdpSocket};
+/// Max datagrams per `sendmmsg` batch. Defined here (core) so the pure
+/// `drain()` return type and the shell's `net::send_all_datagrams` chunking
+/// agree on one value without core depending on the socket layer.
+pub const BATCH_SEND_SIZE: usize = 32;
+
+/// One drained datagram awaiting transmission: `(bytes, seq, queue_time_ms)`.
+/// `seq` is `Some` for tracked data packets and `None` for untracked ones; the
+/// shell registers the tracked ones for in-flight accounting after sending.
+pub type DrainedPacket = (SmallVec<u8, 1500>, Option<u32>, u64);
 
 /// Bitrate above which a connection is treated as high-load.
 pub const HIGH_LOAD_THRESHOLD_BPS: f64 = 5_000_000.0;
@@ -122,8 +127,10 @@ pub struct BatchSender {
     /// Timestamps when packets were queued (parallel to queue)
     queue_times: Vec<u64>,
 
-    /// Last time the queue was flushed
-    last_flush_time: Instant,
+    /// `now_ms()` of the last drain. Drives the 15ms time-flush window against
+    /// the injected monotonic clock — no wall/`Instant` clock lives here so the
+    /// queue is pure, testable state and the actual send lifts to the shell.
+    last_flush_ms: u64,
 
     /// Current batch regime. Updated by housekeeping when the
     /// connection's bitrate crosses a threshold.
@@ -143,7 +150,7 @@ impl BatchSender {
             queue: Vec::with_capacity(BATCH_SIZE_HIGH_LOAD),
             sequences: Vec::with_capacity(BATCH_SIZE_HIGH_LOAD),
             queue_times: Vec::with_capacity(BATCH_SIZE_HIGH_LOAD),
-            last_flush_time: Instant::now(),
+            last_flush_ms: 0,
             regime: BatchRegime::default(),
         }
     }
@@ -174,11 +181,13 @@ impl BatchSender {
         self.regime
     }
 
-    /// Check if the queue needs flushing based on time
+    /// Check if the queue needs flushing based on time.
+    ///
+    /// `now_ms` is the injected monotonic clock; a drain is due once the queue
+    /// has held packets for at least [`FLUSH_INTERVAL_MS`].
     #[inline]
-    pub fn needs_time_flush(&self) -> bool {
-        !self.queue.is_empty()
-            && self.last_flush_time.elapsed().as_millis() >= FLUSH_INTERVAL_MS as u128
+    pub fn needs_time_flush(&self, now_ms: u64) -> bool {
+        !self.queue.is_empty() && now_ms.saturating_sub(self.last_flush_ms) >= FLUSH_INTERVAL_MS
     }
 
     /// Check if there are any packets queued
@@ -195,81 +204,32 @@ impl BatchSender {
         self.queue.len() as i32
     }
 
-    /// Flush all queued packets to the socket
+    /// Drain the queue, returning every queued datagram with its tracking info.
     ///
-    /// Returns a vector of (seq, queue_time) pairs for packets that need tracking.
-    /// The caller should update in-flight tracking based on these.
-    pub async fn flush(
-        &mut self,
-        socket: &Arc<BatchUdpSocket>,
-    ) -> std::io::Result<Vec<(Option<u32>, u64)>> {
+    /// Pure: it performs no I/O. The queue is emptied and the flush window is
+    /// re-armed at `now_ms`; the shell transmits the returned bytes (see
+    /// [`send_all_datagrams`]) and registers the `Some(seq)` entries for
+    /// in-flight tracking. Returns empty when nothing was queued.
+    pub fn drain(&mut self, now_ms: u64) -> SmallVec<DrainedPacket, BATCH_SEND_SIZE> {
+        self.last_flush_ms = now_ms;
         if self.queue.is_empty() {
-            return Ok(Vec::new());
+            return SmallVec::new();
         }
 
         let packet_count = self.queue.len();
-        let mut sent_count = 0;
-
-        // One `sendmmsg` per BATCH_SEND_SIZE datagrams. The kernel may accept
-        // fewer than offered (short send) once the socket buffer fills, so loop
-        // until the queue is drained rather than assuming a full batch left.
-        while sent_count < packet_count {
-            let take = (packet_count - sent_count).min(BATCH_SEND_SIZE);
-
-            // Scoped so the borrow of `self.queue` ends before the error path
-            // below mutates it.
-            let result = {
-                let mut bufs: SmallVec<&[u8], BATCH_SEND_SIZE> = SmallVec::new();
-                for packet in &self.queue[sent_count..sent_count + take] {
-                    bufs.push(&packet[..]);
-                }
-                socket.send_batch(&bufs).await
-            };
-
-            match result {
-                // Ok(0) would spin forever; treat a no-progress send as an error
-                // so the link is retried rather than livelocked.
-                Ok(0) => {
-                    self.queue.drain(..sent_count);
-                    self.sequences.drain(..sent_count);
-                    self.queue_times.drain(..sent_count);
-                    self.last_flush_time = Instant::now();
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "sendmmsg accepted no datagrams",
-                    ));
-                }
-                Ok(n) => sent_count += n,
-                Err(e) => {
-                    // Partial failure: remove already-sent packets to avoid duplicates
-                    self.queue.drain(..sent_count);
-                    self.sequences.drain(..sent_count);
-                    self.queue_times.drain(..sent_count);
-                    self.last_flush_time = Instant::now();
-                    return Err(e);
-                }
-            }
-        }
-
-        // Collect tracking info before clearing
-        let tracking_info: Vec<(Option<u32>, u64)> = self
-            .sequences
-            .iter()
-            .zip(self.queue_times.iter())
-            .map(|(&seq, &time)| (seq, time))
+        let out: SmallVec<DrainedPacket, BATCH_SEND_SIZE> = self
+            .queue
+            .drain(..)
+            .zip(self.sequences.drain(..))
+            .zip(self.queue_times.drain(..))
+            .map(|((data, seq), time)| (data, seq, time))
             .collect();
 
-        // Clear the queue
-        self.queue.clear();
-        self.sequences.clear();
-        self.queue_times.clear();
-        self.last_flush_time = Instant::now();
-
         if packet_count > 1 {
-            debug!("Batch flush: sent {} packets in one batch", packet_count);
+            debug!("Batch drain: {} packets ready to send", packet_count);
         }
 
-        Ok(tracking_info)
+        out
     }
 
     /// Reset the batch sender state (for reconnection)
@@ -277,7 +237,7 @@ impl BatchSender {
         self.queue.clear();
         self.sequences.clear();
         self.queue_times.clear();
-        self.last_flush_time = Instant::now();
+        self.last_flush_ms = 0;
     }
 }
 
@@ -307,11 +267,12 @@ mod tests {
         let data = [0u8; 100];
 
         sender.queue_packet(&data, Some(1), 0);
-        assert!(!sender.needs_time_flush()); // Just queued, shouldn't need flush
+        assert!(!sender.needs_time_flush(0)); // Just queued at t=0, shouldn't need flush
+        assert!(!sender.needs_time_flush(FLUSH_INTERVAL_MS - 1)); // Under the window
 
-        // Simulate time passing
-        sender.last_flush_time = Instant::now() - std::time::Duration::from_millis(20);
-        assert!(sender.needs_time_flush()); // Now should need flush
+        // Once FLUSH_INTERVAL_MS has elapsed against the injected clock.
+        assert!(sender.needs_time_flush(FLUSH_INTERVAL_MS));
+        assert!(sender.needs_time_flush(20));
     }
 
     #[test]

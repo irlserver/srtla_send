@@ -2,13 +2,13 @@
 mod tests {
     use std::time::Duration;
 
+    use srtla_core::utils::now_ms;
+    use srtla_protocol::*;
 
-    use crate::protocol::*;
     use crate::sender::{SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker, attribute_nak};
     use crate::test_helpers::{
         advance_test_clock, create_test_connection, create_test_connections,
     };
-    use crate::utils::now_ms;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_connection_score() {
@@ -251,7 +251,9 @@ mod tests {
         assert_eq!(conn.congestion.nak_burst_count, 3);
         assert!(conn.congestion.nak_burst_start_time_ms > 0);
 
-        rt.block_on(conn.reconnect()).unwrap();
+        // Reconnect's socket work now lives in the shell; the pure state reset
+        // is `reset_for_reconnect`, which is what this test asserts on.
+        conn.reset_for_reconnect(now_ms());
 
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_burst_start_time_ms, 0);

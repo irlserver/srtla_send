@@ -2,17 +2,16 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use smallvec::SmallVec;
+use srtla_core::connection::{SrtlaConnection, SrtlaIncoming};
+use srtla_core::registration::SrtlaRegistrationManager;
+use srtla_core::selection::select_connection_idx;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, trace, warn};
 
-use super::selection::select_connection_idx;
 use super::sequence::SequenceTracker;
-use super::uplink::UplinkPacket;
+use super::uplink::{ConnIoMap, UplinkPacket};
 use crate::config::ConfigSnapshot;
-use crate::connection::{SrtlaConnection, SrtlaIncoming};
-use crate::protocol;
-use crate::registration::SrtlaRegistrationManager;
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -52,25 +51,15 @@ pub(crate) fn attribute_nak(
 pub async fn process_connection_events(
     idx: usize,
     connections: &mut [SrtlaConnection],
-    reg: &mut SrtlaRegistrationManager,
-    instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
     classic: bool,
-    incoming_override: Option<SrtlaIncoming>,
+    incoming: SrtlaIncoming,
 ) -> Result<()> {
     if idx >= connections.len() {
         return Ok(());
     }
-
-    let incoming = if let Some(overridden) = incoming_override {
-        overridden
-    } else {
-        connections[idx]
-            .drain_incoming(idx, reg, local_listener, instant_tx, last_client_addr)
-            .await?
-    };
 
     if !incoming.read_any
         && incoming.ack_numbers.is_empty()
@@ -82,7 +71,7 @@ pub async fn process_connection_events(
     }
 
     // One monotonic read drives every ACK/NAK handler in this receive batch.
-    let current_time_ms = crate::utils::now_ms();
+    let current_time_ms = srtla_core::utils::now_ms();
 
     for ack in incoming.ack_numbers.iter() {
         for c in connections.iter_mut() {
@@ -91,9 +80,24 @@ pub async fn process_connection_events(
     }
 
     for srtla_ack in incoming.srtla_ack_numbers.iter() {
-        for c in connections.iter_mut() {
-            if c.handle_srtla_ack_specific(*srtla_ack as i32, classic, current_time_ms) {
-                break;
+        // Match the arrival link's packet log FIRST. The receiver sends an
+        // SRTLA ACK back on the link that delivered the packet, and with
+        // duplicate probing the same sequence can sit in two links' logs (the
+        // unique copy and a probe). A first-log-wins scan would let the healthy
+        // link's ACK stamp delivery proof on the gated link — falsely warming
+        // its rejoin dwell. The fallback scan is kept for ACKs whose owner
+        // can't be resolved from the arrival link (e.g. after a reconnect
+        // cleared its log).
+        let found_on_arrival =
+            connections[idx].handle_srtla_ack_specific(*srtla_ack as i32, classic, current_time_ms);
+        if !found_on_arrival {
+            for (i, c) in connections.iter_mut().enumerate() {
+                if i == idx {
+                    continue;
+                }
+                if c.handle_srtla_ack_specific(*srtla_ack as i32, classic, current_time_ms) {
+                    break;
+                }
             }
         }
         for c in connections.iter_mut() {
@@ -118,6 +122,7 @@ pub async fn process_connection_events(
 pub async fn handle_uplink_packet(
     packet: UplinkPacket,
     connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
@@ -129,28 +134,40 @@ pub async fn handle_uplink_packet(
         return;
     }
     if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
-        match connections[idx]
-            .process_packet(
-                idx,
-                reg,
-                local_listener,
-                instant_tx,
-                last_client_addr,
-                &packet.bytes,
-            )
-            .await
+        match super::uplink_recv::process_uplink_packet(
+            &mut connections[idx],
+            idx,
+            reg,
+            local_listener,
+            instant_tx,
+            last_client_addr,
+            &packet.bytes,
+        )
+        .await
         {
-            Ok(incoming) => {
+            Ok(mut incoming) => {
+                // Flush the deferred immediate-REG1 effect on this link's socket.
+                if let Some(pkt) = incoming.reg1_send.take()
+                    && let Some(io) = conn_io.get(&connections[idx].conn_id)
+                {
+                    match io.socket.send(&pkt).await {
+                        Ok(_) => connections[idx].note_sent(srtla_core::utils::now_ms()),
+                        Err(e) => {
+                            warn!(
+                                "{}: failed to send immediate REG1: {e}",
+                                connections[idx].label
+                            )
+                        }
+                    }
+                }
                 if let Err(err) = process_connection_events(
                     idx,
                     connections,
-                    reg,
-                    instant_tx,
                     last_client_addr,
                     local_listener,
                     seq_tracker,
                     config_snap.mode.is_classic(),
-                    Some(incoming),
+                    incoming,
                 )
                 .await
                 {
@@ -174,6 +191,7 @@ const MAX_DRAIN_PACKETS: usize = 64;
 pub async fn drain_packet_queue(
     packet_rx: &mut UnboundedReceiver<UplinkPacket>,
     connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     instant_tx: &InstantForwarder,
     last_client_addr: Option<SocketAddr>,
@@ -190,6 +208,7 @@ pub async fn drain_packet_queue(
                 handle_uplink_packet(
                     packet,
                     connections,
+                    conn_io,
                     reg,
                     instant_tx,
                     last_client_addr,
@@ -247,12 +266,13 @@ pub async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
     recv_buf: &mut [u8],
     connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
     last_selected_idx: &mut Option<usize>,
     seq_tracker: &mut SequenceTracker,
     last_client_addr: &mut Option<SocketAddr>,
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
-    critical_window: &crate::priority::CriticalWindow,
+    critical_window: &srtla_core::priority::CriticalWindow,
 ) {
     match res {
         Ok((n, src)) => {
@@ -260,19 +280,23 @@ pub async fn handle_srt_packet(
                 return;
             }
             // Capture timestamp once at packet entry - reduces syscalls from 3-5 to 1 per packet
-            let packet_time_ms = crate::utils::now_ms();
+            let packet_time_ms = srtla_core::utils::now_ms();
 
             let pkt = &recv_buf[..n];
-            let seq = protocol::get_srt_sequence_number(pkt);
+            let seq = srtla_protocol::get_srt_sequence_number(pkt);
             if !registration_complete {
-                let sel_idx =
-                    select_pre_registration_connection(connections, *last_selected_idx, packet_time_ms);
+                let sel_idx = select_pre_registration_connection(
+                    connections,
+                    *last_selected_idx,
+                    packet_time_ms,
+                );
                 if let Some(sel_idx) = sel_idx {
                     forward_via_connection(
                         sel_idx,
                         pkt,
                         seq,
                         connections,
+                        conn_io,
                         last_selected_idx,
                         seq_tracker,
                         packet_time_ms,
@@ -287,21 +311,28 @@ pub async fn handle_srt_packet(
             let mut sel_idx =
                 select_connection_idx(connections, *last_selected_idx, packet_time_ms, config_snap);
 
-            // Keyframe priority: route critical packets to the highest-quality
-            // link. The critical time window is opened over the priority
-            // sidecar by the encoder front-end, which parses NAL units and
-            // knows exactly when a keyframe / parameter set is in flight (see
-            // crate::priority). srtla_send sees only opaque SRT payloads, so it
-            // never guesses at keyframes itself.
+            // Best-path override for must-land traffic. Two triggers share it:
+            //
+            // - Keyframe priority: the critical time window is opened over the
+            //   priority sidecar by the encoder front-end, which parses NAL
+            //   units and knows exactly when a keyframe / parameter set is in
+            //   flight (see srtla_core::priority). srtla_send sees only opaque
+            //   SRT payloads, so it never guesses at keyframes itself.
+            // - SRT retransmits (R bit in the data header): a retransmit fills
+            //   an existing hole in the receiver buffer, so it must not ride a
+            //   score-crushed link — recovery traffic that arrives late is the
+            //   steady-state glitch a degraded leg keeps causing even after
+            //   routing has mostly moved off it.
             //
             // Only data packets have seq != None (control packets have MSB set).
             if seq.is_some()
-                && critical_window.is_critical_now(packet_time_ms)
-                && let Some(best_idx) = crate::priority::select_best_quality_idx(connections)
+                && (critical_window.is_critical_now(packet_time_ms)
+                    || srtla_protocol::is_srt_data_retransmit(pkt))
+                && let Some(best_idx) = srtla_core::priority::select_best_quality_idx(connections)
                 && sel_idx != Some(best_idx)
             {
                 trace!(
-                    "critical override (window): link {} -> {}",
+                    "critical override (window/retransmit): link {} -> {}",
                     sel_idx.map_or(-1, |i| i as i64),
                     best_idx as i64
                 );
@@ -314,11 +345,16 @@ pub async fn handle_srt_packet(
                     pkt,
                     seq,
                     connections,
+                    conn_io,
                     last_selected_idx,
                     seq_tracker,
                     packet_time_ms,
                 )
                 .await;
+                if seq.is_some() {
+                    send_stall_probes(sel_idx, pkt, seq, connections, conn_io, packet_time_ms)
+                        .await;
+                }
             } else {
                 warn!("no available connection to forward packet from {}", src);
             }
@@ -334,6 +370,7 @@ pub async fn forward_via_connection(
     pkt: &[u8],
     seq: Option<u32>,
     connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
     last_selected_idx: &mut Option<usize>,
     seq_tracker: &mut SequenceTracker,
     packet_time_ms: u64,
@@ -385,9 +422,9 @@ pub async fn forward_via_connection(
     }
 
     // Flush if batch threshold reached
-    if needs_flush {
+    if needs_flush && let Some(io) = conn_io.get(&connections[sel_idx].conn_id) {
         let conn = &mut connections[sel_idx];
-        if let Err(e) = conn.flush_batch().await {
+        if let Err(e) = send_connection_batch(conn, &io.socket).await {
             warn!(
                 "{}: batch flush failed, marking for recovery: {}",
                 conn.label, e
@@ -397,16 +434,86 @@ pub async fn forward_via_connection(
     }
 }
 
+/// Duplicate-packet probing on stall-gated links (librist-style warm restore).
+///
+/// A gated link carries no unique payload, so its only delivery proof would be
+/// the 1 s keepalive echo — which proves the path echoes 38-byte control
+/// frames, not that it can deliver data-sized packets. Instead, one in
+/// [`srtla_core::config_snapshot::STALL_PROBE_ONE_IN_N`] routed data packets is
+/// *also* queued on each gated link. The copy reuses the original SRT sequence
+/// number: the SRT receiver dedups it, so a lost or late probe can never stall
+/// the receiver buffer, while a delivered one earns the gated link an SRTLA ACK
+/// on its own socket — exactly the sustained proof the rejoin dwell requires.
+///
+/// Deliberately NOT inserted into `seq_tracker`: the tracker must keep mapping
+/// the sequence to the link that carried the unique copy, so a NAK still
+/// penalizes the link that actually lost stream data. The SRTLA ACK for the
+/// probe attributes correctly because `process_connection_events` matches the
+/// arrival link's packet log first.
+async fn send_stall_probes(
+    sel_idx: usize,
+    pkt: &[u8],
+    seq: Option<u32>,
+    connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
+    packet_time_ms: u64,
+) {
+    for (i, conn) in connections.iter_mut().enumerate() {
+        if i == sel_idx {
+            continue;
+        }
+        if !conn.is_stall_gated() || !conn.connected {
+            continue;
+        }
+        if !conn.stall_probe_due() {
+            continue;
+        }
+        trace!("{}: sending duplicate probe (seq {:?})", conn.label, seq);
+        let needs_flush = conn.queue_data_packet(pkt, seq, packet_time_ms);
+        if needs_flush
+            && let Some(io) = conn_io.get(&conn.conn_id)
+            && let Err(e) = send_connection_batch(conn, &io.socket).await
+        {
+            warn!(
+                "{}: probe batch flush failed, marking for recovery: {}",
+                conn.label, e
+            );
+            conn.mark_for_recovery();
+        }
+    }
+}
+
+/// Drain a connection's batch queue and transmit it on the link's socket.
+///
+/// The pure `take_batch` half (queue drain + in-flight registration) lives on
+/// `SrtlaConnection`; this is the I/O half. On error the caller marks the link
+/// for recovery, which clears the optimistically-registered in-flight packets.
+async fn send_connection_batch(
+    conn: &mut SrtlaConnection,
+    socket: &crate::net::BatchUdpSocket,
+) -> std::io::Result<()> {
+    let now = srtla_core::utils::now_ms();
+    let batch = conn.take_batch(now);
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let bufs: SmallVec<&[u8], 32> = batch.iter().map(|(data, _, _)| data.as_slice()).collect();
+    crate::net::send_all_datagrams(socket, &bufs).await
+}
+
 /// Flush all connection batches (called on timer or when needed)
 ///
 /// Optimized with early exit: first check if any connection has queued packets
 /// before iterating. This avoids work on the 15ms timer when traffic is idle.
-pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
+pub async fn flush_all_batches(connections: &mut [SrtlaConnection], conn_io: &ConnIoMap) {
+    // One monotonic read drives the flush-window check for every connection.
+    let now = srtla_core::utils::now_ms();
+
     // Quick scan to check if any connection has work to do
     // This is a fast read-only check that avoids the flush logic entirely when idle
     let has_work = connections
         .iter()
-        .any(|c| c.has_queued_packets() || c.needs_batch_flush());
+        .any(|c| c.has_queued_packets() || c.needs_batch_flush(now));
 
     if !has_work {
         return;
@@ -414,8 +521,9 @@ pub async fn flush_all_batches(connections: &mut [SrtlaConnection]) {
 
     // Now do the actual flush for connections that need it
     for conn in connections.iter_mut() {
-        if (conn.needs_batch_flush() || conn.has_queued_packets())
-            && let Err(e) = conn.flush_batch().await
+        if (conn.needs_batch_flush(now) || conn.has_queued_packets())
+            && let Some(io) = conn_io.get(&conn.conn_id)
+            && let Err(e) = send_connection_batch(conn, &io.socket).await
         {
             warn!("{}: periodic batch flush failed: {}", conn.label, e);
         }

@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests {
 
+    use srtla_core::connection::STARTUP_GRACE_MS;
+    use srtla_core::registration::*;
+    use srtla_core::utils::now_ms;
+    use srtla_protocol::*;
 
-    use crate::connection::STARTUP_GRACE_MS;
-    use crate::protocol::*;
-    use crate::registration::*;
     use crate::test_helpers::create_test_connection;
-    use crate::utils::now_ms;
 
     #[test]
     fn test_registration_manager_creation() {
@@ -119,14 +119,14 @@ mod tests {
     #[tokio::test]
     async fn test_reg_driver_initial_reg1() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut connections = vec![create_test_connection().await];
+        let connections = [create_test_connection().await];
 
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
         reg.process_registration_packet(0, &ngp, now_ms());
 
         // Should send REG1 to first connection when no connections are active
-        reg.reg_driver_send_if_needed(&mut connections).await;
+        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
 
         assert_eq!(reg.pending_reg2_idx(), Some(0));
         assert!(reg.pending_timeout_at_ms() > now_ms());
@@ -135,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn test_reg_driver_with_target() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut connections = vec![
+        let connections = [
             create_test_connection().await,
             create_test_connection().await,
         ];
@@ -143,7 +143,7 @@ mod tests {
         // Set a specific target from REG_NGP
         reg.set_reg1_target_idx(Some(1));
 
-        reg.reg_driver_send_if_needed(&mut connections).await;
+        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
 
         // Should send to the specified target
         assert_eq!(reg.pending_reg2_idx(), Some(1));
@@ -152,31 +152,31 @@ mod tests {
     #[tokio::test]
     async fn test_reg_driver_waits_for_ngp() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut connections = vec![create_test_connection().await];
+        let connections = [create_test_connection().await];
 
         // Without REG_NGP, nothing should happen
-        reg.reg_driver_send_if_needed(&mut connections).await;
+        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
         assert_eq!(reg.pending_reg2_idx(), None);
 
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
         reg.process_registration_packet(0, &ngp, now_ms());
 
-        reg.reg_driver_send_if_needed(&mut connections).await;
+        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
         assert_eq!(reg.pending_reg2_idx(), Some(0));
     }
 
     #[tokio::test]
     async fn test_broadcast_reg2() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut connections = vec![
+        let connections = [
             create_test_connection().await,
             create_test_connection().await,
         ];
 
         // Trigger broadcast
         reg.set_broadcast_reg2_pending(true);
-        reg.reg_driver_send_if_needed(&mut connections).await;
+        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
 
         // Should have cleared the broadcast flag
         assert!(!reg.broadcast_reg2_pending());
@@ -185,9 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_reg1_to_sets_pending_state() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut conn = create_test_connection().await;
-
-        reg.send_reg1_to(0, &mut conn).await;
+        reg.build_reg1_for(0, now_ms());
 
         assert_eq!(reg.pending_reg2_idx(), Some(0));
         assert_eq!(reg.reg1_target_idx(), Some(0));
@@ -200,13 +198,11 @@ mod tests {
     #[tokio::test]
     async fn test_send_reg2_to_does_not_override_state() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut conn = create_test_connection().await;
-
         // Pretend we already have pending state for another index
         reg.set_pending_reg2_idx(Some(1));
         reg.set_reg1_target_idx(Some(1));
 
-        reg.send_reg2_to(0, &mut conn).await;
+        let _ = reg.build_reg2(0);
 
         // State should remain unchanged
         assert_eq!(reg.pending_reg2_idx(), Some(1));
@@ -269,8 +265,8 @@ mod tests {
         reg.set_reg1_next_send_at_ms(now_ms() + 5000);
 
         // Even with connections available, should not send yet
-        let mut connections = vec![create_test_connection().await];
-        reg.reg_driver_send_if_needed(&mut connections).await;
+        let connections = [create_test_connection().await];
+        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
         assert_eq!(
             reg.pending_reg2_idx(),
             None,
@@ -281,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn test_registration_state_transitions() {
         let mut reg = SrtlaRegistrationManager::new();
-        let connections = vec![create_test_connection().await];
+        let connections = [create_test_connection().await];
 
         // Initial state
         assert_eq!(reg.active_connections(), 0);
@@ -325,7 +321,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_probing_fallback_when_send_fails() {
+    async fn test_start_probing_emits_a_probe_per_connection() {
+        // Sends now lift to the shell, so `start_probing` can no longer fail to
+        // send: it optimistically records one probe per connection and enters
+        // `WaitingForProbes`. The fallback-when-no-response path is exercised by
+        // `test_check_probing_no_responses_uses_fallback` via the probe timeout.
         let mut reg = SrtlaRegistrationManager::new();
         let mut connections = vec![
             create_test_connection().await,
@@ -334,10 +334,10 @@ mod tests {
 
         assert_eq!(reg.reg1_target_idx(), None);
 
-        reg.start_probing(&mut connections).await;
+        let probes = reg.start_probing(&mut connections, now_ms());
 
-        assert_eq!(reg.reg1_target_idx(), Some(0));
-        assert!(!reg.is_probing());
+        assert_eq!(probes.len(), 2, "one probe packet queued per connection");
+        assert!(reg.is_probing(), "driver is now awaiting probe responses");
     }
 
     #[tokio::test]
@@ -350,7 +350,7 @@ mod tests {
         reg.update_active_connections(&connections);
 
         let initial_target = reg.reg1_target_idx();
-        reg.start_probing(&mut connections).await;
+        let _ = reg.start_probing(&mut connections, now_ms());
 
         assert_eq!(reg.reg1_target_idx(), initial_target);
         assert!(!reg.is_probing());
@@ -472,7 +472,7 @@ mod tests {
     #[tokio::test]
     async fn reg_handshake_two_phase_flow() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut connections = vec![
+        let connections = [
             create_test_connection().await,
             create_test_connection().await,
         ];
@@ -480,7 +480,7 @@ mod tests {
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
         reg.process_registration_packet(0, &ngp, now_ms());
-        reg.reg_driver_send_if_needed(&mut connections).await;
+        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
         assert_eq!(
             reg.pending_reg2_idx(),
             Some(0),
@@ -502,7 +502,7 @@ mod tests {
             &full_id[..],
             "broadcast REG2 carries the full_id to conn N (not just conn 0)"
         );
-        reg.reg_driver_send_if_needed(&mut connections).await;
+        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
         assert!(
             !reg.broadcast_reg2_pending(),
             "REG2 broadcast consumed after sending to all uplinks"
@@ -511,7 +511,8 @@ mod tests {
         let reg3 = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
         for idx in 0..connections.len() {
             assert!(
-                reg.process_registration_packet(idx, &reg3, now_ms()).is_some(),
+                reg.process_registration_packet(idx, &reg3, now_ms())
+                    .is_some(),
                 "REG3 on conn {idx} handled"
             );
         }
@@ -555,10 +556,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn reg2_timeout_fires_at_4s_logical() {
         let mut reg = SrtlaRegistrationManager::new();
-        let mut conn = create_test_connection().await;
-
         let base = now_ms();
-        reg.send_reg1_to(0, &mut conn).await;
+        reg.build_reg1_for(0, base);
         assert_eq!(reg.pending_reg2_idx(), Some(0));
 
         let deadline = reg.pending_timeout_at_ms();

@@ -710,6 +710,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "srtla-core"
+version = "3.0.0"
+dependencies = [
+ "rand 0.9.2",
+ "rustc-hash",
+ "smallvec 2.0.0-alpha.12",
+ "srtla-protocol",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "srtla-protocol"
+version = "0.1.0"
+dependencies = [
+ "smallvec 2.0.0-alpha.12",
+]
+
+[[package]]
 name = "srtla_send"
 version = "3.0.0"
 dependencies = [
@@ -727,6 +746,8 @@ dependencies = [
  "serde_json",
  "smallvec 2.0.0-alpha.12",
  "socket2",
+ "srtla-core",
+ "srtla-protocol",
  "tempfile",
  "tokio",
  "tokio-test",

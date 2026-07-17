@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use tracing_subscriber::EnvFilter;
 
 // Use mimalloc as the global allocator for the binary (non-Windows only)
@@ -8,27 +9,21 @@ use tracing_subscriber::EnvFilter;
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod config;
-mod connection;
 mod control;
 mod control_socket;
-mod ewma;
-mod kalman;
 mod metrics;
-mod mode;
-mod priority;
-mod protocol;
-mod registration;
+mod net;
+mod priority_listener;
 mod sender;
 mod stats;
 mod subscriptions;
 mod toml_config;
-mod utils;
 
 // Test helpers for binary tests
 #[cfg(any(test, feature = "test-internals"))]
 mod test_helpers;
 
-use mode::SchedulingMode;
+use srtla_core::mode::SchedulingMode;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -69,7 +64,17 @@ struct Cli {
     config_file: Option<String>,
 
     /// Scheduling mode: classic, enhanced (default)
-    #[arg(long = "mode", value_enum, default_value = "enhanced")]
+    //
+    // `SchedulingMode` is a pure core type and deliberately knows nothing about
+    // clap. The CLI coupling lives here in the shell: parse the allowed strings
+    // (which drive --help text and completion) and map through the core type's
+    // own `FromStr`.
+    #[arg(
+        long = "mode",
+        default_value = "enhanced",
+        value_parser = PossibleValuesParser::new(["classic", "enhanced"])
+            .map(|s| s.parse::<SchedulingMode>().expect("possible values are valid modes")),
+    )]
     mode: SchedulingMode,
     /// Disable quality scoring (enhanced only)
     #[arg(long = "no-quality")]
@@ -77,16 +82,20 @@ struct Cli {
 
     /// Disable the stalled-link deselect guard (on by default). The guard skips
     /// a link whose in-flight backlog is high while its last delivery proof has
-    /// gone stale, provided a healthier link can carry the traffic; it recovers
-    /// the link automatically on its next keepalive round-trip.
+    /// gone stale, provided a healthier link can carry the traffic. While
+    /// gated the link carries keepalives plus a sparse duplicate-packet probe
+    /// trickle; it rejoins after delivery proof has been sustained for the
+    /// rejoin dwell (quick to drop, conservative to rejoin).
     #[arg(long = "no-stall-deselect")]
     no_stall_deselect: bool,
     /// In-flight packet backlog at or above which a link becomes a stall
     /// candidate for `--no-stall-deselect`.
     #[arg(long = "stall-min-in-flight", default_value_t = config::STALL_MIN_IN_FLIGHT_PACKETS)]
     stall_min_in_flight: i32,
-    /// Delivery-proof staleness window (ms) after which a stall-candidate link
-    /// is deselected.
+    /// Ceiling (ms) on the delivery-proof staleness window after which a
+    /// stall-candidate link is deselected. The effective window is
+    /// RTT-adaptive (4x smoothed RTT, floored at 1000 ms) and this value caps
+    /// it; links without an RTT baseline use the ceiling directly.
     #[arg(long = "stall-ack-stale-ms", default_value_t = config::STALL_ACK_STALE_MS)]
     stall_ack_stale_ms: u64,
 
@@ -169,10 +178,10 @@ async fn main() -> Result<()> {
 
     let subscription_hub = subscriptions::SubscriptionHub::new();
 
-    let critical_window = priority::CriticalWindow::new();
+    let critical_window = srtla_core::priority::CriticalWindow::new();
     if let Some(bind) = args.priority_bind {
         warn_if_not_loopback("priority sidecar (--priority-bind)", bind);
-        priority::spawn_listener(
+        priority_listener::spawn_listener(
             bind,
             critical_window.clone(),
             Some(subscription_hub.clone()),
@@ -208,8 +217,7 @@ async fn main() -> Result<()> {
 
     // The CLI binds each uplink by its source IP, which on a multi-homed host
     // selects the egress via source-based routing.
-    let binder: std::sync::Arc<dyn connection::UplinkBinder> =
-        std::sync::Arc::new(connection::SourceIpBinder);
+    let binder: std::sync::Arc<dyn net::UplinkBinder> = std::sync::Arc::new(net::SourceIpBinder);
 
     sender::run_sender_with_config(
         local_srt_port,

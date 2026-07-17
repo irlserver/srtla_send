@@ -5,9 +5,8 @@
 
 use std::cmp::min;
 
+use srtla_protocol::*;
 use tracing::debug;
-
-use crate::protocol::*;
 
 /// Handle SRTLA ACK with specific window increase logic (classic mode)
 ///

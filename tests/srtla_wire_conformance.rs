@@ -14,7 +14,7 @@
 //! has changed and the sender is no longer interoperable with an SRTLA receiver;
 //! that is a deliberate, versioned protocol change, never an accident.
 
-use srtla_send::protocol::{
+use srtla_protocol::{
     SRTLA_ID_LEN, SRTLA_TYPE_ACK, SRTLA_TYPE_KEEPALIVE, SRTLA_TYPE_REG_ERR, SRTLA_TYPE_REG_NAK,
     SRTLA_TYPE_REG_NGP, SRTLA_TYPE_REG1, SRTLA_TYPE_REG1_LEN, SRTLA_TYPE_REG2, SRTLA_TYPE_REG2_LEN,
     SRTLA_TYPE_REG3, SRTLA_TYPE_REG3_LEN, create_ack_packet, create_reg1_packet,

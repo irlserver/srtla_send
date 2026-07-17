@@ -57,3 +57,16 @@ pub fn get_srt_sequence_number(buf: &[u8]) -> Option<u32> {
         None
     }
 }
+
+/// Whether `buf` is an SRT data packet flagged as a retransmission.
+///
+/// The second header word of an SRT data packet is
+/// `PP(2) | O(1) | KK(2) | R(1) | message number(26)`; the R bit (bit 26,
+/// i.e. `0x04` in byte 4) marks a packet the SRT sender is re-sending in
+/// response to a receiver NAK. Retransmits are latency-critical recovery
+/// traffic: they fill an existing hole in the receiver buffer, so one that
+/// rides a slow path arrives too late to matter.
+#[inline]
+pub fn is_srt_data_retransmit(buf: &[u8]) -> bool {
+    buf.len() >= 8 && (buf[0] & 0x80) == 0 && (buf[4] & 0x04) != 0
+}

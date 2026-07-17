@@ -1,9 +1,9 @@
+use srtla_core::connection::SrtlaConnection;
+use srtla_core::utils::now_ms;
+use srtla_protocol::PKT_LOG_SIZE;
 use tracing::{info, warn};
 
 use crate::config::DynamicConfig;
-use crate::connection::SrtlaConnection;
-use crate::protocol::PKT_LOG_SIZE;
-use crate::utils::now_ms;
 
 /// Comprehensive status monitoring for connections
 ///
@@ -70,10 +70,10 @@ pub(crate) fn log_connection_status(
     // Show mode and relevant settings
     info!("  Mode: {}", snap.mode);
     match snap.mode {
-        crate::mode::SchedulingMode::Classic => {
+        srtla_core::mode::SchedulingMode::Classic => {
             info!("    (quality scoring not applicable)");
         }
-        crate::mode::SchedulingMode::Enhanced => {
+        srtla_core::mode::SchedulingMode::Enhanced => {
             info!(
                 "    Quality: {}",
                 if snap.quality_enabled { "ON" } else { "OFF" }

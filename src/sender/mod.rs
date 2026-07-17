@@ -2,13 +2,10 @@ mod connections;
 mod housekeeping;
 mod packet_handler;
 mod reload;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod selection;
-#[cfg(not(any(test, feature = "test-internals")))]
-mod selection;
 mod sequence;
 mod status;
 mod uplink;
+mod uplink_recv;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -28,35 +25,28 @@ use housekeeping::handle_housekeeping;
 // Re-exported for the NAK-attribution conformance tests so they drive the real
 // production path rather than a mirrored copy.
 #[allow(unused_imports)]
-pub(crate) use packet_handler::attribute_nak;
+pub(crate) use packet_handler::{attribute_nak, process_connection_events};
 use packet_handler::{
     drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
 };
 #[allow(unused_imports)]
-pub use selection::calculate_quality_multiplier;
-pub use selection::classifier::{ClassificationResult, WeakReason};
-#[allow(unused_imports)]
-pub use selection::enhanced::{in_flight_cap_exceeded, in_flight_cap_packets};
-#[allow(unused_imports)]
-pub use selection::link_cc::{CcState, ClimbMode, LinkCcSnapshot};
-// `select_connection_idx` is consumed by `packet_handler` via its own
-// `super::selection::select_connection_idx` path. The re-export is here
-// for tests that import the sender public surface with a glob.
-#[allow(unused_imports)]
-pub use selection::select_connection_idx;
-#[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
+use srtla_core::registration::SrtlaRegistrationManager;
 use status::log_connection_status;
 use tokio::net::UdpSocket;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{self, Duration, Instant};
 use tracing::{debug, info, warn};
+// `ConnIo` is constructed only by tests (production builds it inside
+// `connections::connect_uplink`); re-export it just for the test surface.
+#[cfg(any(test, feature = "test-internals"))]
+pub use uplink::ConnIo;
+pub use uplink::ConnIoMap;
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 
 use crate::config::DynamicConfig;
-use crate::registration::SrtlaRegistrationManager;
 use crate::stats::SharedStats;
 
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
@@ -70,9 +60,9 @@ pub async fn run_sender_with_config(
     ips_file: &str,
     config: DynamicConfig,
     shared_stats: SharedStats,
-    critical_window: crate::priority::CriticalWindow,
+    critical_window: srtla_core::priority::CriticalWindow,
     subscription_hub: crate::subscriptions::SubscriptionHub,
-    binder: std::sync::Arc<dyn crate::connection::UplinkBinder>,
+    binder: std::sync::Arc<dyn crate::net::UplinkBinder>,
 ) -> Result<()> {
     info!(
         "starting srtla_send: local_srt_port={}, receiver={}:{}, ips_file={}, mode={}",
@@ -94,8 +84,12 @@ pub async fn run_sender_with_config(
         return Err(anyhow!("no IPs in list: {}", ips_file));
     }
 
+    // Shell-owned I/O half of every connection, keyed by conn_id (never by
+    // index — so no lockstep with the connections vec through add/remove).
+    let mut conn_io: ConnIoMap = std::collections::HashMap::new();
     let mut connections =
-        create_connections_from_ips(&ips, receiver_host, receiver_port, &binder).await;
+        create_connections_from_ips(&ips, receiver_host, receiver_port, &binder, &mut conn_io)
+            .await;
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
@@ -107,11 +101,19 @@ pub async fn run_sender_with_config(
 
     let mut reg = SrtlaRegistrationManager::new();
 
-    reg.start_probing(&mut connections).await;
+    // Send the initial RTT probes the (pure) probing state machine emitted.
+    let probes = reg.start_probing(&mut connections, srtla_core::utils::now_ms());
+    for (idx, pkt) in probes {
+        if let Some(conn) = connections.get(idx)
+            && let Some(io) = conn_io.get(&conn.conn_id)
+        {
+            let _ = io.socket.send(&pkt).await;
+        }
+    }
 
     let (packet_tx, mut packet_rx) = create_uplink_channel();
     let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
-    sync_readers(&connections, &mut reader_handles, &packet_tx);
+    sync_readers(&connections, &conn_io, &mut reader_handles, &packet_tx);
 
     // Create instant ACK forwarding channel (sends client addr with packet)
     let (instant_tx, mut instant_rx) =
@@ -130,7 +132,7 @@ pub async fn run_sender_with_config(
         });
     }
 
-    let mut recv_buf = vec![0u8; crate::protocol::MTU];
+    let mut recv_buf = vec![0u8; srtla_protocol::MTU];
     let mut housekeeping_timer = time::interval_at(
         Instant::now() + Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
         Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
@@ -155,10 +157,10 @@ pub async fn run_sender_with_config(
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
     // Enhanced selection as an admission gate.
-    let mut weak_link_filter = selection::classifier::WeakLinkFilter::new();
+    let mut weak_link_filter = srtla_core::selection::classifier::WeakLinkFilter::new();
     // Per-link CC soft-cap controller. `cc_target_bps` feeds the soft-cap
     // multiplier and in-flight cap; `loss_degraded` feeds the loss gate.
-    let mut link_cc_controller = selection::link_cc::LinkCcController::new();
+    let mut link_cc_controller = srtla_core::selection::link_cc::LinkCcController::new();
 
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
@@ -170,9 +172,10 @@ pub async fn run_sender_with_config(
         let classic = config.mode().is_classic();
         if let Err(err) = handle_housekeeping(
             &mut connections,
+            &mut conn_io,
             &mut reg,
             classic,
-            crate::utils::now_ms(),
+            srtla_core::utils::now_ms(),
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
@@ -195,6 +198,7 @@ pub async fn run_sender_with_config(
                             res,
                             &mut recv_buf,
                             &mut connections,
+                            &conn_io,
                             &mut last_selected_idx,
                             &mut seq_tracker,
                             &mut last_client_addr,
@@ -206,6 +210,7 @@ pub async fn run_sender_with_config(
                         drain_packet_queue(
                             &mut packet_rx,
                             &mut connections,
+                            &conn_io,
                             &mut reg,
                             &instant_tx,
                             last_client_addr,
@@ -221,6 +226,7 @@ pub async fn run_sender_with_config(
                             handle_uplink_packet(
                                 packet,
                                 &mut connections,
+                                &conn_io,
                                 &mut reg,
                                 &instant_tx,
                                 last_client_addr,
@@ -231,6 +237,7 @@ pub async fn run_sender_with_config(
                             drain_packet_queue(
                                 &mut packet_rx,
                                 &mut connections,
+                                &conn_io,
                                 &mut reg,
                                 &instant_tx,
                                 last_client_addr,
@@ -246,9 +253,10 @@ pub async fn run_sender_with_config(
                         let classic = config.mode().is_classic();
                         if let Err(err) = handle_housekeeping(
                             &mut connections,
+                            &mut conn_io,
                             &mut reg,
                             classic,
-                            crate::utils::now_ms(),
+                            srtla_core::utils::now_ms(),
                             &mut all_failed_at,
                             &mut reader_handles,
                             &packet_tx,
@@ -261,7 +269,7 @@ pub async fn run_sender_with_config(
                         // for selection to consume, and surface via stats.
                         let classification = weak_link_filter.classify(&connections);
                         let link_cc_snapshots = link_cc_controller
-                            .tick_all(&connections, crate::utils::now_ms());
+                            .tick_all(&connections, srtla_core::utils::now_ms());
                         for conn in connections.iter_mut() {
                             conn.weak = classification
                                 .per_link
@@ -271,7 +279,7 @@ pub async fn run_sender_with_config(
                                 .unwrap_or(false);
                             let cc_snap = link_cc_snapshots.get(&conn.conn_id);
                             conn.cc_backing_off = cc_snap
-                                .map(|s| s.state == selection::link_cc::CcState::BackingOff)
+                                .map(|s| s.state == srtla_core::selection::link_cc::CcState::BackingOff)
                                 .unwrap_or(false);
                             conn.cc_target_bps = cc_snap.map(|s| s.target_bps).unwrap_or(0);
                             conn.loss_degraded =
@@ -298,6 +306,7 @@ pub async fn run_sender_with_config(
                             info!("applying queued connection changes: {} IPs", new_ips.len());
                             apply_connection_changes(
                                 &mut connections,
+                                &mut conn_io,
                                 &new_ips,
                                 &changes.receiver_host,
                                 changes.receiver_port,
@@ -306,7 +315,7 @@ pub async fn run_sender_with_config(
                                 &binder,
                             ).await;
                             info!("connection changes applied successfully");
-                            sync_readers(&connections, &mut reader_handles, &packet_tx);
+                            sync_readers(&connections, &conn_io, &mut reader_handles, &packet_tx);
                         }
 
                         status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
@@ -315,11 +324,12 @@ pub async fn run_sender_with_config(
                             status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                         }
 
-                        sync_readers(&connections, &mut reader_handles, &packet_tx);
+                        sync_readers(&connections, &conn_io, &mut reader_handles, &packet_tx);
                         let config_snap = config.snapshot();
                         drain_packet_queue(
                             &mut packet_rx,
                             &mut connections,
+                            &conn_io,
                             &mut reg,
                             &instant_tx,
                             last_client_addr,
@@ -331,7 +341,7 @@ pub async fn run_sender_with_config(
                     }
                     $($sighup_branch)*
                     _ = batch_flush_timer.tick() => {
-                        flush_all_batches(&mut connections).await;
+                        flush_all_batches(&mut connections, &conn_io).await;
                     }
                 }
             }
@@ -370,6 +380,7 @@ pub async fn run_sender_with_config(
             drain_packet_queue(
                 &mut packet_rx,
                 &mut connections,
+                &conn_io,
                 &mut reg,
                 &instant_tx,
                 last_client_addr,

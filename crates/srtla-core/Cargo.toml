@@ -1,0 +1,30 @@
+[package]
+name = "srtla-core"
+version = "3.0.0"
+edition = "2024"
+description = "Pure sans-IO core for the SRTLA sender: connection state, path selection, registration, congestion control"
+license = "MIT"
+authors = ["Thomas Lekanger <mail@datagutt.no>"]
+repository = "https://github.com/irlserver/srtla_send"
+
+[dependencies]
+srtla-protocol = { path = "../srtla-protocol" }
+rand = "0.9"
+rustc-hash = "2.1"
+smallvec = "=2.0.0-alpha.12"
+tracing = "0.1"
+# Only pulled in by the test-internals feature: advance_test_clock() in the core
+# test-helpers surface calls tokio::time::advance, which must compile even in a
+# non-test build when a downstream crate enables the feature for its own tests.
+tokio = { version = "1.49", default-features = false, optional = true }
+
+[dev-dependencies]
+# The inline module tests spin up a small runtime; separate from the optional
+# dep above so `cargo test -p srtla-core` always has rt + macros available.
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+
+[features]
+# Exposes the test-only surface (public struct fields, construction helpers,
+# pub(crate) predicates) so the parent srtla_send crate can drive core types
+# from its own cross-crate tests.
+test-internals = ["dep:tokio", "tokio/time", "tokio/test-util"]

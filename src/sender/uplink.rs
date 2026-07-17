@@ -1,16 +1,33 @@
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
+use srtla_core::connection::SrtlaConnection;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::warn;
 
-use crate::connection::SrtlaConnection;
-use crate::connection::batch_recv::{BatchUdpSocket, RecvMmsgBuffer};
+use crate::net::{BatchUdpSocket, RecvMmsgBuffer, UplinkBinder};
 
 pub type ConnectionId = u64;
+
+/// The I/O half of an uplink, lifted out of the pure [`SrtlaConnection`] so the
+/// connection owns no socket. Held shell-side in a [`ConnIoMap`] keyed by
+/// `conn_id` — the same stable-id lifecycle as [`ReaderHandle`]s, so no index
+/// stays in lockstep with the connections vec. `binder`/`remote` are retained
+/// for reconnect, which re-creates the socket in place.
+pub struct ConnIo {
+    pub socket: Arc<BatchUdpSocket>,
+    pub binder: Arc<dyn UplinkBinder>,
+    pub remote: SocketAddr,
+}
+
+/// Shell-owned map from `conn_id` to its [`ConnIo`]. Lives entirely inside the
+/// single event-loop task and is only ever accessed serially, so a plain
+/// `HashMap` (not a concurrent map) is both correct and cheapest.
+pub type ConnIoMap = HashMap<ConnectionId, ConnIo>;
 
 pub struct UplinkPacket {
     pub conn_id: ConnectionId,
@@ -86,20 +103,26 @@ pub fn spawn_reader(
 
 pub fn sync_readers(
     connections: &[SrtlaConnection],
+    conn_io: &ConnIoMap,
     readers: &mut HashMap<ConnectionId, ReaderHandle>,
     packet_tx: &UnboundedSender<UplinkPacket>,
 ) {
     let mut active_ids = HashSet::with_capacity(connections.len());
     for conn in connections {
         active_ids.insert(conn.conn_id);
-        readers.entry(conn.conn_id).or_insert_with(|| {
-            spawn_reader(
-                conn.conn_id,
-                conn.label.clone(),
-                conn.socket.clone(),
-                packet_tx.clone(),
-            )
-        });
+        // The socket now lives in the I/O map; a connection with no ConnIo
+        // entry (should not happen — they are created together) simply gets no
+        // reader until one exists.
+        if let Some(io) = conn_io.get(&conn.conn_id) {
+            readers.entry(conn.conn_id).or_insert_with(|| {
+                spawn_reader(
+                    conn.conn_id,
+                    conn.label.clone(),
+                    io.socket.clone(),
+                    packet_tx.clone(),
+                )
+            });
+        }
     }
 
     readers.retain(|conn_id, reader| {
@@ -114,6 +137,7 @@ pub fn sync_readers(
 
 pub fn restart_reader_for(
     conn: &SrtlaConnection,
+    socket: Arc<BatchUdpSocket>,
     readers: &mut HashMap<ConnectionId, ReaderHandle>,
     packet_tx: &UnboundedSender<UplinkPacket>,
 ) {
@@ -122,12 +146,7 @@ pub fn restart_reader_for(
     }
     readers.insert(
         conn.conn_id,
-        spawn_reader(
-            conn.conn_id,
-            conn.label.clone(),
-            conn.socket.clone(),
-            packet_tx.clone(),
-        ),
+        spawn_reader(conn.conn_id, conn.label.clone(), socket, packet_tx.clone()),
     );
 }
 

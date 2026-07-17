@@ -1,10 +1,15 @@
+//! SRTLA wire protocol: pure, stateless packet (de)serialization.
+//!
+//! No clock, no state, no I/O — just byte layout for the SRTLA registration
+//! handshake, SRT ACK/NAK, and keepalives. The sender crate re-exports this as
+//! `crate::protocol`, so `use crate::protocol::*` keeps working there.
+
 mod builders;
 mod constants;
 mod parsers;
 mod types;
 
-// Re-export all public items for backwards compatibility
-// Consumers can still use `use crate::protocol::*`
+// Re-export the full public surface at the crate root.
 
 // Constants
 // Builders
@@ -23,8 +28,8 @@ pub use parsers::{
 // Types and helpers
 #[allow(unused_imports)]
 pub use types::{
-    ConnectionInfo, get_packet_type, get_srt_sequence_number, is_srt_ack, is_srtla_keepalive,
-    is_srtla_reg1, is_srtla_reg2, is_srtla_reg3,
+    ConnectionInfo, get_packet_type, get_srt_sequence_number, is_srt_ack, is_srt_data_retransmit,
+    is_srtla_keepalive, is_srtla_reg1, is_srtla_reg2, is_srtla_reg3,
 };
 
 #[cfg(test)]
@@ -42,7 +47,7 @@ mod tests {
             bitrate_bytes_per_sec: 2_500_000,
         };
 
-        let pkt = create_keepalive_packet_ext(info);
+        let pkt = create_keepalive_packet_ext(info, 123_456);
 
         // Verify packet length
         assert_eq!(pkt.len(), SRTLA_KEEPALIVE_EXT_LEN);
@@ -60,7 +65,7 @@ mod tests {
 
     #[test]
     fn test_standard_keepalive_no_conn_info() {
-        let pkt = create_keepalive_packet();
+        let pkt = create_keepalive_packet(123_456);
 
         // Standard keepalive should not have connection info
         assert_eq!(pkt.len(), 10);
@@ -79,14 +84,16 @@ mod tests {
             bitrate_bytes_per_sec: 1_000_000,
         };
 
-        let ext_pkt = create_keepalive_packet_ext(info);
+        // Same injected timestamp on both so the ext/std comparison below is
+        // exact (this crate no longer reads a clock).
+        let ext_pkt = create_keepalive_packet_ext(info, 123_456);
 
         // Old receiver behavior: only reads first 10 bytes
         let timestamp_from_ext = extract_keepalive_timestamp(&ext_pkt);
         assert!(timestamp_from_ext.is_some());
 
         // Compare with standard keepalive timestamp
-        let std_pkt = create_keepalive_packet();
+        let std_pkt = create_keepalive_packet(123_456);
         let timestamp_from_std = extract_keepalive_timestamp(&std_pkt);
         assert!(timestamp_from_std.is_some());
 
@@ -95,6 +102,34 @@ mod tests {
             .unwrap()
             .abs_diff(timestamp_from_std.unwrap());
         assert!(diff < 1000); // Less than 1 second difference
+    }
+
+    #[test]
+    fn test_retransmit_flag_detection() {
+        // SRT data packet: MSB of the sequence word clear; second word is
+        // PP(2) O(1) KK(2) R(1) msg-number(26) — R is bit 26, i.e. 0x04 in
+        // byte 4.
+        let mut pkt = [0u8; 16];
+        pkt[0..4].copy_from_slice(&100u32.to_be_bytes());
+        assert!(!is_srt_data_retransmit(&pkt), "original send has R clear");
+
+        pkt[4] |= 0x04;
+        assert!(is_srt_data_retransmit(&pkt), "R bit marks a retransmission");
+
+        // PP/O/KK bits alone must not read as a retransmit.
+        let mut flags = [0u8; 16];
+        flags[0..4].copy_from_slice(&100u32.to_be_bytes());
+        flags[4] = 0xf8; // PP=11 O=1 KK=11, R=0
+        assert!(!is_srt_data_retransmit(&flags));
+
+        // Control packets (MSB set) are never retransmits.
+        let mut ctrl = [0u8; 16];
+        ctrl[0] = 0x80;
+        ctrl[4] = 0x04;
+        assert!(!is_srt_data_retransmit(&ctrl));
+
+        // Truncated buffers are rejected.
+        assert!(!is_srt_data_retransmit(&pkt[..7]));
     }
 
     #[test]

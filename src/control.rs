@@ -13,7 +13,7 @@
 //! - `get_stats` → per-link telemetry
 //!
 //! Keyframe / critical-packet hints travel on a dedicated UDP sidecar
-//! (`crate::priority`) rather than over this control socket. The sidecar
+//! (`srtla_core::priority`) rather than over this control socket. The sidecar
 //! shares the network stack with the SRT data path so priority events
 //! are ordered tightly against the packets they describe.
 //!
@@ -24,12 +24,12 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use srtla_core::mode::SchedulingMode;
+use srtla_core::priority::CriticalWindow;
 #[cfg(unix)]
 use tokio::sync::mpsc;
 
 use crate::config::DynamicConfig;
-use crate::mode::SchedulingMode;
-use crate::priority::CriticalWindow;
 use crate::stats::SharedStats;
 #[cfg(unix)]
 use crate::subscriptions::SubscriptionHub;

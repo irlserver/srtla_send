@@ -5,8 +5,7 @@
 #![allow(clippy::assertions_on_constants, clippy::needless_range_loop)]
 
 use smallvec::SmallVec;
-
-use crate::protocol::*;
+use srtla_protocol::*;
 
 #[tokio::test]
 async fn test_protocol_packet_roundtrip() {
@@ -23,7 +22,7 @@ async fn test_protocol_packet_roundtrip() {
     assert_eq!(get_packet_type(&reg2_packet), Some(SRTLA_TYPE_REG2));
 
     // Test keepalive packet creation and timestamp extraction
-    let keepalive_packet = create_keepalive_packet();
+    let keepalive_packet = create_keepalive_packet(srtla_core::utils::now_ms());
     assert!(is_srtla_keepalive(&keepalive_packet));
     assert_eq!(
         get_packet_type(&keepalive_packet),
@@ -213,7 +212,7 @@ fn test_packet_validators_comprehensive() {
     let reg2_packet = create_reg2_packet(&reg2_id);
 
     let reg3_packet = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
-    let keepalive_packet = create_keepalive_packet();
+    let keepalive_packet = create_keepalive_packet(srtla_core::utils::now_ms());
 
     let mut ack_packet = vec![0u8; 20];
     ack_packet[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());

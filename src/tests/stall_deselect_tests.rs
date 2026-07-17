@@ -3,30 +3,34 @@
 //! The guard excludes a link whose in-flight backlog is high while its last
 //! delivery proof (earned-ACK or keepalive-RTT sample) has gone stale, but only
 //! when a healthier link can carry the traffic. It is a selection penalty only:
-//! it never mutates liveness state, and a link recovers on its own once a fresh
-//! delivery proof lands (no blind reprobe).
+//! it never mutates liveness state. Gating latches asymmetrically: it engages
+//! the instant the stall signal fires, and releases only after an
+//! uninterrupted run of fresh delivery proof spanning the rejoin dwell (no
+//! blind reprobe, no single-sample flap). The staleness window is
+//! RTT-adaptive between a floor and the configured ceiling.
 
 #[cfg(test)]
 mod tests {
+    use srtla_core::mode::SchedulingMode;
+    use srtla_core::selection::select_connection_idx;
+    use srtla_core::utils::now_ms;
+
     use crate::config::{ConfigSnapshot, STALL_ACK_STALE_MS, STALL_MIN_IN_FLIGHT_PACKETS};
-    use crate::mode::SchedulingMode;
-    use crate::sender::select_connection_idx;
     use crate::test_helpers::create_test_connections;
-    use crate::utils::now_ms;
 
     /// Mark a connection as a stalled black hole at `now`: a backlog at the
     /// stall threshold whose last delivery proof is older than the staleness
     /// window. Kept at exactly the threshold so its raw capacity score
     /// (`window / (in_flight + 1)`) still *beats* a healthier link carrying a
     /// larger backlog — that way a pick against it proves the guard, not score.
-    fn make_stalled(conn: &mut crate::connection::SrtlaConnection, now: u64) {
+    fn make_stalled(conn: &mut srtla_core::connection::SrtlaConnection, now: u64) {
         conn.in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS;
         conn.last_ack_or_rtt_sample_ms = now.saturating_sub(STALL_ACK_STALE_MS + 1000);
     }
 
     /// A busy-but-healthy link: a larger backlog than [`make_stalled`] (so it
     /// loses on raw score) with a fresh delivery proof (so it is never stalled).
-    fn make_healthy_busy(conn: &mut crate::connection::SrtlaConnection, now: u64) {
+    fn make_healthy_busy(conn: &mut srtla_core::connection::SrtlaConnection, now: u64) {
         conn.in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS * 2;
         conn.last_ack_or_rtt_sample_ms = now;
     }
@@ -202,5 +206,270 @@ mod tests {
             !c.is_stalled(now, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS),
             "a link below the in-flight threshold must not be stalled regardless of staleness"
         );
+    }
+
+    // --- Asymmetric rejoin dwell (librist !375 field lesson: a single fresh
+    // sample flaps a still-marginal link back in and re-glitches) ---
+
+    /// Rejoin dwell for a link with no RTT baseline (effective window =
+    /// ceiling).
+    fn dwell_ms() -> u64 {
+        STALL_ACK_STALE_MS * srtla_core::config_snapshot::STALL_REJOIN_DWELL_MULT
+    }
+
+    #[test]
+    fn rejoin_requires_sustained_proof_not_a_single_sample() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        make_stalled(c, now);
+        c.update_stall_latch(now, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(
+            c.stall_latched(),
+            "latch must engage the instant the stall fires"
+        );
+        assert_eq!(c.stall_gate_events(), 1);
+
+        // Backlog drains and a single fresh proof lands: not enough.
+        c.in_flight_packets = 0;
+        c.last_ack_or_rtt_sample_ms = now;
+        c.update_stall_latch(now, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(
+            c.stall_latched(),
+            "a single fresh proof must not release the latch"
+        );
+
+        // Proof stays fresh through half the dwell: still latched.
+        let mid = now + dwell_ms() / 2;
+        c.last_ack_or_rtt_sample_ms = mid;
+        c.update_stall_latch(mid, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(c.stall_latched(), "mid-dwell the latch must still hold");
+
+        // Proof sustained for the full dwell: released.
+        let done = now + dwell_ms();
+        c.last_ack_or_rtt_sample_ms = done;
+        c.update_stall_latch(done, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(
+            !c.stall_latched(),
+            "sustained proof across the dwell must release the latch"
+        );
+        assert_eq!(
+            c.stall_gate_events(),
+            1,
+            "release must not bump the counter"
+        );
+    }
+
+    #[test]
+    fn proof_lapse_resets_the_rejoin_dwell() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        make_stalled(c, now);
+        c.update_stall_latch(now, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        c.in_flight_packets = 0;
+
+        // Recovery run starts...
+        let t1 = now + 100;
+        c.last_ack_or_rtt_sample_ms = t1;
+        c.update_stall_latch(t1, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(c.stall_latched());
+
+        // ...but proof goes stale mid-run (no new sample for a full window).
+        let t2 = t1 + STALL_ACK_STALE_MS;
+        c.update_stall_latch(t2, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(c.stall_latched(), "stale proof mid-run must keep the latch");
+
+        // A new run starts at t3; even though total elapsed since t1 exceeds
+        // the dwell, release counts from t3 — the run must be uninterrupted.
+        let t3 = t2 + 100;
+        c.last_ack_or_rtt_sample_ms = t3;
+        c.update_stall_latch(t3, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        let before = t3 + dwell_ms() - 1;
+        c.last_ack_or_rtt_sample_ms = before;
+        c.update_stall_latch(before, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(
+            c.stall_latched(),
+            "the dwell must restart from the new run, not the first sample ever"
+        );
+        let after = t3 + dwell_ms();
+        c.last_ack_or_rtt_sample_ms = after;
+        c.update_stall_latch(after, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(!c.stall_latched());
+    }
+
+    #[test]
+    fn backlog_drain_alone_does_not_release_the_latch() {
+        // Cumulative SRT ACKs delivered via the healthy links drain the stalled
+        // link's in-flight below the threshold, clearing raw `is_stalled`
+        // without the link proving anything. The latch must hold and the link
+        // must stay gated in selection.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        make_stalled(&mut conns[0], now);
+        make_healthy_busy(&mut conns[1], now);
+
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].stall_gated);
+
+        // Backlog drains; delivery proof stays ancient. `later` stays inside
+        // CONN_TIMEOUT (5 s) so the healthy sibling remains schedulable.
+        conns[0].in_flight_packets = 0;
+        let later = now + 4000;
+        conns[0].last_received = Some(later);
+        conns[1].last_received = Some(later);
+        conns[1].last_ack_or_rtt_sample_ms = later;
+        let selected = select_connection_idx(&mut conns, None, later, &enhanced());
+        assert!(
+            !conns[0].is_stalled(later, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS),
+            "precondition: raw stall signal cleared by the drain"
+        );
+        assert!(
+            conns[0].stall_gated,
+            "the latch must keep the drained-but-unproven link gated"
+        );
+        assert_eq!(selected, Some(1));
+    }
+
+    #[test]
+    fn disabling_the_guard_clears_the_latch() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        make_stalled(&mut conns[0], now);
+        make_healthy_busy(&mut conns[1], now);
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].stall_latched());
+
+        let off = ConfigSnapshot {
+            stall_deselect: false,
+            ..enhanced()
+        };
+        let _ = select_connection_idx(&mut conns, None, now, &off);
+        assert!(!conns[0].stall_gated, "guard off must clear the flag");
+        assert!(!conns[0].stall_latched(), "guard off must clear the latch");
+    }
+
+    // --- RTT-adaptive staleness window (librist !375 field lesson: the
+    // reaction window is the glitch window) ---
+
+    #[test]
+    fn adaptive_stale_window_scales_with_smoothed_rtt() {
+        use srtla_core::config_snapshot::STALL_STALE_FLOOR_MS;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let c = &mut conns[0];
+
+        // No RTT baseline yet: fall back to the ceiling.
+        assert_eq!(
+            c.effective_stall_stale_ms(STALL_ACK_STALE_MS),
+            STALL_ACK_STALE_MS
+        );
+
+        // Fast link: 4x RTT sits under the floor, so the floor wins — a
+        // routine 400-800 ms cellular HARQ stall must never gate a link.
+        c.rtt.kalman_rtt.update(50.0);
+        assert_eq!(
+            c.effective_stall_stale_ms(STALL_ACK_STALE_MS),
+            STALL_STALE_FLOOR_MS
+        );
+
+        // Mid-range link: pure 4x RTT — reacts in 1.6 s instead of the fixed
+        // 3 s the pre-adaptive guard always waited.
+        c.rtt.kalman_rtt.reset();
+        c.rtt.kalman_rtt.update(400.0);
+        assert_eq!(c.effective_stall_stale_ms(STALL_ACK_STALE_MS), 1600);
+
+        // Very slow link: capped at the configured ceiling.
+        c.rtt.kalman_rtt.reset();
+        c.rtt.kalman_rtt.update(2000.0);
+        assert_eq!(
+            c.effective_stall_stale_ms(STALL_ACK_STALE_MS),
+            STALL_ACK_STALE_MS
+        );
+    }
+
+    // --- Duplicate-packet probing ---
+
+    #[test]
+    fn probe_cadence_is_one_in_n() {
+        use srtla_core::config_snapshot::STALL_PROBE_ONE_IN_N;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let c = &mut conns[0];
+
+        let mut fired = 0;
+        for _ in 0..(STALL_PROBE_ONE_IN_N * 3) {
+            if c.stall_probe_due() {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 3, "exactly one probe per N routed packets");
+    }
+
+    #[tokio::test]
+    async fn srtla_ack_credits_the_arrival_link_first() {
+        // With duplicate probing the same sequence sits in two links' packet
+        // logs (unique copy + probe). The SRTLA ACK returns on the link that
+        // delivered, so proof must be stamped on the ARRIVAL link — a
+        // first-log-wins scan would let the healthy link's ACK falsely warm the
+        // gated link's rejoin dwell.
+        use srtla_core::connection::SrtlaIncoming;
+
+        use crate::sender::{SequenceTracker, process_connection_events};
+
+        let mut conns = create_test_connections(2).await;
+        let now = now_ms();
+        let seq: u32 = 4242;
+
+        // Unique copy on link 0, probe copy on link 1 (gated).
+        conns[0].register_packet(seq as i32, now);
+        conns[1].register_packet(seq as i32, now);
+        conns[0].last_ack_or_rtt_sample_ms = 1;
+        conns[1].last_ack_or_rtt_sample_ms = 1;
+
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let seq_tracker = SequenceTracker::new();
+        let incoming = SrtlaIncoming {
+            srtla_ack_numbers: smallvec::smallvec![seq],
+            read_any: true,
+            ..Default::default()
+        };
+
+        // ACK arrives on link 1 — the probe link must earn the proof.
+        process_connection_events(
+            1,
+            &mut conns,
+            None,
+            &listener,
+            &seq_tracker,
+            false,
+            incoming,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            conns[1].last_ack_or_rtt_sample_ms > 1,
+            "arrival link must be credited with delivery proof"
+        );
+        assert_eq!(
+            conns[0].last_ack_or_rtt_sample_ms, 1,
+            "the other copy's owner must not be falsely credited"
+        );
+        assert_eq!(
+            conns[0].in_flight_packets, 1,
+            "the unique copy stays in flight until its own ACK clears it"
+        );
+        assert_eq!(conns[1].in_flight_packets, 0);
     }
 }
