@@ -472,4 +472,83 @@ mod tests {
         );
         assert_eq!(conns[1].in_flight_packets, 0);
     }
+
+    // --- Cross-mechanism blackout immunity (librist !375 field lesson,
+    // commit 8cf11e11: one leg RTT-muted while the other stalled left the
+    // balancer with no carrier at all — a self-sustaining both-legs
+    // starvation). Two different exclusion mechanisms must never combine
+    // into an empty candidate pool. ---
+
+    #[test]
+    fn latched_link_with_timed_out_sibling_never_blacks_out() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        make_stalled(&mut conns[0], now);
+        make_healthy_busy(&mut conns[1], now);
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].stall_gated);
+        assert_eq!(conns[0].stall_gate_events(), 1);
+
+        // The only unlatched sibling dies. The gate must stand down (its
+        // "any healthy" guard fails), leaving the latched link selectable —
+        // better a stalled carrier than none.
+        conns[1].last_received =
+            Some(now.saturating_sub(srtla_protocol::CONN_TIMEOUT * 1000 + 1000));
+        let selected = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert_eq!(
+            selected,
+            Some(0),
+            "with the sibling timed out, the latched link must carry the stream"
+        );
+        assert!(
+            !conns[0].stall_gated,
+            "gate must yield when it is the last carrier"
+        );
+        assert!(
+            conns[0].stall_latched(),
+            "the latch itself must persist so the link re-gates the moment a carrier returns"
+        );
+
+        // Forced carrying must not re-count or re-log the latch every pass
+        // (the applied gate is separate state from the latched desire).
+        for _ in 0..5 {
+            let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        }
+        assert_eq!(
+            conns[0].stall_gate_events(),
+            1,
+            "a latch held through carrier-loss fallback must count as ONE engagement"
+        );
+    }
+
+    #[test]
+    fn stall_gate_and_in_flight_cap_never_combine_into_blackout() {
+        use srtla_core::selection::enhanced::in_flight_cap_exceeded;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        make_stalled(&mut conns[0], now);
+        // Healthy by the latch metric (fresh proof) but over its BDP cap:
+        // a tiny CC target caps in-flight at 1 packet against the 64 carried.
+        make_healthy_busy(&mut conns[1], now);
+        conns[1].cc_target_bps = 100_000;
+        assert!(
+            in_flight_cap_exceeded(&conns[1]),
+            "precondition: sibling must be over its in-flight cap"
+        );
+
+        // The stall gate holds (a latch-healthy sibling exists) and the cap
+        // gate must yield (no unconstrained link left) — never an empty pool.
+        let selected = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].stall_gated);
+        assert_eq!(
+            selected,
+            Some(1),
+            "the capped-but-alive link must carry the stream, not an empty pool"
+        );
+    }
 }
