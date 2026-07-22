@@ -21,6 +21,7 @@ mod tests {
             false,
             crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             crate::config::STALL_ACK_STALE_MS,
+            crate::config::CONN_TIMEOUT_MS,
         );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
@@ -33,11 +34,21 @@ mod tests {
             true,
             crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             crate::config::STALL_ACK_STALE_MS,
+            crate::config::CONN_TIMEOUT_MS,
         );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);
         assert!(!snap.quality_enabled);
         assert!(!snap.stall_deselect); // no_stall_deselect=true disables it
+    }
+
+    #[test]
+    fn test_conn_timeout_clamped() {
+        let config = DynamicConfig::new();
+        assert_eq!(config.set_conn_timeout_ms(100), 1_000, "floor");
+        assert_eq!(config.set_conn_timeout_ms(120_000), 60_000, "ceiling");
+        assert_eq!(config.set_conn_timeout_ms(9_000), 9_000);
+        assert_eq!(config.snapshot().conn_timeout_ms, 9_000);
     }
 
     #[test]

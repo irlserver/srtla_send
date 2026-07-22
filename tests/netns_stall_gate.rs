@@ -63,6 +63,10 @@ fn test_stall_gate_latches_and_rejoins_after_dwell() {
 
     let stderr: String = output.srtla_send_stderr.join("\n");
     assert!(
+        stderr.contains("silence pull engaged"),
+        "black-holed link never hit the fast silence pull"
+    );
+    assert!(
         stderr.contains("stall latch engaged"),
         "black-holed link never engaged the stall latch"
     );

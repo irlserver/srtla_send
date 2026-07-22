@@ -22,6 +22,8 @@ pub struct TomlConfig {
     pub stall_min_in_flight: i32,
     /// Delivery-proof staleness window (ms) before a stall candidate is deselected.
     pub stall_ack_stale_ms: u64,
+    /// Per-link liveness timeout (ms); silence past this re-registers the link.
+    pub conn_timeout_ms: u64,
 
     // --- Congestion control ---
     /// RTT velocity threshold (ms/sample) above which window recovery is halved.
@@ -54,6 +56,7 @@ impl Default for TomlConfig {
             no_stall_deselect: false,
             stall_min_in_flight: crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             stall_ack_stale_ms: crate::config::STALL_ACK_STALE_MS,
+            conn_timeout_ms: crate::config::CONN_TIMEOUT_MS,
             rtt_velocity_gate: 2.0,
             warming_rtt_probes: 2,
             warming_timeout_ms: 5_000,

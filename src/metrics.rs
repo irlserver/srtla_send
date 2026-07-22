@@ -190,6 +190,21 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
         .ok();
     }
 
+    writeln!(
+        out,
+        "# HELP srtla_send_link_silence_pulls cumulative fast silence-pull engagements"
+    )
+    .ok();
+    writeln!(out, "# TYPE srtla_send_link_silence_pulls counter").ok();
+    for link in &snap.links {
+        writeln!(
+            out,
+            r#"srtla_send_link_silence_pulls{{ip="{}"}} {}"#,
+            link.ip, link.silence_pulls
+        )
+        .ok();
+    }
+
     // Aggregate gauges.
     writeln!(
         out,

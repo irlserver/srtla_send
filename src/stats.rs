@@ -148,12 +148,21 @@ pub struct LinkStats {
     // whether this link is pulled out of rotation right now, the counter says
     // how often it has happened over the link's life — the pair is what lets a
     // field run distinguish one clean failover from a flapping link.
-    /// Whether this link is currently stall-gated (out of the payload
-    /// rotation; carries keepalives plus a 1-in-N duplicate-packet probe
-    /// trickle until its rejoin dwell completes).
+    /// Whether this link's stall LATCH is engaged (out of the payload
+    /// rotation until its rejoin dwell completes; carries keepalives plus a
+    /// 1-in-N duplicate-packet probe trickle). Deliberately sourced from the
+    /// sticky latch, not the routing flag: the sub-second transient silence
+    /// pull is invisible here, so a capacity-tracking consumer (belacoder)
+    /// is not whipsawed by routine HARQ pauses sampled at the 1 s stats
+    /// cadence.
     pub stall_gated: bool,
     /// Cumulative stall-latch engagements since the link was created.
     pub stall_gate_events: u64,
+    /// Cumulative fast silence-pull engagements (a loaded link heard nothing
+    /// for ~2 RTTs and was transiently skipped). Ticks on routine cellular
+    /// HARQ stalls — rate telemetry, not an alarm; compare against
+    /// `stall_gate_events` to tell micro-stalls from real black holes.
+    pub silence_pulls: u64,
 
     // --- In-flight cap soft admission gate ---
     //
@@ -351,8 +360,9 @@ impl SharedStats {
                 cc_loss_ewma,
                 cc_loss_degraded,
                 batch_regime: conn.batch_sender.regime().as_str().to_string(),
-                stall_gated: conn.is_stall_gated(),
+                stall_gated: conn.stall_latched(),
                 stall_gate_events: conn.stall_gate_events(),
+                silence_pulls: conn.silence_pulls(),
                 in_flight_cap_packets: in_flight_cap_pkts,
                 in_flight_cap_active,
             };

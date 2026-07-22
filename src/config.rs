@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 // here so the existing `crate::config::{ConfigSnapshot, STALL_*}` paths keep
 // resolving across the codebase.
 pub use srtla_core::config_snapshot::{
-    ConfigSnapshot, STALL_ACK_STALE_MS, STALL_MIN_IN_FLIGHT_PACKETS,
+    CONN_TIMEOUT_MS, CONN_TIMEOUT_MS_MAX, CONN_TIMEOUT_MS_MIN, ConfigSnapshot, STALL_ACK_STALE_MS,
+    STALL_MIN_IN_FLIGHT_PACKETS,
 };
 use srtla_core::mode::SchedulingMode;
 use srtla_core::priority::CriticalWindow;
@@ -30,6 +31,7 @@ pub struct DynamicConfig {
     stall_deselect: Arc<AtomicBool>,
     stall_min_in_flight: Arc<AtomicI32>,
     stall_ack_stale_ms: Arc<AtomicU64>,
+    conn_timeout_ms: Arc<AtomicU64>,
 }
 
 impl Default for DynamicConfig {
@@ -46,6 +48,7 @@ impl DynamicConfig {
             stall_deselect: Arc::new(AtomicBool::new(true)),
             stall_min_in_flight: Arc::new(AtomicI32::new(STALL_MIN_IN_FLIGHT_PACKETS)),
             stall_ack_stale_ms: Arc::new(AtomicU64::new(STALL_ACK_STALE_MS)),
+            conn_timeout_ms: Arc::new(AtomicU64::new(CONN_TIMEOUT_MS)),
         }
     }
 
@@ -56,6 +59,7 @@ impl DynamicConfig {
         no_stall_deselect: bool,
         stall_min_in_flight: i32,
         stall_ack_stale_ms: u64,
+        conn_timeout_ms: u64,
     ) -> Self {
         Self {
             mode: Arc::new(AtomicU8::new(mode.as_u8())),
@@ -63,6 +67,9 @@ impl DynamicConfig {
             stall_deselect: Arc::new(AtomicBool::new(!no_stall_deselect)),
             stall_min_in_flight: Arc::new(AtomicI32::new(stall_min_in_flight)),
             stall_ack_stale_ms: Arc::new(AtomicU64::new(stall_ack_stale_ms)),
+            conn_timeout_ms: Arc::new(AtomicU64::new(
+                conn_timeout_ms.clamp(CONN_TIMEOUT_MS_MIN, CONN_TIMEOUT_MS_MAX),
+            )),
         }
     }
 
@@ -77,6 +84,7 @@ impl DynamicConfig {
             stall_deselect: self.stall_deselect.load(Ordering::Relaxed),
             stall_min_in_flight: self.stall_min_in_flight.load(Ordering::Relaxed),
             stall_ack_stale_ms: self.stall_ack_stale_ms.load(Ordering::Relaxed),
+            conn_timeout_ms: self.conn_timeout_ms.load(Ordering::Relaxed),
         }
     }
 
@@ -99,6 +107,17 @@ impl DynamicConfig {
     /// Toggle the stalled-link deselect guard at runtime.
     pub fn set_stall_deselect(&self, enabled: bool) {
         self.stall_deselect.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Set the per-link liveness timeout at runtime, clamped to
+    /// [`CONN_TIMEOUT_MS_MIN`], [`CONN_TIMEOUT_MS_MAX`]. Returns the applied
+    /// value. Intended for a latency-aware client (belacoder) to scale the
+    /// window to `max(default, 2 x SRT latency)` so a link outage the
+    /// receiver buffer can absorb resumes warm instead of re-handshaking.
+    pub fn set_conn_timeout_ms(&self, ms: u64) -> u64 {
+        let applied = ms.clamp(CONN_TIMEOUT_MS_MIN, CONN_TIMEOUT_MS_MAX);
+        self.conn_timeout_ms.store(applied, Ordering::Relaxed);
+        applied
     }
 }
 
@@ -143,6 +162,7 @@ mod tests {
             false,
             STALL_MIN_IN_FLIGHT_PACKETS,
             STALL_ACK_STALE_MS,
+            CONN_TIMEOUT_MS,
         );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);

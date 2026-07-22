@@ -98,6 +98,14 @@ struct Cli {
     /// it; links without an RTT baseline use the ceiling directly.
     #[arg(long = "stall-ack-stale-ms", default_value_t = config::STALL_ACK_STALE_MS)]
     stall_ack_stale_ms: u64,
+    /// Per-link liveness timeout (ms): silence past this tears the link down
+    /// and re-registers it. Also settable at runtime over JSON-RPC
+    /// (`set_conn_timeout`) so a latency-aware client can scale it to
+    /// `max(default, 2 x latency budget)` — an outage the receiver buffer
+    /// can absorb should resume warm, not re-handshake. Clamped to
+    /// 1000..=60000.
+    #[arg(long = "conn-timeout-ms", default_value_t = config::CONN_TIMEOUT_MS)]
+    conn_timeout_ms: u64,
 
     /// UDP bind address for the keyframe priority sidecar. The encoder
     /// front-end sends 5-byte datagrams here to open a critical routing
@@ -171,6 +179,7 @@ async fn main() -> Result<()> {
         args.no_stall_deselect,
         args.stall_min_in_flight,
         args.stall_ack_stale_ms,
+        args.conn_timeout_ms,
     );
 
     // Create shared stats for telemetry export

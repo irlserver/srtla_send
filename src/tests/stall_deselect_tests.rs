@@ -551,4 +551,171 @@ mod tests {
             "the capped-but-alive link must carry the stream, not an empty pool"
         );
     }
+
+    // --- Fast silence pull (librist c7a578d1's fast routing tier: pull a
+    // briefly-mute loaded link right now, readmit the moment it speaks;
+    // sustained silence escalates into the sticky latch) ---
+
+    #[test]
+    fn loaded_silent_link_is_pulled_and_readmitted_when_it_speaks() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        // Loaded, delivery proof fresh (so the latch is out of the picture),
+        // but nothing received for longer than the pull window.
+        conns[0].in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS;
+        conns[0].last_ack_or_rtt_sample_ms = now;
+        conns[0].last_received = Some(now - 300);
+        make_healthy_busy(&mut conns[1], now);
+
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].stall_gated, "a loaded mute link must be pulled");
+        assert!(!conns[0].stall_latched(), "the fast tier must not latch");
+        assert_eq!(conns[0].silence_pulls(), 1);
+
+        // Any inbound byte readmits it instantly — no dwell on the fast tier.
+        conns[0].last_received = Some(now);
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(
+            !conns[0].stall_gated,
+            "a byte must clear the pull instantly"
+        );
+
+        // A second stall counts as a second engagement.
+        conns[0].last_received = Some(now - 300);
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].stall_gated);
+        assert_eq!(conns[0].silence_pulls(), 2);
+    }
+
+    #[test]
+    fn idle_link_keepalive_gaps_are_never_pulled() {
+        // An idle link's only inbound is the 1 s keepalive echo; a 900 ms gap
+        // is routine there and must never read as a stall.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        conns[0].in_flight_packets = 0;
+        conns[0].last_received = Some(now - 900);
+        make_healthy_busy(&mut conns[1], now);
+
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(!conns[0].stall_gated, "idle links are never silence-pulled");
+        assert_eq!(conns[0].silence_pulls(), 0);
+    }
+
+    #[test]
+    fn silence_window_scales_with_rtt_and_caps_at_stale_window() {
+        use srtla_core::config_snapshot::SILENCE_PULL_FLOOR_MS;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let c = &mut conns[0];
+
+        // No RTT baseline: the floor.
+        assert_eq!(
+            c.silence_pull_window_ms(STALL_ACK_STALE_MS),
+            SILENCE_PULL_FLOOR_MS
+        );
+        // Fast link: 2x RTT sits under the floor, floor wins.
+        c.rtt.kalman_rtt.update(50.0);
+        assert_eq!(
+            c.silence_pull_window_ms(STALL_ACK_STALE_MS),
+            SILENCE_PULL_FLOOR_MS
+        );
+        // Satellite-class link: 2x RTT, so a silence shorter than the path's
+        // own round trip never pulls.
+        c.rtt.kalman_rtt.reset();
+        c.rtt.kalman_rtt.update(300.0);
+        assert_eq!(c.silence_pull_window_ms(STALL_ACK_STALE_MS), 600);
+        // Beyond the staleness window the latch owns the decision.
+        c.rtt.kalman_rtt.reset();
+        c.rtt.kalman_rtt.update(2000.0);
+        assert_eq!(
+            c.silence_pull_window_ms(STALL_ACK_STALE_MS),
+            STALL_ACK_STALE_MS
+        );
+    }
+
+    #[test]
+    fn pull_holds_through_backlog_drain_and_escalates_to_latch() {
+        // Under a real blackhole, cumulative SRT ACKs (via the healthy link)
+        // drain the pulled link's backlog within an RTT. The pull must HOLD
+        // through that drain (releasing on drain would refill the hole in a
+        // duty cycle), and sustained silence must escalate into the latch so
+        // recovery goes through the dwell and probes, not a cold readmit.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+
+        conns[0].in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS;
+        conns[0].last_received = Some(now - 300);
+        conns[0].last_ack_or_rtt_sample_ms = now - 300;
+        make_healthy_busy(&mut conns[1], now);
+
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].stall_gated && !conns[0].stall_latched());
+
+        // Backlog drains; the link is still mute. The pull must hold.
+        conns[0].in_flight_packets = 0;
+        let t1 = now + 500;
+        conns[1].last_received = Some(t1);
+        conns[1].last_ack_or_rtt_sample_ms = t1;
+        let _ = select_connection_idx(&mut conns, None, t1, &enhanced());
+        assert!(
+            conns[0].stall_gated,
+            "the pull must hold through a backlog drain, not readmit a mute link"
+        );
+        assert!(!conns[0].stall_latched());
+
+        // Proof goes fully stale while the pull is held: escalate to latch.
+        let t2 = now + STALL_ACK_STALE_MS;
+        conns[1].last_received = Some(t2);
+        conns[1].last_ack_or_rtt_sample_ms = t2;
+        let _ = select_connection_idx(&mut conns, None, t2, &enhanced());
+        assert!(
+            conns[0].stall_latched(),
+            "sustained silence must escalate the pull into the sticky latch"
+        );
+        assert_eq!(conns[0].stall_gate_events(), 1);
+
+        // The link speaks: the pull clears but the LATCH governs readmission
+        // (dwell), so one byte no longer flaps payload back onto it.
+        conns[0].last_received = Some(t2);
+        conns[0].last_ack_or_rtt_sample_ms = t2;
+        let _ = select_connection_idx(&mut conns, None, t2, &enhanced());
+        assert!(
+            conns[0].stall_gated,
+            "after escalation, a single byte must not readmit the link"
+        );
+    }
+
+    // --- Runtime-scaled liveness timeout (librist c7a578d1's slow half) ---
+
+    #[test]
+    fn conn_timeout_is_runtime_scaled() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+
+        conns[0].last_received = Some(now - 8_000);
+
+        // Default 5 s window: 8 s of silence is a teardown.
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].is_timed_out(now));
+
+        // A latency-aware client scaled the window to 12 s: the same silence
+        // now rides through and the session resumes warm.
+        let scaled = ConfigSnapshot {
+            conn_timeout_ms: 12_000,
+            ..enhanced()
+        };
+        let _ = select_connection_idx(&mut conns, None, now, &scaled);
+        assert!(
+            !conns[0].is_timed_out(now),
+            "the scaled liveness window must reach is_timed_out callers"
+        );
+    }
 }

@@ -74,21 +74,39 @@ pub fn select_connection_idx(
     }
 }
 
-/// Drive every link's stall latch and recompute its `stall_gated` flag.
+/// Drive every link's stall latch and fast silence pull, and recompute its
+/// `stall_gated` flag.
 ///
-/// A link is gated when the guard is on, the link's latch is engaged
-/// ([`SrtlaConnection::update_stall_latch`] — engages the instant
-/// [`SrtlaConnection::is_stalled`] fires, releases only after a sustained run
-/// of fresh delivery proof), and at least one un-latched schedulable link
-/// exists to carry the traffic. That "any healthy" guard guarantees we never
-/// gate the last usable link, so the mode selectors can treat a gated link as
-/// unschedulable without a fallback pass. When the guard is off, flag and
-/// latch are both cleared, restoring byte-for-byte baseline selection.
+/// Two tiers share the flag. The sticky latch
+/// ([`SrtlaConnection::update_stall_latch`]) engages the instant
+/// [`SrtlaConnection::is_stalled`] fires and releases only after a sustained
+/// run of fresh delivery proof. The fast silence pull
+/// ([`SrtlaConnection::is_briefly_silent`]) is transient: a loaded link that
+/// has heard nothing for ~2 RTTs is skipped right now and readmitted the
+/// moment any byte arrives — it reacts an order of magnitude sooner than the
+/// latch, so a sub-second stall (a HARQ pause, a handover) stops receiving
+/// payload almost immediately instead of for the whole staleness window.
+///
+/// A link is gated only when at least one un-latched, un-pulled schedulable
+/// link exists to carry the traffic. That "any healthy" guard guarantees we
+/// never gate the last usable link, so the mode selectors can treat a gated
+/// link as unschedulable without a fallback pass. When the guard is off,
+/// flag, latch, and pull are all cleared, restoring byte-for-byte baseline
+/// selection.
+///
+/// Also refreshes each link's `conn_timeout_ms` from the snapshot, so the
+/// runtime-tunable liveness window reaches `is_timed_out` callers that do
+/// not carry a config.
 #[inline]
 fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config: &ConfigSnapshot) {
+    for c in conns.iter_mut() {
+        c.conn_timeout_ms = config.conn_timeout_ms;
+    }
+
     if !config.stall_deselect {
         for c in conns.iter_mut() {
             c.stall_gated = false;
+            c.silence_pulled = false;
             c.clear_stall_latch();
         }
         return;
@@ -98,15 +116,20 @@ fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config:
     let stale_ceiling_ms = config.stall_ack_stale_ms;
 
     for c in conns.iter_mut() {
+        // Pull first: the latch's escalation path reads the fresh pull state.
+        c.update_silence_pull(current_time_ms, min_in_flight, stale_ceiling_ms);
         c.update_stall_latch(current_time_ms, min_in_flight, stale_ceiling_ms);
     }
 
-    let any_healthy = conns
-        .iter()
-        .any(|c| !c.is_timed_out(current_time_ms) && c.is_schedulable() && !c.stall_latched());
+    let any_healthy = conns.iter().any(|c| {
+        !c.is_timed_out(current_time_ms)
+            && c.is_schedulable()
+            && !c.stall_latched()
+            && !c.silence_pulled
+    });
 
     for c in conns.iter_mut() {
-        c.stall_gated = any_healthy && c.stall_latched();
+        c.stall_gated = any_healthy && (c.stall_latched() || c.silence_pulled);
     }
 }
 

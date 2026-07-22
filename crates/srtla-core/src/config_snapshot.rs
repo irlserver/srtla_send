@@ -47,6 +47,34 @@ pub const STALL_REJOIN_DWELL_MULT: u64 = 2;
 /// path echoes 38-byte control frames. ~1% overhead at the default.
 pub const STALL_PROBE_ONE_IN_N: u32 = 100;
 
+/// Floor (ms) for the fast silence-pull window. A *loaded* link receives
+/// SRTLA ACKs continuously, so total inbound silence this long with a full
+/// backlog is abnormal on any sane path; an idle link is never pulled (its
+/// only inbound is the 1 s keepalive echo, so gaps are normal there). The
+/// pull is transient — it clears on the very next inbound byte — which is
+/// why it may react an order of magnitude faster than the sticky latch.
+pub const SILENCE_PULL_FLOOR_MS: u64 = 250;
+
+/// Multiplier on smoothed RTT for the silence-pull window, so a satellite
+/// path is not pulled for a silence that is shorter than its own round trip.
+/// Capped at the effective staleness window — beyond that the latch owns
+/// the decision.
+pub const SILENCE_PULL_RTT_MULT: u64 = 2;
+
+/// Default per-link liveness timeout (ms): silence past this tears the link
+/// down for re-registration. Matches the classic `CONN_TIMEOUT` behavior;
+/// runtime-tunable so an operator (or belacoder, which knows the SRT latency
+/// budget) can scale it to `max(default, 2 x latency)` — tearing down a link
+/// the receiver buffer could have ridden out trades a warm resume for a cold
+/// re-handshake.
+pub const CONN_TIMEOUT_MS: u64 = srtla_protocol::CONN_TIMEOUT * 1000;
+
+/// Clamp bounds for the runtime-configurable liveness timeout. The floor
+/// keeps a misconfigured client from turning every RTT spike into a
+/// teardown; the ceiling keeps a dead link from squatting its slot.
+pub const CONN_TIMEOUT_MS_MIN: u64 = 1_000;
+pub const CONN_TIMEOUT_MS_MAX: u64 = 60_000;
+
 /// Snapshot of configuration for efficient hot-path access.
 /// Call `DynamicConfig::snapshot()` once per select iteration to avoid
 /// multiple atomic loads per packet in the hot path.
@@ -65,6 +93,9 @@ pub struct ConfigSnapshot {
     /// `stall_deselect` (default [`STALL_ACK_STALE_MS`]; see
     /// [`SrtlaConnection::effective_stall_stale_ms`](crate::connection::SrtlaConnection::effective_stall_stale_ms)).
     pub stall_ack_stale_ms: u64,
+    /// Per-link liveness timeout in ms (default [`CONN_TIMEOUT_MS`]). Silence
+    /// past this tears the link down and re-registers it.
+    pub conn_timeout_ms: u64,
 }
 
 impl Default for ConfigSnapshot {
@@ -75,6 +106,7 @@ impl Default for ConfigSnapshot {
             stall_deselect: true,
             stall_min_in_flight: STALL_MIN_IN_FLIGHT_PACKETS,
             stall_ack_stale_ms: STALL_ACK_STALE_MS,
+            conn_timeout_ms: CONN_TIMEOUT_MS,
         }
     }
 }

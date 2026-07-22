@@ -190,6 +190,22 @@ pub struct SrtlaConnection {
     /// Rolling counter driving the 1-in-N duplicate-probe cadence while gated
     /// (see [`crate::config_snapshot::STALL_PROBE_ONE_IN_N`]).
     pub(crate) stall_probe_counter: u32,
+    /// Fast transient tier below the stall latch: true while this loaded link
+    /// has received *nothing at all* for the silence-pull window (see
+    /// [`Self::is_briefly_silent`]). Unlike the latch it keys on
+    /// `last_received` — any inbound byte, not delivery proof — because it is
+    /// recomputed on every selection pass and clears the instant the link
+    /// speaks again, so the "an echoing link never goes stale" concern that
+    /// forbids `last_received` for the latch does not apply. Set by
+    /// `apply_stall_gate`; read only for rising-edge counting and selection.
+    pub(crate) silence_pulled: bool,
+    /// Cumulative silence-pull engagements (rising edges). Expected to tick
+    /// on routine cellular HARQ stalls; a high rate is telemetry, not alarm.
+    pub(crate) silence_pulls: u64,
+    /// Per-link liveness timeout in ms. Refreshed from the config snapshot on
+    /// every selection pass so `is_timed_out` (called from paths that do not
+    /// carry a config) always sees the current runtime value.
+    pub(crate) conn_timeout_ms: u64,
     // Sub-structs for organized state management
     pub rtt: RttTracker,
     #[cfg(feature = "test-internals")]
@@ -266,6 +282,9 @@ impl SrtlaConnection {
             stall_recovery_since_ms: 0,
             stall_gate_events: 0,
             stall_probe_counter: 0,
+            silence_pulled: false,
+            silence_pulls: 0,
+            conn_timeout_ms: crate::config_snapshot::CONN_TIMEOUT_MS,
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
             bitrate: BitrateTracker::new(now),
@@ -596,7 +615,18 @@ impl SrtlaConnection {
     /// can deliver again, and un-gating on it flaps payload back onto a
     /// still-marginal link. Proof going stale mid-run resets the run.
     pub fn update_stall_latch(&mut self, now_ms: u64, min_in_flight: i32, stale_ceiling_ms: u64) {
-        if self.is_stalled(now_ms, min_in_flight, stale_ceiling_ms) {
+        // Escalation from the fast tier: a silence-pulled link receives no
+        // payload, so cumulative ACKs drain the backlog and the raw
+        // `is_stalled` in-flight precondition can never fire again. If the
+        // pull is still held when the delivery proof goes fully stale, the
+        // stall is sustained, not a micro-pause — latch it so recovery goes
+        // through the dwell and probes instead of a cold readmit.
+        let proof_fully_stale = self.last_ack_or_rtt_sample_ms != 0
+            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms)
+                >= self.effective_stall_stale_ms(stale_ceiling_ms);
+        if self.is_stalled(now_ms, min_in_flight, stale_ceiling_ms)
+            || (self.silence_pulled && proof_fully_stale)
+        {
             if self.stall_latched_since_ms == 0 {
                 debug!("{}: stall latch engaged", self.label);
                 self.stall_latched_since_ms = now_ms;
@@ -667,7 +697,94 @@ impl SrtlaConnection {
         false
     }
 
-    /// Whether this link has gone silent past `CONN_TIMEOUT`.
+    /// RTT-scaled window (ms) of total inbound silence after which a loaded
+    /// link is transiently pulled: `max(floor, 2 x smoothed RTT)`, capped at
+    /// the effective staleness window (beyond that the latch owns the
+    /// decision, so the two tiers cannot disagree about who acts).
+    #[inline]
+    pub fn silence_pull_window_ms(&self, stale_ceiling_ms: u64) -> u64 {
+        use crate::config_snapshot::{SILENCE_PULL_FLOOR_MS, SILENCE_PULL_RTT_MULT};
+        let srtt = self.get_smooth_rtt_ms();
+        let base = if srtt <= 0.0 {
+            SILENCE_PULL_FLOOR_MS
+        } else {
+            ((srtt as u64).saturating_mul(SILENCE_PULL_RTT_MULT)).max(SILENCE_PULL_FLOOR_MS)
+        };
+        base.min(self.effective_stall_stale_ms(stale_ceiling_ms))
+    }
+
+    /// Fast silence signal (pure read): a connected link with a full backlog
+    /// (`in_flight >= min_in_flight`) that has received *nothing* — under
+    /// load, SRTLA ACKs arrive continuously, so total silence is abnormal —
+    /// for [`Self::silence_pull_window_ms`]. The routing pull this drives is
+    /// transient and self-clearing (any inbound byte refreshes
+    /// `last_received`), the deliberate opposite of the sticky latch: fast to
+    /// react during a stall the link may ride out (e.g. a HARQ pause), free
+    /// to readmit the moment the link speaks. Never a liveness signal.
+    #[inline]
+    pub fn is_briefly_silent(
+        &self,
+        now_ms: u64,
+        min_in_flight: i32,
+        stale_ceiling_ms: u64,
+    ) -> bool {
+        if !self.connected || self.in_flight_packets < min_in_flight {
+            return false;
+        }
+        let Some(last_received) = self.last_received else {
+            return false;
+        };
+        now_ms.saturating_sub(last_received) >= self.silence_pull_window_ms(stale_ceiling_ms)
+    }
+
+    /// Drive the silence-pull flag and its rising-edge counter. Called by
+    /// `apply_stall_gate` on every selection pass, BEFORE the latch update
+    /// (the latch escalates from this flag).
+    ///
+    /// The pull engages only on the loaded-and-silent signal, but releases
+    /// only when the link actually SPEAKS (a fresh inbound byte) — not when
+    /// its backlog drains. Cumulative SRT ACKs delivered via the healthy
+    /// links clear a pulled link's in-flight within an RTT, so releasing on
+    /// drain would readmit the still-silent link, refill it, and re-pull it
+    /// in a tight duty cycle that both dribbles payload into the hole and
+    /// starves the latch of its in-flight precondition.
+    pub(crate) fn update_silence_pull(
+        &mut self,
+        now_ms: u64,
+        min_in_flight: i32,
+        stale_ceiling_ms: u64,
+    ) {
+        if self.is_briefly_silent(now_ms, min_in_flight, stale_ceiling_ms) {
+            if !self.silence_pulled {
+                self.silence_pulls += 1;
+                debug!("{}: silence pull engaged", self.label);
+            }
+            self.silence_pulled = true;
+            return;
+        }
+        if !self.silence_pulled {
+            return;
+        }
+        let window = self.silence_pull_window_ms(stale_ceiling_ms);
+        let spoke = self
+            .last_received
+            .is_some_and(|lr| now_ms.saturating_sub(lr) < window);
+        if spoke || !self.connected {
+            self.silence_pulled = false;
+        }
+        // Otherwise: drained but still mute — hold the pull until the link
+        // speaks or the latch takes over.
+    }
+
+    /// Cumulative silence-pull engagements over this connection's life.
+    #[inline(always)]
+    pub fn silence_pulls(&self) -> u64 {
+        self.silence_pulls
+    }
+
+    /// Whether this link has gone silent past its liveness timeout
+    /// (`conn_timeout_ms`, default `CONN_TIMEOUT`; runtime-tunable so the
+    /// window can scale with the receiver's latency budget).
     ///
     /// `last_received` is a `now_ms()` monotonic millisecond stamp (the single
     /// clock this whole codebase runs on), so the timeout is a plain difference
@@ -691,12 +808,12 @@ impl SrtlaConnection {
             // if we've never received anything or haven't received in a while, consider it timed out
             return self
                 .last_received
-                .is_none_or(|lr| now.saturating_sub(lr) >= CONN_TIMEOUT * 1000);
+                .is_none_or(|lr| now.saturating_sub(lr) >= self.conn_timeout_ms);
         }
 
         // For established connections, check normal timeout
         if let Some(lr) = self.last_received {
-            now.saturating_sub(lr) >= CONN_TIMEOUT * 1000
+            now.saturating_sub(lr) >= self.conn_timeout_ms
         } else {
             false
         }
@@ -752,6 +869,9 @@ impl SrtlaConnection {
         self.stall_latched_since_ms = 0;
         self.stall_recovery_since_ms = 0;
         self.stall_probe_counter = 0;
+        // `silence_pulls` survives like `stall_gate_events`: both count
+        // engagements over the link's life.
+        self.silence_pulled = false;
     }
 
     /// Mark connection for recovery (C-style), similar to setting last_rcvd = 1.
