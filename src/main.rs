@@ -225,8 +225,15 @@ async fn main() -> Result<()> {
     }
 
     // The CLI binds each uplink by its source IP, which on a multi-homed host
-    // selects the egress via source-based routing.
+    // selects the egress via source-based routing. Darwin has no source-based
+    // routing, so there the same IP list is resolved to interfaces and pinned
+    // with IP_BOUND_IF instead; binding the source address alone would leave
+    // every uplink on the default route.
+    #[cfg(not(target_vendor = "apple"))]
     let binder: std::sync::Arc<dyn net::UplinkBinder> = std::sync::Arc::new(net::SourceIpBinder);
+    #[cfg(target_vendor = "apple")]
+    let binder: std::sync::Arc<dyn net::UplinkBinder> =
+        std::sync::Arc::new(net::AppleInterfaceBinder::new());
 
     sender::run_sender_with_config(
         local_srt_port,

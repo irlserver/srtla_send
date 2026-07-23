@@ -5,9 +5,15 @@
 //! connection/scheduler core sits on top of; it depends on the core (for the
 //! shared `BATCH_SEND_SIZE`) and on `protocol` (for `MTU`), never the reverse.
 
+// Darwin steers egress by interface index rather than by source address, so
+// Apple targets need their own binder instead of `SourceIpBinder`.
+#[cfg(target_vendor = "apple")]
+pub mod apple;
 pub mod batch_recv;
 mod socket;
 
+#[cfg(target_vendor = "apple")]
+pub use apple::AppleInterfaceBinder;
 pub use batch_recv::{BatchUdpSocket, RecvMmsgBuffer};
 // Host-side binder for platforms that steer egress by network handle (Android).
 // Exported for library consumers; the CLI binary does not construct it. Unix
