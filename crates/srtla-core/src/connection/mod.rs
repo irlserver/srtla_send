@@ -233,6 +233,21 @@ pub struct SrtlaConnection {
     /// Length of the ramp above, snapshotted from the rejoin dwell when the
     /// latch released so the read path needs no config.
     pub(crate) stall_rejoin_ramp_ms: u64,
+    /// Elected to keep carrying the payload while every schedulable link is
+    /// quality-gated. Sticky: held until this link is no longer the worst
+    /// option, so the payload path cannot ping-pong between two failing links
+    /// (see `selection::enhanced::elect_sole_carrier`).
+    pub(crate) sole_carrier: bool,
+    /// `now_ms()` when this link took the sole-carrier role; `0` = never.
+    pub(crate) sole_carrier_since_ms: u64,
+    /// True while the sole-carrier election is running and this link lost it.
+    /// Kept across passes so the falling edge can arm the rejoin ramp.
+    pub(crate) sole_carrier_excluded: bool,
+    /// Cumulative count of sole-carrier handovers to this link. Monotonic over
+    /// the connection's life; exported in stats, because a field log that
+    /// shows the role changing every second is the signature of the failure
+    /// this stickiness exists to prevent.
+    pub(crate) sole_carrier_elections: u64,
     /// Fast transient tier below the stall latch: true while this loaded link
     /// has received *nothing at all* for the silence-pull window (see
     /// [`Self::is_briefly_silent`]). Unlike the latch it keys on
@@ -327,6 +342,10 @@ impl SrtlaConnection {
             stall_probe_counter: 0,
             stall_rejoin_ramp_start_ms: 0,
             stall_rejoin_ramp_ms: 0,
+            sole_carrier: false,
+            sole_carrier_since_ms: 0,
+            sole_carrier_excluded: false,
+            sole_carrier_elections: 0,
             silence_pulled: false,
             silence_pulls: 0,
             conn_timeout_ms: crate::config_snapshot::CONN_TIMEOUT_MS,
@@ -704,9 +723,40 @@ impl SrtlaConnection {
             self.stall_recovery_since_ms = 0;
             // Arm the share ramp: the link has proven it can deliver probes,
             // not that it can carry the stream (see `rejoin_ramp_multiplier`).
-            self.stall_rejoin_ramp_start_ms = now_ms;
-            self.stall_rejoin_ramp_ms = dwell_ms;
+            self.arm_rejoin_ramp(now_ms, dwell_ms);
         }
+    }
+
+    /// Start (or restart) the post-rejoin share ramp.
+    ///
+    /// Called wherever a link stops being held out of the payload rotation —
+    /// the stall latch releasing, or losing then regaining a sole-carrier
+    /// election. Both leave the link with a drained backlog and an inflated
+    /// score it did not earn, which is exactly what the ramp exists to price
+    /// out (see [`rejoin_ramp_multiplier`]).
+    #[inline]
+    pub(crate) fn arm_rejoin_ramp(&mut self, now_ms: u64, ramp_ms: u64) {
+        self.stall_rejoin_ramp_start_ms = now_ms;
+        self.stall_rejoin_ramp_ms = ramp_ms;
+    }
+
+    /// Whether this link currently holds the sole-carrier role (stats export).
+    #[inline(always)]
+    pub fn is_sole_carrier(&self) -> bool {
+        self.sole_carrier
+    }
+
+    /// Whether this link is currently held out of the rotation because a
+    /// sibling holds the sole-carrier role (stats export).
+    #[inline(always)]
+    pub fn is_sole_carrier_excluded(&self) -> bool {
+        self.sole_carrier_excluded
+    }
+
+    /// Cumulative sole-carrier handovers to this link over its life.
+    #[inline(always)]
+    pub fn sole_carrier_elections(&self) -> u64 {
+        self.sole_carrier_elections
     }
 
     /// Fraction of its natural score this link should compete with right now,
@@ -948,6 +998,11 @@ impl SrtlaConnection {
         // startup, so there is nothing left to ramp.
         self.stall_rejoin_ramp_start_ms = 0;
         self.stall_rejoin_ramp_ms = 0;
+        // A reset link cannot be carrying anything, so it cannot hold the role.
+        // `sole_carrier_elections` survives like the other event counters.
+        self.sole_carrier = false;
+        self.sole_carrier_since_ms = 0;
+        self.sole_carrier_excluded = false;
         // `silence_pulls` survives like `stall_gate_events`: both count
         // engagements over the link's life.
         self.silence_pulled = false;

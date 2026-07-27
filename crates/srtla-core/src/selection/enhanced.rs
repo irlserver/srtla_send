@@ -53,6 +53,185 @@ const CC_SOFT_CAP_FLOOR: f64 = 0.10;
 /// all, because this penalty already does the job.
 const GATED_LINK_PENALTY: f64 = 0.02;
 
+/// How much better a challenger must measure before it takes the sole-carrier
+/// role, as a ratio of the incumbent's smoothed RTT. Two links inside this
+/// margin are, for the purpose of this decision, the same link.
+const SOLE_CARRIER_MARGIN: f64 = 2.0;
+
+/// Minimum time a link holds the sole-carrier role before any challenger can
+/// take it. Matched to the sustain the weak classifier needs (2 ticks at ~1 Hz)
+/// to flip a verdict, so the role can never change faster than the evidence
+/// that would justify changing it.
+const SOLE_CARRIER_MIN_HOLD_MS: u64 = 2000;
+
+/// Should the sole-carrier role move from the incumbent to the challenger?
+///
+/// Deliberately keyed on smoothed RTT rather than the selection score. The
+/// score is `window / (in_flight + 1)`, and the incumbent is by definition the
+/// one carrying the stream, so its in-flight count is high and the idle
+/// challenger always looks better — scoring the handover would guarantee the
+/// oscillation this function exists to prevent. RTT is the one signal that
+/// stays honest about a link that is not being loaded.
+///
+/// An unmeasured RTT on either side (`<= 0`) blocks the handover: with no
+/// evidence, the incumbent keeps the role.
+#[inline]
+pub fn sole_carrier_handover(
+    incumbent_rtt_ms: f64,
+    challenger_rtt_ms: f64,
+    held_for_ms: u64,
+    hold_min_ms: u64,
+    margin: f64,
+) -> bool {
+    if held_for_ms < hold_min_ms {
+        return false;
+    }
+    if !incumbent_rtt_ms.is_finite() || !challenger_rtt_ms.is_finite() {
+        return false;
+    }
+    if incumbent_rtt_ms <= 0.0 || challenger_rtt_ms <= 0.0 {
+        return false;
+    }
+    challenger_rtt_ms * margin <= incumbent_rtt_ms
+}
+
+/// Elect the one link that keeps carrying the payload while *every*
+/// schedulable link is quality-gated, and hold that choice steady.
+///
+/// When no link is healthy the admission gates all lift, and selection falls
+/// back to ranking the whole pool on raw score, per packet. That splits the
+/// stream's unique sequence numbers across links whose delays differ by an
+/// order of magnitude, and lets the winner change from one packet to the next
+/// — the receiver's reorder buffer then stalls on whichever copy went down the
+/// slow path. librist measured the same failure on bonded cellular: with two
+/// legs swinging between ~100 ms and ~1200 ms the payload path swapped roughly
+/// once a second, and committing to *either* leg would have been better than
+/// alternating between them.
+///
+/// So one link is elected and the rest are held out. The role is sticky: the
+/// incumbent keeps it until it stops being a candidate (timed out, no longer
+/// schedulable, stall-gated) or a sibling measures [`SOLE_CARRIER_MARGIN`]
+/// times better on smoothed RTT after the incumbent has served
+/// [`SOLE_CARRIER_MIN_HOLD_MS`].
+///
+/// Returns the elected index while the election is active, `None` when it is
+/// not — either because a healthy link exists (the normal case, gates handled
+/// by the usual penalty path) or because no link is a candidate at all, in
+/// which case the caller's existing full-pool fallback stands and the packet is
+/// never dropped for want of a carrier.
+fn elect_sole_carrier(
+    conns: &mut [SrtlaConnection],
+    current_time_ms: u64,
+    any_quality_ok: bool,
+) -> Option<usize> {
+    if any_quality_ok {
+        for c in conns.iter_mut() {
+            release_sole_carrier(c, current_time_ms);
+        }
+        return None;
+    }
+
+    let candidate = |c: &SrtlaConnection| {
+        !c.is_timed_out(current_time_ms) && c.is_schedulable() && !c.stall_gated
+    };
+
+    let mut incumbent: Option<usize> = None;
+    // Lowest smoothed RTT wins, and a link with no RTT yet cannot win on
+    // absence of evidence. When *nothing* has been measured (every link still
+    // in its first seconds) fall back to raw capacity, which is the same
+    // choice selection would have made anyway — the election's job there is
+    // only to stop the pool alternating for want of a number.
+    let mut best_measured: Option<(usize, f64)> = None;
+    let mut best_unmeasured: Option<(usize, i32)> = None;
+    for (i, c) in conns.iter().enumerate() {
+        if !candidate(c) {
+            continue;
+        }
+        let rtt = c.get_smooth_rtt_ms();
+        if rtt > 0.0 {
+            if best_measured.is_none_or(|(_, best)| rtt < best) {
+                best_measured = Some((i, rtt));
+            }
+        } else {
+            let score = c.get_score();
+            if best_unmeasured.is_none_or(|(_, best)| score > best) {
+                best_unmeasured = Some((i, score));
+            }
+        }
+        if c.sole_carrier {
+            incumbent = Some(i);
+        }
+    }
+    let best = best_measured
+        .map(|(i, _)| i)
+        .or(best_unmeasured.map(|(i, _)| i));
+    let best_rtt = best_measured.map(|(_, rtt)| rtt).unwrap_or(f64::MAX);
+
+    let keep = match (incumbent, best) {
+        (Some(inc), Some(b)) if b != inc => {
+            let inc_rtt = conns[inc].get_smooth_rtt_ms();
+            let held_for = current_time_ms.saturating_sub(conns[inc].sole_carrier_since_ms);
+            if sole_carrier_handover(
+                inc_rtt,
+                best_rtt,
+                held_for,
+                SOLE_CARRIER_MIN_HOLD_MS,
+                SOLE_CARRIER_MARGIN,
+            ) {
+                Some(b)
+            } else {
+                Some(inc)
+            }
+        }
+        (Some(inc), _) => Some(inc),
+        (None, b) => b,
+    };
+
+    for (i, c) in conns.iter_mut().enumerate() {
+        if Some(i) == keep {
+            // The carrier is back in the rotation, so any exclusion it was
+            // serving has ended — and it drained while out, so it re-enters
+            // on a ramp like any other rejoining link.
+            if c.sole_carrier_excluded {
+                c.arm_rejoin_ramp(current_time_ms, SOLE_CARRIER_MIN_HOLD_MS);
+            }
+            if !c.sole_carrier {
+                debug!(
+                    "{}: elected sole carrier (every link is quality gated)",
+                    c.label
+                );
+                c.sole_carrier = true;
+                c.sole_carrier_since_ms = current_time_ms;
+                c.sole_carrier_elections += 1;
+            }
+            c.sole_carrier_excluded = false;
+        } else {
+            c.sole_carrier = false;
+            c.sole_carrier_since_ms = 0;
+            // Only links that could have carried are "excluded"; one that is
+            // unschedulable or gated for other reasons is not being held out
+            // by this election and must not be given a ramp for it.
+            c.sole_carrier_excluded = keep.is_some() && candidate(c);
+        }
+    }
+
+    keep
+}
+
+/// Clear a link's sole-carrier state, arming the rejoin ramp if this ends an
+/// exclusion. A link held out of the rotation drained its backlog while its
+/// window kept recovering, so it comes back with the same unearned score
+/// advantage a stall-gated link has, and needs the same treatment.
+#[inline]
+fn release_sole_carrier(c: &mut SrtlaConnection, current_time_ms: u64) {
+    if c.sole_carrier_excluded {
+        c.arm_rejoin_ramp(current_time_ms, SOLE_CARRIER_MIN_HOLD_MS);
+        c.sole_carrier_excluded = false;
+    }
+    c.sole_carrier = false;
+    c.sole_carrier_since_ms = 0;
+}
+
 /// In-flight cap (packets) as a bandwidth-delay product: the link's
 /// predicted sustainable rate times its own minimum RTT, with
 /// `IN_FLIGHT_CAP_BDP_MULT` headroom.
@@ -165,6 +344,21 @@ pub fn select_connection(
             && !in_flight_cap_exceeded(c)
     });
 
+    // Sole-carrier election. Keyed on the quality gates alone, deliberately
+    // excluding the in-flight cap: the cap is a transient that clears as the
+    // link drains, and pinning the whole stream to one link because every link
+    // is momentarily over its BDP would make a saturated pool worse. Only
+    // sustained delay/loss verdicts — the states librist muted on — justify
+    // committing to a single carrier.
+    let any_quality_ok = conns.iter().any(|c| {
+        !c.is_timed_out(current_time_ms)
+            && c.is_schedulable()
+            && !c.weak
+            && !c.loss_degraded
+            && !c.stall_gated
+    });
+    let sole_carrier = elect_sole_carrier(conns, current_time_ms, any_quality_ok);
+
     // Score connections by base score; apply quality multiplier if enabled.
     //
     // Only the best link is tracked; nothing consumes the runner-up's rank.
@@ -177,6 +371,16 @@ pub fn select_connection(
         // available (see `apply_stall_gate`); hard-skip it like a timed-out link
         // rather than crushing its score, since a trickle would only add latency.
         if c.is_timed_out(current_time_ms) || !c.is_schedulable() || c.stall_gated {
+            continue;
+        }
+        // With every link quality-gated, exactly one was elected to carry the
+        // payload; the rest are held out so the stream commits to one path
+        // instead of alternating between equally bad ones. The election only
+        // ever returns a link that passed the checks above, so this can never
+        // empty the candidate pool.
+        if let Some(carrier) = sole_carrier
+            && i != carrier
+        {
             continue;
         }
         // Hard-skip only the in-flight cap: it bounds queueing delay and
@@ -316,6 +520,139 @@ mod tests {
     fn one_conn() -> SrtlaConnection {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(create_test_connections(1)).pop().unwrap()
+    }
+
+    fn two_conns() -> smallvec::SmallVec<SrtlaConnection, 4> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(create_test_connections(2))
+    }
+
+    /// Mark a link quality-gated with a given smoothed RTT.
+    fn failing(c: &mut SrtlaConnection, rtt_ms: f64) {
+        c.weak = true;
+        c.rtt.kalman_rtt.update(rtt_ms);
+        // Kalman needs a couple of samples to sit on the value.
+        for _ in 0..12 {
+            c.rtt.kalman_rtt.update(rtt_ms);
+        }
+    }
+
+    #[test]
+    fn handover_needs_both_a_clear_margin_and_a_served_minimum() {
+        // librist's field numbers: 126 vs 85 is noise between two failing
+        // legs; 1162 vs 406 is a genuinely better path.
+        assert!(!sole_carrier_handover(126.0, 85.0, 10_000, 2000, 2.0));
+        assert!(sole_carrier_handover(1162.0, 406.0, 10_000, 2000, 2.0));
+        // ...but not before the incumbent has served its minimum.
+        assert!(!sole_carrier_handover(1162.0, 406.0, 1999, 2000, 2.0));
+        // Exactly at the margin and exactly at the minimum both count.
+        assert!(sole_carrier_handover(800.0, 400.0, 2000, 2000, 2.0));
+    }
+
+    #[test]
+    fn handover_refuses_to_act_on_an_unmeasured_link() {
+        // No RTT on either side is not evidence of a better path.
+        assert!(!sole_carrier_handover(0.0, 400.0, 10_000, 2000, 2.0));
+        assert!(!sole_carrier_handover(1200.0, 0.0, 10_000, 2000, 2.0));
+        assert!(!sole_carrier_handover(f64::NAN, 400.0, 10_000, 2000, 2.0));
+    }
+
+    #[test]
+    fn no_election_while_a_healthy_link_exists() {
+        let mut conns = two_conns();
+        failing(&mut conns[0], 900.0);
+        let now = 100_000;
+        assert_eq!(elect_sole_carrier(&mut conns, now, true), None);
+        assert!(!conns[0].is_sole_carrier() && !conns[1].is_sole_carrier());
+        assert!(!conns[0].is_sole_carrier_excluded());
+    }
+
+    #[test]
+    fn every_link_failing_elects_one_and_holds_it() {
+        let mut conns = two_conns();
+        failing(&mut conns[0], 900.0);
+        failing(&mut conns[1], 1000.0);
+        let now = 100_000;
+
+        // Lowest smoothed RTT wins the first election.
+        assert_eq!(elect_sole_carrier(&mut conns, now, false), Some(0));
+        assert!(conns[0].is_sole_carrier());
+        assert!(conns[1].is_sole_carrier_excluded());
+        assert_eq!(conns[0].sole_carrier_elections(), 1);
+
+        // Link 1 pulls marginally ahead. Re-running the election every packet
+        // on the instantaneous measurement is exactly what made librist's
+        // payload path swap legs once a second, so the role must not move.
+        failing(&mut conns[0], 1100.0);
+        failing(&mut conns[1], 900.0);
+        for tick in 0..10 {
+            assert_eq!(
+                elect_sole_carrier(&mut conns, now + tick * 1000, false),
+                Some(0),
+                "a marginally better sibling must not take the role"
+            );
+        }
+        assert_eq!(conns[0].sole_carrier_elections(), 1, "no churn");
+    }
+
+    #[test]
+    fn a_clearly_better_link_takes_the_role_once_the_hold_expires() {
+        let mut conns = two_conns();
+        failing(&mut conns[0], 1200.0);
+        failing(&mut conns[1], 1300.0);
+        let now = 100_000;
+        assert_eq!(elect_sole_carrier(&mut conns, now, false), Some(0));
+
+        // Link 1 is now several times better — but the incumbent has only
+        // just taken the role.
+        failing(&mut conns[1], 300.0);
+        assert_eq!(
+            elect_sole_carrier(&mut conns, now + SOLE_CARRIER_MIN_HOLD_MS - 1, false),
+            Some(0)
+        );
+        // Past the minimum hold, the handover goes through.
+        let t = now + SOLE_CARRIER_MIN_HOLD_MS;
+        assert_eq!(elect_sole_carrier(&mut conns, t, false), Some(1));
+        assert!(conns[1].is_sole_carrier() && !conns[0].is_sole_carrier());
+        assert_eq!(conns[1].sole_carrier_elections(), 1);
+
+        // The link that just came back in ramps its share up rather than
+        // resuming at the score its idle time inflated.
+        assert!(conns[1].rejoin_ramp_multiplier(t) < 1.0);
+    }
+
+    #[test]
+    fn the_role_moves_off_a_link_that_stops_being_a_candidate() {
+        let mut conns = two_conns();
+        failing(&mut conns[0], 900.0);
+        failing(&mut conns[1], 5000.0);
+        let now = 100_000;
+        assert_eq!(elect_sole_carrier(&mut conns, now, false), Some(0));
+
+        // The incumbent stalls out. Stickiness must not outrank a link
+        // being unusable, even though the sibling measures far worse.
+        conns[0].stall_gated = true;
+        assert_eq!(elect_sole_carrier(&mut conns, now + 100, false), Some(1));
+    }
+
+    #[test]
+    fn ending_the_election_ramps_the_excluded_link_back_in() {
+        let mut conns = two_conns();
+        failing(&mut conns[0], 900.0);
+        failing(&mut conns[1], 1000.0);
+        let now = 100_000;
+        elect_sole_carrier(&mut conns, now, false);
+        assert!(conns[1].is_sole_carrier_excluded());
+
+        // A link recovers, so the election ends and everyone competes again.
+        let t = now + 5000;
+        assert_eq!(elect_sole_carrier(&mut conns, t, true), None);
+        assert!(!conns[1].is_sole_carrier_excluded());
+        assert!(
+            conns[1].rejoin_ramp_multiplier(t) < 1.0,
+            "a link released from exclusion drained while out, so it must ramp rather than seize \
+             the stream on its inflated score"
+        );
     }
 
     #[test]
