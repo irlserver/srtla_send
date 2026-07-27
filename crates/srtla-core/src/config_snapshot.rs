@@ -39,6 +39,22 @@ pub const STALL_STALE_FLOOR_MS: u64 = 1000;
 /// cannot flap back in and re-glitch the stream.
 pub const STALL_REJOIN_DWELL_MULT: u64 = 2;
 
+/// Ceiling on the rejoin-dwell backoff multiplier (see
+/// [`crate::connection::stall_rejoin_backoff_next`]). At the floor staleness
+/// window this caps the wait between retries at ~32s: long enough that a
+/// chronically failing link stops costing the stream a transition every few
+/// seconds, short enough that a link recovering after a long outage is still
+/// picked back up within a shot.
+pub const STALL_REJOIN_BACKOFF_MAX: u32 = 16;
+
+/// How long a rejoin must last, as a multiple of the effective staleness
+/// window, to count as having held. Matches the base rejoin dwell
+/// ([`STALL_REJOIN_DWELL_MULT`]) plus the drop dwell: anything shorter and the
+/// link re-stalled inside the time it took to rejoin, which is the oscillation
+/// the backoff exists to damp. Deliberately measured against the *base* dwell,
+/// not the backed-off one, so the bar to clear does not rise with the penalty.
+pub const STALL_REJOIN_PROBATION_MULT: u64 = STALL_REJOIN_DWELL_MULT + 1;
+
 /// Size at which the outstanding-probe log starts expiring entries. A probe is
 /// only removed by its own SRTLA ACK, which may never arrive, so the log needs
 /// a bound. Well above the number a link can have outstanding at the 1-in-N

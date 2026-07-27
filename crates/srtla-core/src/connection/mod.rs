@@ -157,6 +157,43 @@ pub fn rejoin_ramp_multiplier(ramp_start_ms: u64, ramp_ms: u64, now_ms: u64) -> 
         .clamp(STALL_REJOIN_RAMP_FLOOR, 1.0)
 }
 
+/// Rejoin-dwell multiplier to serve after the stall latch engages again, given
+/// the one it was serving, how long the last rejoin lasted, and how long it had
+/// to last to count as recovered.
+///
+/// The ramp above prices a rejoining link's share correctly but cannot stop it
+/// rejoining in the first place, and that is the half of the oscillation it
+/// does not reach: the dwell only asks for sustained delivery proof, which a
+/// drained link supplies trivially. A link carrying nothing but probes keeps a
+/// fresh `last_ack_or_rtt_sample_ms` from those probes alone, so the rejoin
+/// condition is met on schedule no matter what the path can carry under load.
+/// A link that genuinely cannot hold its share therefore rejoins, refloods,
+/// re-stalls and re-gates on a fixed period, forever.
+///
+/// Waiting longer is the only lever left, so the dwell doubles every time a
+/// rejoin fails to outlast `probation_ms`, capped at
+/// [`crate::config_snapshot::STALL_REJOIN_BACKOFF_MAX`]. A rejoin that does
+/// hold resets it immediately, so a link recovering from a transient spike is
+/// never penalised. `released_at_ms == 0` (never rejoined) is the first
+/// engagement and is always free. `0` and `1` both mean 1x.
+#[inline]
+pub fn stall_rejoin_backoff_next(
+    backoff: u32,
+    released_at_ms: u64,
+    held_for_ms: u64,
+    probation_ms: u64,
+) -> u32 {
+    if released_at_ms == 0 || held_for_ms >= probation_ms {
+        return 1;
+    }
+    let doubled = if backoff <= 1 {
+        2
+    } else {
+        backoff.saturating_mul(2)
+    };
+    doubled.min(crate::config_snapshot::STALL_REJOIN_BACKOFF_MAX)
+}
+
 pub struct SrtlaConnection {
     pub conn_id: u64,
     #[allow(dead_code)]
@@ -247,6 +284,14 @@ pub struct SrtlaConnection {
     /// Rolling counter driving the 1-in-N duplicate-probe cadence while gated
     /// (see [`crate::config_snapshot::STALL_PROBE_ONE_IN_N`]).
     pub(crate) stall_probe_counter: u32,
+    /// `now_ms()` when the stall latch last released; `0` = never released.
+    /// Compared against the probation window on the next engagement to decide
+    /// whether that rejoin held (see [`stall_rejoin_backoff_next`]).
+    pub(crate) stall_released_at_ms: u64,
+    /// Multiplier on the rejoin dwell, doubled each time a rejoin fails to hold
+    /// its probation and reset to 1 as soon as one does. `0` and `1` both mean
+    /// 1x — see [`stall_rejoin_backoff_next`].
+    pub(crate) stall_rejoin_backoff: u32,
     /// `now_ms()` when the stall latch last released; `0` = no ramp running.
     /// Enhanced selection scales this link's score up from
     /// [`crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR`] to full over
@@ -382,6 +427,8 @@ impl SrtlaConnection {
             stall_recovery_since_ms: 0,
             stall_gate_events: 0,
             stall_probe_counter: 0,
+            stall_released_at_ms: 0,
+            stall_rejoin_backoff: 0,
             stall_rejoin_ramp_start_ms: 0,
             stall_rejoin_ramp_ms: 0,
             stall_rejoin_ramp_from_stall_gate: false,
@@ -776,7 +823,22 @@ impl SrtlaConnection {
             || (self.silence_pulled && proof_fully_stale)
         {
             if self.stall_latched_since_ms == 0 {
-                debug!("{}: stall latch engaged", self.label);
+                // Judge the rejoin that just ended before starting a new gate:
+                // one that could not outlast its probation earns a longer wait
+                // for the next retry, one that did clears the penalty outright.
+                let probation_ms = self
+                    .effective_stall_stale_ms(stale_ceiling_ms)
+                    .saturating_mul(crate::config_snapshot::STALL_REJOIN_PROBATION_MULT);
+                self.stall_rejoin_backoff = stall_rejoin_backoff_next(
+                    self.stall_rejoin_backoff,
+                    self.stall_released_at_ms,
+                    now_ms.saturating_sub(self.stall_released_at_ms),
+                    probation_ms,
+                );
+                debug!(
+                    "{}: stall latch engaged, rejoin dwell now {}x",
+                    self.label, self.stall_rejoin_backoff
+                );
                 self.stall_latched_since_ms = now_ms;
                 self.stall_gate_events += 1;
             }
@@ -797,17 +859,28 @@ impl SrtlaConnection {
         if self.stall_recovery_since_ms == 0 {
             self.stall_recovery_since_ms = now_ms;
         }
-        let dwell_ms = stale_ms.saturating_mul(crate::config_snapshot::STALL_REJOIN_DWELL_MULT);
+        let base_dwell_ms =
+            stale_ms.saturating_mul(crate::config_snapshot::STALL_REJOIN_DWELL_MULT);
+        // The wait stretches while rejoins keep failing to hold, so a link that
+        // cannot carry its share is still retried — just far enough apart that
+        // the stream stops paying a transition for every attempt. Only the
+        // *wait* scales: the ramp below stays at the base dwell, since how
+        // gently a link should be reloaded does not depend on how long it sat
+        // out, and scaling it too would leave a link at the ramp floor for
+        // minutes after it finally recovered.
+        let dwell_ms = base_dwell_ms.saturating_mul(self.stall_rejoin_backoff.max(1) as u64);
         if now_ms.saturating_sub(self.stall_recovery_since_ms) >= dwell_ms {
             debug!(
-                "{}: stall latch released after sustained proof, ramping share back over {}ms",
-                self.label, dwell_ms
+                "{}: stall latch released after sustained proof ({}ms dwell), ramping share back \
+                 over {}ms",
+                self.label, dwell_ms, base_dwell_ms
             );
             self.stall_latched_since_ms = 0;
             self.stall_recovery_since_ms = 0;
+            self.stall_released_at_ms = now_ms;
             // Arm the share ramp: the link has proven it can deliver probes,
             // not that it can carry the stream (see `rejoin_ramp_multiplier`).
-            self.arm_rejoin_ramp(now_ms, dwell_ms, true);
+            self.arm_rejoin_ramp(now_ms, base_dwell_ms, true);
         }
     }
 
@@ -889,6 +962,13 @@ impl SrtlaConnection {
         )
     }
 
+    /// Rejoin-dwell multiplier this link is currently serving (stats/tests).
+    /// `1` whenever no backoff has been earned.
+    #[inline(always)]
+    pub fn stall_rejoin_backoff(&self) -> u32 {
+        self.stall_rejoin_backoff.max(1)
+    }
+
     /// Whether a post-rejoin share ramp is currently running (stats/telemetry).
     #[inline(always)]
     pub fn is_rejoin_ramping(&self, now_ms: u64) -> bool {
@@ -907,6 +987,10 @@ impl SrtlaConnection {
     pub(crate) fn clear_stall_latch(&mut self) {
         self.stall_latched_since_ms = 0;
         self.stall_recovery_since_ms = 0;
+        // With the guard off there are no rejoins to judge, so the escalation
+        // must not survive to lengthen the first dwell if it is turned back on.
+        self.stall_released_at_ms = 0;
+        self.stall_rejoin_backoff = 0;
         // Including any ramp this guard armed: with it off, its contribution
         // to scoring must be gone. Ramps armed by the sole-carrier election or
         // the quality exclusion survive — those gates are independent of this
@@ -1119,6 +1203,11 @@ impl SrtlaConnection {
         self.stall_latched_since_ms = 0;
         self.stall_recovery_since_ms = 0;
         self.stall_probe_counter = 0;
+        // The rejoin backoff is a judgement about a path that a reset link no
+        // longer has: it comes back through registration with a fresh socket
+        // and a cold window, so the next gate starts from the base dwell.
+        self.stall_released_at_ms = 0;
+        self.stall_rejoin_backoff = 0;
         // The rejoin ramp exists to stop an inflated window from seizing the
         // stream; a reset link goes back to the default window with an empty
         // packet log, which is the same cold start every link makes at

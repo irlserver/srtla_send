@@ -302,6 +302,151 @@ mod tests {
         assert!(!c.stall_latched());
     }
 
+    // --- Rejoin-dwell backoff (librist !375, 9dc8c406: a drained link always
+    // satisfies the rejoin condition, so a fixed dwell oscillates forever) ---
+
+    /// Drive one gate/rejoin cycle: stall the link at `start`, then hold fresh
+    /// proof until the latch releases. Returns the instant it released, or
+    /// `None` if it was still latched `limit_ms` after the stall.
+    fn cycle_until_rejoin(
+        c: &mut srtla_core::connection::SrtlaConnection,
+        start: u64,
+        limit_ms: u64,
+    ) -> Option<u64> {
+        make_stalled(c, start);
+        c.update_stall_latch(start, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(c.stall_latched(), "precondition: the latch engaged");
+        // Backlog drains and the link keeps answering probes — the state a
+        // held-out link reaches trivially, whatever it can carry under load.
+        c.in_flight_packets = 0;
+        let mut t = start;
+        while t <= start + limit_ms {
+            t += 100;
+            c.last_ack_or_rtt_sample_ms = t;
+            c.update_stall_latch(t, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+            if !c.stall_latched() {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_rejoin_that_immediately_re_stalls_doubles_the_dwell() {
+        // The hole this closes: the dwell only asks for sustained delivery
+        // proof, which a drained link supplies from its probes alone. A link
+        // that cannot carry its share rejoined, reflooded and re-gated on a
+        // fixed ~6s period for as long as the path stayed marginal, each cycle
+        // costing a payload-path transition.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        // First cycle runs at the base dwell and is free of any penalty.
+        let first = cycle_until_rejoin(c, now, dwell_ms() * 4).expect("first rejoin");
+        assert!(
+            first - now <= dwell_ms() + 200,
+            "the first rejoin must use the base dwell"
+        );
+        assert_eq!(c.stall_rejoin_backoff(), 1, "the first gate is free");
+
+        // It re-stalls at once — well inside the probation window.
+        let second = cycle_until_rejoin(c, first + 100, dwell_ms() * 8).expect("second rejoin");
+        assert_eq!(
+            c.stall_rejoin_backoff(),
+            2,
+            "a rejoin that did not hold must double the dwell"
+        );
+        assert!(
+            second - first > dwell_ms(),
+            "the second rejoin must wait longer than the base dwell: took {}ms",
+            second - first
+        );
+
+        // And again: the escalation compounds rather than resetting.
+        let third = cycle_until_rejoin(c, second + 100, dwell_ms() * 16).expect("third rejoin");
+        assert_eq!(c.stall_rejoin_backoff(), 4);
+        assert!(
+            third - second > 2 * dwell_ms(),
+            "the third wait must exceed the doubled dwell: took {}ms",
+            third - second
+        );
+    }
+
+    #[test]
+    fn a_rejoin_that_holds_clears_the_backoff() {
+        // A link recovering from a transient spike must not keep paying for an
+        // earlier failure, or one bad patch would exile it for minutes.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        let first = cycle_until_rejoin(c, now, dwell_ms() * 4).expect("first rejoin");
+        let second = cycle_until_rejoin(c, first + 100, dwell_ms() * 8).expect("second rejoin");
+        assert_eq!(c.stall_rejoin_backoff(), 2, "precondition: escalated");
+
+        // This time the rejoin outlasts probation before the link stalls again.
+        let probation_ms =
+            STALL_ACK_STALE_MS * srtla_core::config_snapshot::STALL_REJOIN_PROBATION_MULT;
+        let late = second + probation_ms + 1000;
+        let third = cycle_until_rejoin(c, late, dwell_ms() * 4).expect("third rejoin");
+        assert_eq!(
+            c.stall_rejoin_backoff(),
+            1,
+            "a rejoin that held must clear the escalation"
+        );
+        assert!(
+            third - late <= dwell_ms() + 200,
+            "and the next dwell must be back to the base: took {}ms",
+            third - late
+        );
+    }
+
+    #[test]
+    fn the_rejoin_backoff_saturates() {
+        // Still retried, just rarely — an exiled link must never be abandoned.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let mut t = now_ms();
+        let c = &mut conns[0];
+
+        for _ in 0..8 {
+            t = cycle_until_rejoin(c, t + 100, dwell_ms() * 64).expect("rejoin still happens")
+        }
+        assert_eq!(
+            c.stall_rejoin_backoff(),
+            srtla_core::config_snapshot::STALL_REJOIN_BACKOFF_MAX,
+            "the multiplier must stop at the ceiling"
+        );
+    }
+
+    #[test]
+    fn a_long_wait_does_not_stretch_the_share_ramp() {
+        // Only the wait scales. How gently a link is reloaded is a property of
+        // the link, not of how long it sat out; scaling the ramp too would pin
+        // a recovered link at the ramp floor for minutes.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        let first = cycle_until_rejoin(c, now, dwell_ms() * 4).expect("first rejoin");
+        let second = cycle_until_rejoin(c, first + 100, dwell_ms() * 8).expect("second rejoin");
+        assert_eq!(c.stall_rejoin_backoff(), 2, "precondition: escalated");
+
+        // The ramp still completes one base dwell after the (delayed) rejoin.
+        assert!(
+            c.is_rejoin_ramping(second + dwell_ms() - 100),
+            "the ramp must still be running just short of the base dwell"
+        );
+        assert!(
+            !c.is_rejoin_ramping(second + dwell_ms()),
+            "and must be done at the base dwell, not the backed-off one"
+        );
+    }
+
     #[test]
     fn backlog_drain_alone_does_not_release_the_latch() {
         // Cumulative SRT ACKs delivered via the healthy links drain the stalled
