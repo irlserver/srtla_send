@@ -72,6 +72,24 @@ pub async fn run_sender_with_config(
         ips_file,
         config.mode()
     );
+    // Bind the local SRT listener FIRST, ahead of reading the ips file and
+    // dialing any uplink. An encoder is typically pointed at this port the
+    // moment the process is spawned, with no readiness handshake, so every
+    // await before the bind is a window where that connect finds a closed port.
+    // Uplink setup is the worst offender: it resolves the receiver and dials
+    // each bonded link sequentially, so with a hostname receiver the window is
+    // one uncached DNS lookup per modem and grows with the size of the bond —
+    // exactly the multi-link case this sender exists for. Binding a UDP port
+    // needs nothing from the uplinks, so it belongs up here.
+    //
+    // It also removes a rare startup failure: an uplink's ephemeral source port
+    // landing on `local_srt_port` used to make this wildcard bind fail with
+    // AddrInUse.
+    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, local_srt_port)))
+        .await
+        .context("bind local SRT UDP listener")?;
+    info!("listening for SRT on [::]:{}", local_srt_port);
+
     let ips = read_ip_list(ips_file).await?;
     debug!(
         "uplink IPs loaded: {}",
@@ -93,11 +111,6 @@ pub async fn run_sender_with_config(
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
-
-    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, local_srt_port)))
-        .await
-        .context("bind local SRT UDP listener")?;
-    info!("listening for SRT on [::]:{}", local_srt_port);
 
     let mut reg = SrtlaRegistrationManager::new();
 
