@@ -325,6 +325,81 @@ mod tests {
     }
 
     #[test]
+    fn a_probe_survives_the_cumulative_ack_sweep_and_is_still_measurable() {
+        // The race this exists to close. A slow link's probe is answered by its
+        // own SRTLA ACK one long round trip later, but the *healthy* link
+        // delivers the unique twin almost immediately, so the receiver's
+        // cumulative ACK sweeps past that sequence first. While probes lived in
+        // the shared packet log, the sweep deleted the entry and the probe's
+        // own ACK then matched nothing: no delivery proof, no RTT sample, on
+        // exactly the links whose recovery the probes exist to measure.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        conn.queue_probe_packet(&[0u8; 100], 30, t0);
+        assert_eq!(
+            conn.in_flight_packets, 0,
+            "a probe is not payload this link owes; it must not count in-flight"
+        );
+
+        // The healthy link delivers the twin; the cumulative ACK sweeps past 30.
+        conn.handle_srt_ack(30, t0 + 40, false);
+
+        // A full second later, this link's own ACK for the probe finally lands.
+        assert!(
+            conn.handle_srtla_ack_specific(30, false, t0 + 1000),
+            "the probe must still be matchable after the sweep"
+        );
+        assert_eq!(
+            conn.last_ack_or_rtt_sample_ms,
+            t0 + 1000,
+            "a delivered probe is delivery proof — what the rejoin dwell counts"
+        );
+        assert!(
+            (conn.get_smooth_rtt_ms() - 1000.0).abs() < 1.0,
+            "and it must measure the link's real round trip, got {}",
+            conn.get_smooth_rtt_ms()
+        );
+    }
+
+    #[test]
+    fn a_probe_ack_does_not_grow_the_congestion_window() {
+        // A probe proves the path delivers; it is not payload. Letting its ACK
+        // grow the window would inflate the very score that makes a held-out
+        // link seize the stream the moment it is readmitted.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        conn.window = 5000;
+        conn.queue_probe_packet(&[0u8; 100], 77, t0);
+        assert!(conn.handle_srtla_ack_specific(77, false, t0 + 50));
+
+        assert_eq!(
+            conn.window, 5000,
+            "a probe ACK must leave the congestion window alone"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_probe_log_stays_bounded() {
+        // Probes are only removed by their own ACK, which may never come.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        for seq in 0..5000u32 {
+            conn.queue_probe_packet(&[0u8; 100], seq, t0 + u64::from(seq));
+        }
+        assert!(
+            conn.probe_log.len() <= srtla_core::config_snapshot::PROBE_LOG_SOFT_CAP,
+            "probe log grew to {}",
+            conn.probe_log.len()
+        );
+    }
+
+    #[test]
     fn test_srtla_ack_feeds_the_smoothed_rtt() {
         // An SRTLA ACK is a per-link round trip: this link sent the sequence on
         // its own socket and the receiver acknowledged it back on that socket.

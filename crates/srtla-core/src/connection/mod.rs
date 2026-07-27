@@ -173,6 +173,28 @@ pub struct SrtlaConnection {
     pub packet_log: FxHashMap<i32, u64>,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) packet_log: FxHashMap<i32, u64>,
+    /// Send timestamps of this link's outstanding *duplicate probes*, kept
+    /// apart from [`Self::packet_log`] on purpose.
+    ///
+    /// A cumulative SRT ACK prunes everything at or below it from the packet
+    /// log of every link, because the receiver genuinely has that data — but a
+    /// probe's twin travelled the healthy link, so the sweep lands roughly one
+    /// healthy round trip after the probe was sent, while the probing link's
+    /// own SRTLA ACK is still in flight behind its much longer RTT. Sharing one
+    /// log therefore deleted the probe's entry before its ACK could arrive, and
+    /// the ACK then matched nothing: no delivery proof, no RTT sample. The
+    /// slower the link, the more reliably it lost the race — so the links whose
+    /// recovery these probes exist to measure were the ones least likely to be
+    /// measured, and what did get through was biased toward the fastest probes.
+    ///
+    /// Entries here are immune to the cumulative sweep and expire by age.
+    /// Probes are also deliberately absent from the packet log's in-flight
+    /// accounting and from NAK attribution: a probe is not payload this link
+    /// owes anyone.
+    #[cfg(feature = "test-internals")]
+    pub probe_log: FxHashMap<i32, u64>,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) probe_log: FxHashMap<i32, u64>,
     /// Highest sequence number that has been cumulatively ACKed.
     /// Used to optimize cumulative ACK processing by skipping already-ACKed sequences.
     #[cfg(feature = "test-internals")]
@@ -349,6 +371,7 @@ impl SrtlaConnection {
             window: WINDOW_DEF * WINDOW_MULT,
             in_flight_packets: 0,
             packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
+            probe_log: FxHashMap::default(),
             highest_acked_seq: i32::MIN,
             last_received: None,
             last_sent: None,
@@ -414,6 +437,45 @@ impl SrtlaConnection {
         // Track bytes for bitrate calculation (tracked at queue time)
         self.bitrate.update_on_send(data.len() as u64);
         self.batch_sender.queue_packet(data, seq, send_time_ms)
+    }
+
+    /// Queue a duplicate probe: a redundant copy of a packet whose unique copy
+    /// went out on another link, sent to keep this link measurable while it is
+    /// held out of the payload rotation.
+    ///
+    /// Returns true if the batch queue is full and needs flushing.
+    ///
+    /// The sequence is recorded in [`Self::probe_log`] rather than the packet
+    /// log, and queued as untracked so the batch drain does not register it
+    /// in-flight. That keeps three things honest: the probe survives the
+    /// cumulative-ACK sweep long enough for its own SRTLA ACK to arrive (the
+    /// whole point of sending it), it never inflates an in-flight count that
+    /// represents payload this link owes, and a NAK for that sequence stays
+    /// attributed to the link that actually carried the stream data.
+    pub fn queue_probe_packet(&mut self, data: &[u8], seq: u32, send_time_ms: u64) -> bool {
+        self.bitrate.update_on_send(data.len() as u64);
+        self.record_probe(seq as i32, send_time_ms);
+        self.batch_sender.queue_packet(data, None, send_time_ms)
+    }
+
+    /// Record an outstanding probe, expiring stale entries when the log grows.
+    ///
+    /// Probes are only ever removed by their own ACK, which may never come, so
+    /// the log needs an upper bound. Anything older than the longest round trip
+    /// this sender will believe cannot still be answered.
+    fn record_probe(&mut self, seq: i32, send_time_ms: u64) {
+        use crate::config_snapshot::{PROBE_LOG_MAX_AGE_MS, PROBE_LOG_SOFT_CAP};
+        if self.probe_log.len() >= PROBE_LOG_SOFT_CAP {
+            let cutoff = send_time_ms.saturating_sub(PROBE_LOG_MAX_AGE_MS);
+            self.probe_log.retain(|_, sent| *sent >= cutoff);
+            // Still full of live entries: this link is being probed faster than
+            // it can answer, so the oldest are the least useful. Start over
+            // rather than grow without bound.
+            if self.probe_log.len() >= PROBE_LOG_SOFT_CAP {
+                self.probe_log.clear();
+            }
+        }
+        self.probe_log.insert(seq, send_time_ms);
     }
 
     /// Check if the batch queue needs time-based flushing (15ms interval)
@@ -1023,6 +1085,7 @@ impl SrtlaConnection {
             );
         }
         self.packet_log.clear();
+        self.probe_log.clear();
         self.in_flight_packets = 0;
         self.highest_acked_seq = i32::MIN;
         self.congestion.reset();
@@ -1042,6 +1105,7 @@ impl SrtlaConnection {
         self.window = WINDOW_DEF * WINDOW_MULT;
         self.in_flight_packets = 0;
         self.packet_log.clear();
+        self.probe_log.clear();
         self.highest_acked_seq = i32::MIN;
         self.batch_sender.reset();
         self.phase = LinkPhase::Registering;

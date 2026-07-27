@@ -33,6 +33,7 @@ fn build_connection(local_ip: IpAddr, label: String) -> SrtlaConnection {
         window: WINDOW_DEF * WINDOW_MULT,
         in_flight_packets: 0,
         packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
+        probe_log: FxHashMap::default(),
         highest_acked_seq: i32::MIN,
         last_received: Some(now_ms()),
         last_sent: None,

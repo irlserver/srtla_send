@@ -360,9 +360,16 @@ pub async fn handle_srt_packet(
                     packet_time_ms,
                 )
                 .await;
-                if seq.is_some() {
-                    send_stall_probes(sel_idx, pkt, seq, connections, conn_io, packet_time_ms)
-                        .await;
+                if let Some(probe_seq) = seq {
+                    send_stall_probes(
+                        sel_idx,
+                        pkt,
+                        probe_seq,
+                        connections,
+                        conn_io,
+                        packet_time_ms,
+                    )
+                    .await;
                 }
             } else {
                 warn!("no available connection to forward packet from {}", src);
@@ -468,11 +475,13 @@ pub async fn forward_via_connection(
 /// the sequence to the link that carried the unique copy, so a NAK still
 /// penalizes the link that actually lost stream data. The SRTLA ACK for the
 /// probe attributes correctly because `process_connection_events` matches the
-/// arrival link's packet log first.
+/// arrival link first, and the probe is recorded in that link's own
+/// sweep-proof probe log (see `SrtlaConnection::queue_probe_packet`) rather
+/// than the packet log a cumulative ACK would prune it from.
 async fn send_stall_probes(
     sel_idx: usize,
     pkt: &[u8],
-    seq: Option<u32>,
+    probe_seq: u32,
     connections: &mut [SrtlaConnection],
     conn_io: &ConnIoMap,
     packet_time_ms: u64,
@@ -487,7 +496,10 @@ async fn send_stall_probes(
         if !conn.stall_probe_due() {
             continue;
         }
-        trace!("{}: sending duplicate probe (seq {:?})", conn.label, seq);
+        trace!(
+            "{}: sending duplicate probe (seq {})",
+            conn.label, probe_seq
+        );
         // Flag the copy as a retransmission. The receiver dedups it by sequence
         // either way, but an SRTLA-patched receiver feeds every *non*-retransmit
         // into its reorder-hold estimator — the inter-link transit spread that
@@ -499,7 +511,7 @@ async fn send_stall_probes(
         // this proxy never decrypts.
         let mut probe: SmallVec<u8, 1500> = SmallVec::from_slice_copy(pkt);
         srtla_protocol::set_srt_data_retransmit(&mut probe);
-        let needs_flush = conn.queue_data_packet(&probe, seq, packet_time_ms);
+        let needs_flush = conn.queue_probe_packet(&probe, probe_seq, packet_time_ms);
         if needs_flush
             && let Some(io) = conn_io.get(&conn.conn_id)
             && let Err(e) = send_connection_batch(conn, &io.socket).await

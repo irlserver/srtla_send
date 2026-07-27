@@ -82,6 +82,18 @@ impl SrtlaConnection {
     /// Handle SRTLA ACK for a specific sequence. O(1) remove.
     #[inline]
     pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool, now_ms: u64) -> bool {
+        // A probe this link sent, answered on this link. It proves the path
+        // delivered a data-sized packet and yields a real round trip, but it is
+        // not payload: it must not move the congestion window, or a held-out
+        // link would inflate the very window that makes it seize the stream on
+        // release. Checked first — the sweep-proof log is where a slow link's
+        // probes actually survive to be answered.
+        if let Some(sent_ms) = self.probe_log.remove(&seq) {
+            self.last_ack_or_rtt_sample_ms = now_ms;
+            self.rtt.record_round_trip(sent_ms, now_ms);
+            return true;
+        }
+
         let sent_ms = self.packet_log.remove(&seq);
         if let Some(sent_ms) = sent_ms {
             self.in_flight_packets = self.packet_log.len() as i32;
@@ -95,11 +107,7 @@ impl SrtlaConnection {
             // ...and the same ACK is a per-link round trip: we sent this exact
             // sequence on this exact socket and the receiver acknowledged it
             // back on it. Dropping the send timestamp here used to throw that
-            // sample away, which mattered most where it was the only one left:
-            // a stall-gated link carries no unique payload and earns no SRT
-            // ACKs, so its duplicate probes are the sole live measurement of
-            // the path, and the rejoin decision was reading an estimate that
-            // had not moved since the link went quiet.
+            // sample away.
             self.rtt.record_round_trip(sent_ms, now_ms);
 
             if classic_mode {

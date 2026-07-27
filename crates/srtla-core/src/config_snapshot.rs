@@ -39,6 +39,17 @@ pub const STALL_STALE_FLOOR_MS: u64 = 1000;
 /// cannot flap back in and re-glitch the stream.
 pub const STALL_REJOIN_DWELL_MULT: u64 = 2;
 
+/// Size at which the outstanding-probe log starts expiring entries. A probe is
+/// only removed by its own SRTLA ACK, which may never arrive, so the log needs
+/// a bound. Well above the number a link can have outstanding at the 1-in-N
+/// probe rate even at a multi-second RTT.
+pub const PROBE_LOG_SOFT_CAP: usize = 128;
+
+/// Age at which an unanswered probe is dropped from that log. Matches the
+/// longest round trip the RTT estimator will accept: past it, no arriving ACK
+/// could produce a usable measurement anyway.
+pub const PROBE_LOG_MAX_AGE_MS: u64 = 10_000;
+
 /// Share a link starts the post-rejoin ramp at, as a fraction of its natural
 /// selection score. Non-zero so a rejoining link is always ranked (it must
 /// carry *something* to reveal how it behaves under load), and comfortably
