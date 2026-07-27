@@ -235,6 +235,10 @@ pub struct SrtlaConnection {
     /// Length of the ramp above, snapshotted from the rejoin dwell when the
     /// latch released so the read path needs no config.
     pub(crate) stall_rejoin_ramp_ms: u64,
+    /// Whether the running ramp was armed by the stall gate. Disabling that
+    /// guard at runtime drops its ramps to restore baseline scoring, and must
+    /// leave ramps armed by the other gates alone.
+    pub(crate) stall_rejoin_ramp_from_stall_gate: bool,
     /// Elected to keep carrying the payload while every schedulable link is
     /// quality-gated. Sticky: held until this link is no longer the worst
     /// option, so the payload path cannot ping-pong between two failing links
@@ -245,10 +249,12 @@ pub struct SrtlaConnection {
     /// True while the sole-carrier election is running and this link lost it.
     /// Kept across passes so the falling edge can arm the rejoin ramp.
     pub(crate) sole_carrier_excluded: bool,
-    /// Cumulative count of sole-carrier handovers to this link. Monotonic over
-    /// the connection's life; exported in stats, because a field log that
-    /// shows the role changing every second is the signature of the failure
-    /// this stickiness exists to prevent.
+    /// Cumulative count of sole-carrier handovers to this link: times it took
+    /// the role *from another link*. Taking a vacant role is not counted, so
+    /// this is a pure churn signal — a field log that shows it climbing every
+    /// second or two is the ping-pong the stickiness exists to prevent, and
+    /// says the margin or the minimum hold is wrong for these links. Monotonic
+    /// over the connection's life.
     pub(crate) sole_carrier_elections: u64,
     /// Fast transient tier below the stall latch: true while this loaded link
     /// has received *nothing at all* for the silence-pull window (see
@@ -355,6 +361,7 @@ impl SrtlaConnection {
             stall_probe_counter: 0,
             stall_rejoin_ramp_start_ms: 0,
             stall_rejoin_ramp_ms: 0,
+            stall_rejoin_ramp_from_stall_gate: false,
             sole_carrier: false,
             sole_carrier_since_ms: 0,
             sole_carrier_excluded: false,
@@ -738,21 +745,33 @@ impl SrtlaConnection {
             self.stall_recovery_since_ms = 0;
             // Arm the share ramp: the link has proven it can deliver probes,
             // not that it can carry the stream (see `rejoin_ramp_multiplier`).
-            self.arm_rejoin_ramp(now_ms, dwell_ms);
+            self.arm_rejoin_ramp(now_ms, dwell_ms, true);
         }
     }
 
-    /// Start (or restart) the post-rejoin share ramp.
+    /// Start the post-rejoin share ramp, unless one is already running.
     ///
-    /// Called wherever a link stops being held out of the payload rotation —
-    /// the stall latch releasing, or losing then regaining a sole-carrier
-    /// election. Both leave the link with a drained backlog and an inflated
-    /// score it did not earn, which is exactly what the ramp exists to price
-    /// out (see [`rejoin_ramp_multiplier`]).
+    /// Called wherever a link stops being held out of the payload rotation:
+    /// the stall latch releasing, a sole-carrier election ending, or a quality
+    /// exclusion lifting. All three leave the link with a drained backlog and
+    /// an inflated score it did not earn, which is what the ramp prices out
+    /// (see [`rejoin_ramp_multiplier`]).
+    ///
+    /// An in-progress ramp is never restarted. The gates above can re-arm at
+    /// classifier cadence when a verdict flaps, and restarting each time would
+    /// pin a link at the ramp floor for as long as the flapping lasts — the
+    /// link would never finish earning its share back, which is its own kind
+    /// of starvation. `from_stall_gate` records who armed it, so disabling the
+    /// stall guard at runtime can drop the ramps that guard created without
+    /// touching anyone else's.
     #[inline]
-    pub(crate) fn arm_rejoin_ramp(&mut self, now_ms: u64, ramp_ms: u64) {
+    pub(crate) fn arm_rejoin_ramp(&mut self, now_ms: u64, ramp_ms: u64, from_stall_gate: bool) {
+        if self.rejoin_ramp_multiplier(now_ms) < 1.0 {
+            return;
+        }
         self.stall_rejoin_ramp_start_ms = now_ms;
         self.stall_rejoin_ramp_ms = ramp_ms;
+        self.stall_rejoin_ramp_from_stall_gate = from_stall_gate;
     }
 
     /// Whether this link is currently held out of the payload rotation on
@@ -761,6 +780,21 @@ impl SrtlaConnection {
     #[inline(always)]
     pub fn is_quality_excluded(&self) -> bool {
         self.quality_excluded
+    }
+
+    /// Drop every flag owned by the Enhanced quality gates.
+    ///
+    /// Only Enhanced selection maintains these, and the scheduling mode is
+    /// switchable at runtime, so Classic has to clear them rather than leave
+    /// them frozen at whatever they held when the mode changed. The rejoin
+    /// ramp is *not* cleared here: it is a scoring de-rate that Classic
+    /// ignores anyway, and it should still be running if the mode switches
+    /// back before it elapses.
+    pub(crate) fn clear_quality_gate_state(&mut self) {
+        self.quality_excluded = false;
+        self.sole_carrier = false;
+        self.sole_carrier_excluded = false;
+        self.sole_carrier_since_ms = 0;
     }
 
     /// Whether this link currently holds the sole-carrier role (stats export).
@@ -776,7 +810,7 @@ impl SrtlaConnection {
         self.sole_carrier_excluded
     }
 
-    /// Cumulative sole-carrier handovers to this link over its life.
+    /// Cumulative sole-carrier handovers *from another link* over its life.
     #[inline(always)]
     pub fn sole_carrier_elections(&self) -> u64 {
         self.sole_carrier_elections
@@ -811,10 +845,16 @@ impl SrtlaConnection {
     pub(crate) fn clear_stall_latch(&mut self) {
         self.stall_latched_since_ms = 0;
         self.stall_recovery_since_ms = 0;
-        // Including any ramp the latch left behind: with the guard off,
-        // scoring must be byte-for-byte baseline.
-        self.stall_rejoin_ramp_start_ms = 0;
-        self.stall_rejoin_ramp_ms = 0;
+        // Including any ramp this guard armed: with it off, its contribution
+        // to scoring must be gone. Ramps armed by the sole-carrier election or
+        // the quality exclusion survive — those gates are independent of this
+        // one and still running, and wiping their ramps here would silently
+        // undo them on every selection pass.
+        if self.stall_rejoin_ramp_from_stall_gate {
+            self.stall_rejoin_ramp_start_ms = 0;
+            self.stall_rejoin_ramp_ms = 0;
+            self.stall_rejoin_ramp_from_stall_gate = false;
+        }
     }
 
     /// Whether this link is currently stall-gated (routing view; stats export).
@@ -1021,6 +1061,7 @@ impl SrtlaConnection {
         // startup, so there is nothing left to ramp.
         self.stall_rejoin_ramp_start_ms = 0;
         self.stall_rejoin_ramp_ms = 0;
+        self.stall_rejoin_ramp_from_stall_gate = false;
         // A reset link cannot be carrying anything, so it cannot hold the role.
         // `sole_carrier_elections` survives like the other event counters.
         self.sole_carrier = false;

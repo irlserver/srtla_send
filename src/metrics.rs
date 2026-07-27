@@ -209,8 +209,8 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
 
     writeln!(
         out,
-        "# HELP srtla_send_link_sole_carrier_elections cumulative sole-carrier handovers to this \
-         link"
+        "# HELP srtla_send_link_sole_carrier_elections cumulative sole-carrier handovers taken \
+         from another link"
     )
     .ok();
     writeln!(out, "# TYPE srtla_send_link_sole_carrier_elections counter").ok();

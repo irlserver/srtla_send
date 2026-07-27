@@ -64,6 +64,12 @@ const SOLE_CARRIER_MARGIN: f64 = 2.0;
 /// that would justify changing it.
 const SOLE_CARRIER_MIN_HOLD_MS: u64 = 2000;
 
+/// Ramp length for a link released from a non-stall exclusion (a lost
+/// sole-carrier election, or a lifted quality gate). The stall gate ramps over
+/// its own rejoin dwell, which is derived from the staleness window; these
+/// gates have no such dwell, so they get a fixed window of the same order.
+const HELD_OUT_REJOIN_RAMP_MS: u64 = 2000;
+
 /// Should the sole-carrier role move from the incumbent to the challenger?
 ///
 /// Deliberately keyed on smoothed RTT rather than the selection score. The
@@ -187,13 +193,21 @@ fn elect_sole_carrier(
         (None, b) => b,
     };
 
+    // A handover is the role moving between two links. Re-forming the election
+    // around the same incumbent is not one, and must not be counted or allowed
+    // to restart the minimum hold — a sibling's `weak` flag flapping at
+    // classifier cadence tears the election down and rebuilds it repeatedly,
+    // and resetting the clock each time would mean the hold never elapses and
+    // a genuinely better link could never take over.
+    let handover = matches!((incumbent, keep), (Some(inc), Some(k)) if inc != k);
+
     for (i, c) in conns.iter_mut().enumerate() {
         if Some(i) == keep {
             // The carrier is back in the rotation, so any exclusion it was
             // serving has ended — and it drained while out, so it re-enters
             // on a ramp like any other rejoining link.
             if c.sole_carrier_excluded {
-                c.arm_rejoin_ramp(current_time_ms, SOLE_CARRIER_MIN_HOLD_MS);
+                c.arm_rejoin_ramp(current_time_ms, HELD_OUT_REJOIN_RAMP_MS, false);
             }
             if !c.sole_carrier {
                 debug!(
@@ -201,13 +215,21 @@ fn elect_sole_carrier(
                     c.label
                 );
                 c.sole_carrier = true;
-                c.sole_carrier_since_ms = current_time_ms;
-                c.sole_carrier_elections += 1;
+                if handover || c.sole_carrier_since_ms == 0 {
+                    c.sole_carrier_since_ms = current_time_ms;
+                }
+                if handover {
+                    c.sole_carrier_elections += 1;
+                }
             }
             c.sole_carrier_excluded = false;
         } else {
             c.sole_carrier = false;
-            c.sole_carrier_since_ms = 0;
+            if handover {
+                // Only a real handover clears the outgoing incumbent's clock;
+                // see above.
+                c.sole_carrier_since_ms = 0;
+            }
             // Only links that could have carried are "excluded"; one that is
             // unschedulable or gated for other reasons is not being held out
             // by this election and must not be given a ramp for it.
@@ -222,14 +244,17 @@ fn elect_sole_carrier(
 /// exclusion. A link held out of the rotation drained its backlog while its
 /// window kept recovering, so it comes back with the same unearned score
 /// advantage a stall-gated link has, and needs the same treatment.
+///
+/// The role clock is deliberately *not* cleared: see the handover note in
+/// [`elect_sole_carrier`]. If the election re-forms around the same link, it
+/// should keep credit for the time it has already served.
 #[inline]
 fn release_sole_carrier(c: &mut SrtlaConnection, current_time_ms: u64) {
     if c.sole_carrier_excluded {
-        c.arm_rejoin_ramp(current_time_ms, SOLE_CARRIER_MIN_HOLD_MS);
+        c.arm_rejoin_ramp(current_time_ms, HELD_OUT_REJOIN_RAMP_MS, false);
         c.sole_carrier_excluded = false;
     }
     c.sole_carrier = false;
-    c.sole_carrier_since_ms = 0;
 }
 
 /// In-flight cap (packets) as a bandwidth-delay product: the link's
@@ -377,8 +402,17 @@ pub fn select_connection(
     for (i, c) in conns.iter_mut().enumerate() {
         let schedulable = !c.is_timed_out(current_time_ms) && c.is_schedulable() && !c.stall_gated;
         let late = c.loss_degraded || (c.weak && c.weak_reason.is_delay());
-        c.quality_excluded = schedulable
+        let excluded = schedulable
             && ((any_unconstrained && late) || (sole_carrier.is_some() && Some(i) != sole_carrier));
+        // Falling edge: a link that was held out drained its backlog while its
+        // window kept recovering, so it comes back holding the same unearned
+        // score the stall gate ramps away. Ramp it too, or the gate that was
+        // protecting the stream hands the stream straight back to the link it
+        // was protecting it from.
+        if c.quality_excluded && !excluded {
+            c.arm_rejoin_ramp(current_time_ms, HELD_OUT_REJOIN_RAMP_MS, false);
+        }
+        c.quality_excluded = excluded;
     }
 
     // Score connections by base score; apply quality multiplier if enabled.
@@ -597,11 +631,13 @@ mod tests {
         failing(&mut conns[1], 1000.0);
         let now = 100_000;
 
-        // Lowest smoothed RTT wins the first election.
+        // Lowest smoothed RTT wins the first election. Taking the role when
+        // nobody held it is not a handover, so the churn counter stays at 0 —
+        // the `sole_carrier` gauge is what says the election engaged.
         assert_eq!(elect_sole_carrier(&mut conns, now, false), Some(0));
         assert!(conns[0].is_sole_carrier());
         assert!(conns[1].is_sole_carrier_excluded());
-        assert_eq!(conns[0].sole_carrier_elections(), 1);
+        assert_eq!(conns[0].sole_carrier_elections(), 0);
 
         // Link 1 pulls marginally ahead. Re-running the election every packet
         // on the instantaneous measurement is exactly what made librist's
@@ -615,7 +651,7 @@ mod tests {
                 "a marginally better sibling must not take the role"
             );
         }
-        assert_eq!(conns[0].sole_carrier_elections(), 1, "no churn");
+        assert_eq!(conns[0].sole_carrier_elections(), 0, "no churn");
     }
 
     #[test]
@@ -675,6 +711,103 @@ mod tests {
             conns[1].rejoin_ramp_multiplier(t) < 1.0,
             "a link released from exclusion drained while out, so it must ramp rather than seize \
              the stream on its inflated score"
+        );
+    }
+
+    #[test]
+    fn a_flapping_sibling_does_not_churn_the_role_or_restart_the_hold() {
+        // A third link's `weak` flag flipping at classifier cadence tears the
+        // election down and rebuilds it. The same link keeps the role each
+        // time, so nothing has actually happened: the churn counter must stay
+        // flat and — the part that bites — the minimum hold must not restart,
+        // or it never elapses and a genuinely better link can never take over.
+        let mut conns = two_conns();
+        failing(&mut conns[0], 900.0);
+        failing(&mut conns[1], 1000.0);
+        let mut now = 100_000;
+
+        assert_eq!(elect_sole_carrier(&mut conns, now, false), Some(0));
+
+        for _ in 0..5 {
+            now += 500;
+            // A link recovers: election off.
+            assert_eq!(elect_sole_carrier(&mut conns, now, true), None);
+            now += 500;
+            // ...and fails again: election back on, same winner.
+            assert_eq!(elect_sole_carrier(&mut conns, now, false), Some(0));
+        }
+        assert_eq!(
+            conns[0].sole_carrier_elections(),
+            0,
+            "re-forming around the same link is not a handover"
+        );
+
+        // 5s of flapping later, a clearly better challenger must be able to
+        // take the role — which it can only do if the hold kept accumulating.
+        failing(&mut conns[1], 100.0);
+        assert_eq!(elect_sole_carrier(&mut conns, now, false), Some(1));
+        assert_eq!(conns[1].sole_carrier_elections(), 1, "a real handover");
+    }
+
+    #[test]
+    fn an_in_progress_ramp_is_never_restarted() {
+        // Same flapping, seen from the excluded sibling: each teardown ends its
+        // exclusion and would re-arm a ramp. Restarting it every cycle would
+        // pin the link at the ramp floor for as long as the flapping lasts.
+        let mut conns = two_conns();
+        failing(&mut conns[0], 900.0);
+        failing(&mut conns[1], 1000.0);
+        let start = 100_000;
+
+        assert_eq!(elect_sole_carrier(&mut conns, start, false), Some(0));
+        assert!(conns[1].is_sole_carrier_excluded());
+        elect_sole_carrier(&mut conns, start + 100, true); // released, ramp armed
+        let after_first = conns[1].rejoin_ramp_multiplier(start + 100);
+        assert!(after_first < 1.0, "release must arm a ramp");
+
+        // Flap several more times well inside the ramp window.
+        let mut now = start + 100;
+        for _ in 0..4 {
+            now += 200;
+            elect_sole_carrier(&mut conns, now, false);
+            now += 200;
+            elect_sole_carrier(&mut conns, now, true);
+        }
+
+        // The ramp has been climbing the whole time, not resetting to the floor.
+        assert!(
+            conns[1].rejoin_ramp_multiplier(now) > after_first,
+            "a re-arm inside an active ramp must not restart it"
+        );
+    }
+
+    #[test]
+    fn lifting_a_quality_exclusion_ramps_the_link_back_in() {
+        use crate::selection::classifier::WeakReason;
+
+        // The exclusion drains the link exactly like the stall gate does, so
+        // its falling edge needs the same ramp — otherwise the gate protecting
+        // the stream hands the stream straight back to what it was protecting
+        // against.
+        let mut conns = two_conns();
+        let now = crate::utils::now_ms();
+        conns[0].weak = true;
+        conns[0].weak_reason = WeakReason::HighRtt;
+        conns[1].in_flight_packets = 40;
+
+        select_connection(&mut conns, None, now, true);
+        assert!(conns[0].is_quality_excluded());
+
+        // The delay verdict clears.
+        conns[0].weak = false;
+        conns[0].weak_reason = WeakReason::Healthy;
+        let later = now + 10;
+        select_connection(&mut conns, None, later, true);
+
+        assert!(!conns[0].is_quality_excluded());
+        assert!(
+            conns[0].rejoin_ramp_multiplier(later) < 1.0,
+            "a link released from a quality exclusion must ramp back in"
         );
     }
 

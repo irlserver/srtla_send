@@ -169,10 +169,11 @@ pub struct LinkStats {
     /// Whether a sibling holds that role and this link is being held out of
     /// the rotation because of it.
     pub sole_carrier_excluded: bool,
-    /// Cumulative sole-carrier handovers *to* this link. The number that
-    /// matters in a field log: a role that changes every second or two is the
-    /// ping-pong this election exists to prevent, and says the margin or the
-    /// minimum hold is wrong for these links.
+    /// Cumulative sole-carrier handovers *from another link* to this one.
+    /// Taking a vacant role is not counted, so this is a pure churn signal —
+    /// climbing every second or two is the ping-pong this election exists to
+    /// prevent, and says the margin or the minimum hold is wrong for these
+    /// links. Use the `sole_carrier` flag to see whether it engaged at all.
     pub sole_carrier_elections: u64,
 
     // --- In-flight cap soft admission gate ---

@@ -45,6 +45,7 @@ fn build_connection(local_ip: IpAddr, label: String) -> SrtlaConnection {
         stall_probe_counter: 0,
         stall_rejoin_ramp_start_ms: 0,
         stall_rejoin_ramp_ms: 0,
+        stall_rejoin_ramp_from_stall_gate: false,
         sole_carrier: false,
         sole_carrier_since_ms: 0,
         sole_carrier_excluded: false,
