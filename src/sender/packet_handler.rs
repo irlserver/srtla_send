@@ -74,8 +74,16 @@ pub async fn process_connection_events(
     let current_time_ms = srtla_core::utils::now_ms();
 
     for ack in incoming.ack_numbers.iter() {
+        // Every link prunes on a cumulative ACK — the receiver has the data,
+        // whichever link carried it — but only the link that carried the
+        // unique copy may take an RTT sample from it. The tracker never
+        // records duplicate probes, so a probing link resolves to `None` here
+        // and keeps its estimator free of round trips earned by the link that
+        // actually delivered.
+        let owner = seq_tracker.get(*ack, current_time_ms);
         for c in connections.iter_mut() {
-            c.handle_srt_ack(*ack as i32, current_time_ms);
+            let owns = owner == Some(c.conn_id);
+            c.handle_srt_ack(*ack as i32, current_time_ms, owns);
         }
     }
 

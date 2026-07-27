@@ -68,7 +68,7 @@ mod tests {
         assert_eq!(initial_in_flight, 5);
 
         // ACK the first three packets (acknowledge packets 10, 20, 30)
-        conn.handle_srt_ack(30, now_ms());
+        conn.handle_srt_ack(30, now_ms(), true);
 
         // Should have reduced in-flight count
         assert!(conn.in_flight_packets < 5);
@@ -77,7 +77,7 @@ mod tests {
         let initial_window = conn.window;
         conn.congestion.consecutive_acks_without_nak = 4; // Trigger window increase
         conn.congestion.last_window_increase_ms = now_ms() - 300; // Make sure enough time passed
-        conn.handle_srt_ack(40, now_ms());
+        conn.handle_srt_ack(40, now_ms(), true);
 
         assert!(conn.window >= initial_window);
     }
@@ -287,6 +287,41 @@ mod tests {
         let initial_window = conn.window;
         conn.handle_srtla_ack_global();
         assert_eq!(conn.window, initial_window + 1);
+    }
+
+    #[test]
+    fn cumulative_ack_only_measures_rtt_on_the_link_that_carried_the_seq() {
+        // A link held out of the payload rotation carries duplicate probes, so
+        // the same sequence sits in two links' packet logs. The cumulative ACK
+        // is broadcast to both — it prunes both, because the receiver has the
+        // data — but it must only measure the link that actually delivered it.
+        // Measuring the probing link would fold the *healthy* link's round trip
+        // into the estimator of the link whose lateness is the thing being
+        // judged, inventing fast samples for a path that delivered nothing.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let t0 = now_ms();
+
+        // Link 0 carries the unique copy; link 1 holds a duplicate probe.
+        conns[0].register_packet(30, t0);
+        conns[1].register_packet(30, t0);
+
+        // The ACK lands 40ms later. Link 0 owns seq 30; link 1 does not.
+        conns[0].handle_srt_ack(30, t0 + 40, true);
+        conns[1].handle_srt_ack(30, t0 + 40, false);
+
+        assert!(
+            conns[0].rtt.kalman_rtt.is_initialized(),
+            "the carrying link must measure the round trip"
+        );
+        assert!(
+            !conns[1].rtt.kalman_rtt.is_initialized(),
+            "the probing link must not adopt the carrier's round trip"
+        );
+        assert_eq!(
+            conns[1].in_flight_packets, 0,
+            "...but it must still prune: the receiver does have the data"
+        );
     }
 
     #[test]
@@ -642,7 +677,7 @@ mod tests {
 
         // Verify that packets can be found and acknowledged
         let recent_seq = (PKT_LOG_SIZE + 5) as i32;
-        conn.handle_srt_ack(recent_seq, now_ms());
+        conn.handle_srt_ack(recent_seq, now_ms(), true);
 
         // Should have reduced in-flight count and removed acked packets from log
         assert!(conn.in_flight_packets < PKT_LOG_SIZE as i32 + 10);
@@ -871,9 +906,10 @@ mod tests {
         assert_eq!(connections[2].in_flight_packets, 1);
 
         // Broadcast a cumulative ACK of 30 to every uplink, exactly as
-        // process_connection_events does (`for c in connections { c.handle_srt_ack }`).
-        for c in connections.iter_mut() {
-            c.handle_srt_ack(30, now_ms());
+        // process_connection_events does. Uplink 0 carried seq 30, so only it
+        // is told it owns the ACK; the others prune without measuring.
+        for (i, c) in connections.iter_mut().enumerate() {
+            c.handle_srt_ack(30, now_ms(), i == 0);
         }
 
         assert_eq!(

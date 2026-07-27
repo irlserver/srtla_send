@@ -18,7 +18,18 @@ impl SrtlaConnection {
     /// - Tracks highest_acked_seq to skip already-processed ACKs
     /// - Only removes packets in the range (highest_acked_seq, ack]
     /// - O(k) where k is packets in range, not O(n) for entire log
-    pub fn handle_srt_ack(&mut self, ack: i32, now_ms: u64) {
+    ///
+    /// `owns_acked_seq` says whether *this* link carried the unique copy of
+    /// `ack`, and gates the RTT sample. An SRT cumulative ACK is a flow-level
+    /// signal: the shell hands it to every link so they all prune, but it only
+    /// proves delivery by whichever link actually carried the sequence. A link
+    /// that holds `ack` merely as a duplicate probe would otherwise measure the
+    /// round trip of the *healthy* link that delivered the real copy and record
+    /// it as its own — a fast sample invented for a path that never delivered
+    /// anything, exactly on the links whose lateness is the thing being
+    /// measured. The shell resolves ownership through the sequence tracker,
+    /// which deliberately never records probe copies.
+    pub fn handle_srt_ack(&mut self, ack: i32, now_ms: u64, owns_acked_seq: bool) {
         // Skip if this ACK doesn't advance our highest acked sequence
         // This handles duplicate ACKs and out-of-order ACKs efficiently
         if ack <= self.highest_acked_seq {
@@ -50,8 +61,8 @@ impl SrtlaConnection {
         }
         self.in_flight_packets = self.packet_log.len() as i32;
 
-        // Update RTT estimate if we found the acked packet
-        if let Some(sent_ms) = ack_send_time_ms {
+        // Update RTT estimate if we found the acked packet *and* it was ours.
+        if owns_acked_seq && let Some(sent_ms) = ack_send_time_ms {
             self.rtt.record_round_trip(sent_ms, now_ms);
         }
     }
