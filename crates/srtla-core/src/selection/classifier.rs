@@ -337,9 +337,20 @@ impl WeakLinkFilter {
             // traffic and it can re-prove its share. Emitting not-weak clears
             // prev_weak across the window, so the post-window judgement uses
             // the (lower) entering threshold and a recovered link can actually
-            // win the re-test. Delay weakness is exempt (it self-clears from
-            // live RTT), and `loss_degraded` keeps gating an actually-bad link
-            // mid-window, so probation only ever re-tests marginal links.
+            // win the re-test.
+            //
+            // A live delay verdict cancels the window outright. Probation is
+            // only ever armed by *share* weakness — a link starved of traffic,
+            // which real traffic is the only way to re-test — but the window
+            // used to override whatever the current tick computed, including a
+            // sustained HighRtt/QueueBuilding verdict that appeared during it.
+            // That handed a link we can see is late a full share of unique
+            // payload for the rest of the window, which is the receiver stall
+            // the delay gate exists to prevent, on a timer. If the re-test is
+            // answered, and answered badly, it is over: the link waits out
+            // another share-weak streak before the next one. `loss_degraded`
+            // never routed through here at all — it gates independently — so
+            // it was, and remains, unaffected.
             let share_weak = weak && matches!(reason, WeakReason::LowShare | WeakReason::NoTraffic);
             let mut probation = self
                 .probation_ticks
@@ -347,7 +358,11 @@ impl WeakLinkFilter {
                 .copied()
                 .unwrap_or(0);
             let mut streak = self.weak_streak.get(&conn.conn_id).copied().unwrap_or(0);
-            let (weak, reason) = if probation > 0 {
+            let (weak, reason) = if probation > 0 && delay_weak {
+                probation = 0;
+                streak = 0;
+                (weak, reason)
+            } else if probation > 0 {
                 probation -= 1;
                 streak = 0;
                 (false, WeakReason::Healthy)
@@ -497,5 +512,114 @@ mod tests {
         let result = filter.classify(&[]);
         assert_eq!(result.selected_delay_ms, 0);
         assert!(result.per_link.is_empty());
+    }
+
+    // --- Probation re-test ---
+
+    fn set_rtt(conn: &mut SrtlaConnection, rtt_ms: f64) {
+        for _ in 0..16 {
+            conn.rtt.kalman_rtt.update(rtt_ms);
+        }
+    }
+
+    /// One healthy link carrying the stream plus one starved link. The starved
+    /// link's share sits far below the entering threshold, so it is share-weak
+    /// every tick and eventually earns a probation re-test.
+    fn starved_pair() -> smallvec::SmallVec<SrtlaConnection, 4> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(crate::test_helpers::create_test_connections(2));
+        conns[0].bitrate.current_bitrate_bps = 1_000_000.0;
+        set_rtt(&mut conns[0], 50.0);
+        conns[1].bitrate.current_bitrate_bps = 10_000.0;
+        set_rtt(&mut conns[1], 50.0);
+        conns
+    }
+
+    fn verdict(result: &ClassificationResult, conn_id: u64) -> (bool, WeakReason) {
+        let e = result
+            .per_link
+            .iter()
+            .find(|e| e.conn_id == conn_id)
+            .expect("link classified");
+        (e.weak, e.reason)
+    }
+
+    #[test]
+    fn probation_re_tests_a_share_starved_link() {
+        let conns = starved_pair();
+        let id = conns[1].conn_id;
+        let mut filter = WeakLinkFilter::new();
+
+        // Share-weak every tick, and stays gated right up to the trigger tick.
+        for tick in 0..PROBATION_INTERVAL_TICKS {
+            let r = filter.classify(&conns);
+            let (weak, reason) = verdict(&r, id);
+            assert!(weak, "tick {tick}: starved link should be weak");
+            assert_eq!(reason, WeakReason::LowShare);
+        }
+
+        // Window opens: real traffic is the only way to re-prove share.
+        let (weak, reason) = verdict(&filter.classify(&conns), id);
+        assert!(!weak, "probation must re-test the starved link");
+        assert_eq!(reason, WeakReason::Healthy);
+    }
+
+    #[test]
+    fn a_delay_verdict_cancels_the_probation_window() {
+        // The hole this closes: probation used to override whatever the tick
+        // computed, so a link that went late *during* its re-test kept a full
+        // share of unique payload until the window ran out — the receiver
+        // stall the delay gate exists to prevent, on a 15s timer.
+        let mut conns = starved_pair();
+        let id = conns[1].conn_id;
+        let mut filter = WeakLinkFilter::new();
+
+        for _ in 0..PROBATION_INTERVAL_TICKS {
+            filter.classify(&conns);
+        }
+        // First window tick: still fast, so the re-test proceeds.
+        let (weak, _) = verdict(&filter.classify(&conns), id);
+        assert!(!weak, "precondition: the window opened");
+
+        // Loaded at last, the link turns out to be badly late. A delay verdict
+        // needs WEAK_SUSTAIN_TICKS consecutive samples to latch.
+        set_rtt(&mut conns[1], 3000.0);
+        let (weak, _) = verdict(&filter.classify(&conns), id);
+        assert!(!weak, "one late sample is still just a blip");
+
+        let (weak, reason) = verdict(&filter.classify(&conns), id);
+        assert!(weak, "a sustained delay verdict must end the re-test");
+        assert_eq!(reason, WeakReason::HighRtt);
+
+        // ...and it is cancelled, not merely suspended: the remaining window
+        // ticks must not resume handing the link unique payload.
+        for tick in 0..PROBATION_WINDOW_TICKS {
+            let (weak, reason) = verdict(&filter.classify(&conns), id);
+            assert!(weak, "tick {tick} after cancellation must stay gated");
+            assert_eq!(reason, WeakReason::HighRtt);
+        }
+    }
+
+    #[test]
+    fn a_link_that_is_late_never_earns_a_probation_window() {
+        // Delay weakness must not arm probation in the first place: it clears
+        // from live RTT, which keepalive echoes and probe ACKs keep supplying
+        // even while the link is held out of the rotation.
+        let mut conns = starved_pair();
+        let id = conns[1].conn_id;
+        set_rtt(&mut conns[1], 3000.0);
+        let mut filter = WeakLinkFilter::new();
+
+        for tick in 0..(PROBATION_INTERVAL_TICKS * 2) {
+            let (weak, reason) = verdict(&filter.classify(&conns), id);
+            assert!(weak, "tick {tick}: a late link stays weak");
+            if tick >= WEAK_SUSTAIN_TICKS {
+                assert_eq!(
+                    reason,
+                    WeakReason::HighRtt,
+                    "tick {tick}: and stays late, never re-tested"
+                );
+            }
+        }
     }
 }
