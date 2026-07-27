@@ -336,7 +336,8 @@ pub async fn handle_srt_packet(
             if seq.is_some()
                 && (critical_window.is_critical_now(packet_time_ms)
                     || srtla_protocol::is_srt_data_retransmit(pkt))
-                && let Some(best_idx) = srtla_core::priority::select_best_quality_idx(connections)
+                && let Some(best_idx) =
+                    srtla_core::priority::select_best_quality_idx(connections, packet_time_ms)
                 && sel_idx != Some(best_idx)
             {
                 trace!(

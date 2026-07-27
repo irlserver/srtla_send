@@ -91,16 +91,39 @@ impl CriticalWindow {
 }
 
 /// Pick the highest-quality connection for a packet that lands inside a
-/// critical window. Among connected, schedulable links, returns the one with
-/// the best quality multiplier; `None` if none are schedulable (caller falls
-/// back to normal selection). This is the action taken while
+/// critical window. Among connected, schedulable links that the scheduler has
+/// not held out of the payload rotation, returns the one with the best quality
+/// multiplier; `None` if there is no such link (caller falls back to normal
+/// selection). This is the action taken while
 /// [`CriticalWindow::is_critical_now`] is true.
-pub fn select_best_quality_idx(conns: &[crate::connection::SrtlaConnection]) -> Option<usize> {
+///
+/// Links the scheduler has gated — stall-gated black holes, and links held out
+/// for being late — are skipped, and that exclusion matters more here than
+/// anywhere else. This override exists to put the *most* latency-sensitive
+/// traffic (keyframes, and retransmits filling a hole the receiver is already
+/// waiting on) on the best path; routing it onto a link that was just declared
+/// too late to carry ordinary payload inverts the intent exactly.
+///
+/// The quality multiplier alone cannot be trusted to prevent that, because a
+/// held-out link carries no unique payload and therefore accrues no NAKs — NAK
+/// attribution runs through the sequence tracker, which never records duplicate
+/// probes — so its multiplier decays to a pristine 1.0 while the link actually
+/// carrying the stream absorbs every NAK. Left unchecked, the excluded link
+/// wins this comparison *systematically*, not occasionally.
+pub fn select_best_quality_idx(
+    conns: &[crate::connection::SrtlaConnection],
+    now_ms: u64,
+) -> Option<usize> {
     let mut best_idx = None;
     let mut best_quality = f64::NEG_INFINITY;
 
     for (i, conn) in conns.iter().enumerate() {
-        if !conn.connected || !conn.is_schedulable() {
+        if !conn.connected
+            || !conn.is_schedulable()
+            || conn.is_timed_out(now_ms)
+            || conn.is_stall_gated()
+            || conn.is_quality_excluded()
+        {
             continue;
         }
         let q = conn.quality_cache.multiplier;
@@ -146,12 +169,13 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conns = rt.block_on(create_test_connections(3));
+        let now = crate::utils::now_ms();
 
         conns[0].quality_cache.multiplier = 0.8;
         conns[1].quality_cache.multiplier = 1.1;
         conns[2].quality_cache.multiplier = 0.95;
 
-        assert_eq!(select_best_quality_idx(&conns), Some(1));
+        assert_eq!(select_best_quality_idx(&conns, now), Some(1));
     }
 
     #[test]
@@ -160,18 +184,62 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conns = rt.block_on(create_test_connections(3));
+        let now = crate::utils::now_ms();
 
         conns[0].quality_cache.multiplier = 0.8;
         conns[1].quality_cache.multiplier = 1.1;
         conns[1].connected = false; // best quality but disconnected
         conns[2].quality_cache.multiplier = 0.95;
 
-        assert_eq!(select_best_quality_idx(&conns), Some(2));
+        assert_eq!(select_best_quality_idx(&conns, now), Some(2));
     }
 
     #[test]
     fn best_quality_idx_empty() {
         let conns: Vec<crate::connection::SrtlaConnection> = vec![];
-        assert_eq!(select_best_quality_idx(&conns), None);
+        assert_eq!(select_best_quality_idx(&conns, 0), None);
+    }
+
+    #[test]
+    fn best_quality_idx_skips_links_held_out_of_the_rotation() {
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(3));
+        let now = crate::utils::now_ms();
+
+        // The held-out links have pristine quality precisely *because* they are
+        // held out: carrying no unique payload, they accrue no NAKs, while the
+        // link doing the work absorbs them all. Without the gate check they
+        // would win the override and take the keyframes.
+        conns[0].quality_cache.multiplier = 1.0;
+        conns[0].stall_gated = true;
+        conns[1].quality_cache.multiplier = 1.0;
+        conns[1].quality_excluded = true;
+        conns[2].quality_cache.multiplier = 0.4;
+
+        assert_eq!(
+            select_best_quality_idx(&conns, now),
+            Some(2),
+            "critical traffic must go to the link that is actually carrying, however battered, \
+             not to one the scheduler just excluded"
+        );
+    }
+
+    #[test]
+    fn best_quality_idx_declines_when_every_link_is_held_out() {
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = crate::utils::now_ms();
+
+        conns[0].stall_gated = true;
+        conns[1].quality_excluded = true;
+
+        // `None` hands the decision back to normal selection, which has its own
+        // never-empty-the-pool guarantees. The override must not invent a
+        // carrier here.
+        assert_eq!(select_best_quality_idx(&conns, now), None);
     }
 }
