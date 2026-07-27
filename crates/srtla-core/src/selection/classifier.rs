@@ -98,6 +98,37 @@ const PROBATION_INTERVAL_TICKS: u32 = 15;
 /// it can't use.
 const PROBATION_WINDOW_TICKS: u32 = 3;
 
+/// Ceiling on the probation-interval multiplier (see
+/// [`probation_backoff_next`]). At [`PROBATION_INTERVAL_TICKS`] this caps the
+/// gap between re-tests at ~4 minutes.
+const PROBATION_BACKOFF_MAX: u32 = 16;
+
+/// Multiplier on [`PROBATION_INTERVAL_TICKS`] to use for the *next* re-test,
+/// given the multiplier that produced the window being armed now.
+///
+/// A held-out link carries almost nothing, so it drains: its queue empties and
+/// its RTT collapses to whatever an idle path measures, regardless of what it
+/// can actually sustain under load. Nothing about being gated tells us the link
+/// recovered, yet the fixed interval re-tested it on a timer forever — a link
+/// that genuinely cannot carry its share took a full [`PROBATION_WINDOW_TICKS`]
+/// of unique payload every [`PROBATION_INTERVAL_TICKS`], indefinitely, each
+/// window costing a routing transition and the receiver a reorder gap.
+///
+/// Doubling the wait every time a re-test fails to hold turns that permanent
+/// oscillation into an occasional probe: the link is still retried, just far
+/// enough apart that the stream stops paying for it. Callers reset to 1 the
+/// moment a re-test *does* hold, so a link recovering from a transient dip is
+/// never penalised. 0 and 1 both mean "no backoff yet".
+#[inline]
+fn probation_backoff_next(backoff: u32) -> u32 {
+    let doubled = if backoff <= 1 {
+        2
+    } else {
+        backoff.saturating_mul(2)
+    };
+    doubled.min(PROBATION_BACKOFF_MAX)
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WeakReason {
     /// Link passed all checks. Not weak.
@@ -165,6 +196,10 @@ pub struct WeakLinkFilter {
     /// Remaining forced not-weak ticks for a link currently inside a
     /// probation re-test window.
     probation_ticks: HashMap<u64, u32>,
+    /// Multiplier applied to `PROBATION_INTERVAL_TICKS` before the next
+    /// re-test, doubled per failed window and reset once one holds. 0 and 1
+    /// both mean 1x — see [`probation_backoff_next`].
+    probation_backoff: HashMap<u64, u32>,
 }
 
 impl WeakLinkFilter {
@@ -209,6 +244,7 @@ impl WeakLinkFilter {
             self.delay_weak_streak.clear();
             self.weak_streak.clear();
             self.probation_ticks.clear();
+            self.probation_backoff.clear();
             return ClassificationResult {
                 selected_delay_ms: 0,
                 estimated_max_delay_ms: 0,
@@ -260,6 +296,7 @@ impl WeakLinkFilter {
         let mut next_delay_streak: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
         let mut next_weak_streak: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
         let mut next_probation: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
+        let mut next_probation_backoff: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
 
         for conn in conns {
             if !conn.connected {
@@ -351,6 +388,13 @@ impl WeakLinkFilter {
             // another share-weak streak before the next one. `loss_degraded`
             // never routed through here at all — it gates independently — so
             // it was, and remains, unaffected.
+            //
+            // The wait before each re-test doubles while they keep failing (see
+            // `probation_backoff_next`). Escalation happens where the window is
+            // armed, so the first re-test is always free and the *next* one is
+            // the one pushed out; the reset lives in the healthy arm below,
+            // which is only reachable once the link is carrying its share again
+            // outside a window — the one state that proves a re-test held.
             let share_weak = weak && matches!(reason, WeakReason::LowShare | WeakReason::NoTraffic);
             let mut probation = self
                 .probation_ticks
@@ -358,6 +402,11 @@ impl WeakLinkFilter {
                 .copied()
                 .unwrap_or(0);
             let mut streak = self.weak_streak.get(&conn.conn_id).copied().unwrap_or(0);
+            let mut backoff = self
+                .probation_backoff
+                .get(&conn.conn_id)
+                .copied()
+                .unwrap_or(0);
             let (weak, reason) = if probation > 0 && delay_weak {
                 probation = 0;
                 streak = 0;
@@ -368,19 +417,30 @@ impl WeakLinkFilter {
                 (false, WeakReason::Healthy)
             } else if share_weak {
                 streak = streak.saturating_add(1);
-                if streak >= PROBATION_INTERVAL_TICKS {
+                let interval = PROBATION_INTERVAL_TICKS.saturating_mul(backoff.max(1));
+                if streak >= interval {
                     // Arm the window; this trigger tick stays gated, the next
                     // PROBATION_WINDOW_TICKS ticks are forced not-weak.
                     streak = 0;
                     probation = PROBATION_WINDOW_TICKS;
+                    backoff = probation_backoff_next(backoff);
                 }
                 (weak, reason)
             } else {
                 streak = 0;
+                // Only a *healthy* verdict clears the escalation. This arm is
+                // also reached by a link that is weak for a delay reason —
+                // including one whose re-test was just cancelled for being late
+                // — and forgiving the backoff there would hand the worst case a
+                // fixed-interval retry again.
+                if !weak {
+                    backoff = 1;
+                }
                 (weak, reason)
             };
             next_weak_streak.insert(conn.conn_id, streak);
             next_probation.insert(conn.conn_id, probation);
+            next_probation_backoff.insert(conn.conn_id, backoff);
 
             next_prev_weak.insert(conn.conn_id, weak);
             per_link.push(LinkClassification {
@@ -398,6 +458,7 @@ impl WeakLinkFilter {
         self.delay_weak_streak = next_delay_streak;
         self.weak_streak = next_weak_streak;
         self.probation_ticks = next_probation;
+        self.probation_backoff = next_probation_backoff;
         ClassificationResult {
             selected_delay_ms: selected_delay,
             estimated_max_delay_ms,
@@ -598,6 +659,114 @@ mod tests {
             assert!(weak, "tick {tick} after cancellation must stay gated");
             assert_eq!(reason, WeakReason::HighRtt);
         }
+    }
+
+    #[test]
+    fn probation_backoff_doubles_and_saturates() {
+        // First window is free; each failure thereafter doubles the wait.
+        assert_eq!(probation_backoff_next(0), 2);
+        assert_eq!(probation_backoff_next(1), 2);
+        assert_eq!(probation_backoff_next(2), 4);
+        assert_eq!(probation_backoff_next(8), 16);
+        // ...up to the ceiling, and no further.
+        assert_eq!(
+            probation_backoff_next(PROBATION_BACKOFF_MAX),
+            PROBATION_BACKOFF_MAX
+        );
+    }
+
+    #[test]
+    fn a_second_re_test_waits_twice_as_long_as_the_first() {
+        // The hole this closes: the interval was fixed, so a link that could
+        // never carry its share drew a full window of unique payload every
+        // PROBATION_INTERVAL_TICKS forever. A failed re-test must cost the link
+        // its place in the queue, not just reset the timer.
+        let conns = starved_pair();
+        let id = conns[1].conn_id;
+        let mut filter = WeakLinkFilter::new();
+
+        // First re-test, at the base interval.
+        for _ in 0..PROBATION_INTERVAL_TICKS {
+            filter.classify(&conns);
+        }
+        let (weak, _) = verdict(&filter.classify(&conns), id);
+        assert!(!weak, "precondition: the first window opened");
+        // Run the window out. The link is still starved, so it fails.
+        for _ in 1..PROBATION_WINDOW_TICKS {
+            filter.classify(&conns);
+        }
+
+        // Where the old code re-tested again, the link must stay gated.
+        for tick in 0..PROBATION_INTERVAL_TICKS {
+            let (weak, _) = verdict(&filter.classify(&conns), id);
+            assert!(weak, "tick {tick}: a failed re-test must not retry on time");
+        }
+        // It gets its second chance only after the doubled interval — the last
+        // of which is the arming tick, still gated.
+        for tick in 0..PROBATION_INTERVAL_TICKS {
+            let (weak, _) = verdict(&filter.classify(&conns), id);
+            assert!(weak, "tick {tick}: still inside the doubled interval");
+        }
+        let (weak, _) = verdict(&filter.classify(&conns), id);
+        assert!(!weak, "the doubled interval must still re-test eventually");
+    }
+
+    #[test]
+    fn a_re_test_that_holds_resets_the_backoff() {
+        // A link recovering from a transient dip must not inherit the
+        // escalation earned by whatever starved it earlier.
+        let mut conns = starved_pair();
+        let id = conns[1].conn_id;
+        let mut filter = WeakLinkFilter::new();
+
+        // Earn and fail one window, escalating to 2x.
+        for _ in 0..=PROBATION_INTERVAL_TICKS {
+            filter.classify(&conns);
+        }
+        for _ in 1..PROBATION_WINDOW_TICKS {
+            filter.classify(&conns);
+        }
+        assert_eq!(
+            filter.probation_backoff.get(&id).copied(),
+            Some(2),
+            "precondition: the failed window escalated"
+        );
+
+        // The link recovers and carries a real share outside any window.
+        conns[1].bitrate.current_bitrate_bps = 900_000.0;
+        let (weak, _) = verdict(&filter.classify(&conns), id);
+        assert!(!weak, "a link at full share is not weak");
+        assert_eq!(
+            filter.probation_backoff.get(&id).copied(),
+            Some(1),
+            "a re-test that held must clear the escalation"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_re_test_keeps_its_escalation() {
+        // Cancellation is the *worst* outcome — the link proved it goes late
+        // under load — so it must not be cheaper than simply staying starved.
+        let mut conns = starved_pair();
+        let id = conns[1].conn_id;
+        let mut filter = WeakLinkFilter::new();
+
+        for _ in 0..=PROBATION_INTERVAL_TICKS {
+            filter.classify(&conns);
+        }
+        // Loaded at last, the link turns out to be late; the window cancels.
+        set_rtt(&mut conns[1], 3000.0);
+        for _ in 0..=WEAK_SUSTAIN_TICKS {
+            filter.classify(&conns);
+        }
+        let (weak, reason) = verdict(&filter.classify(&conns), id);
+        assert!(weak, "precondition: the re-test was cancelled");
+        assert_eq!(reason, WeakReason::HighRtt);
+        assert_eq!(
+            filter.probation_backoff.get(&id).copied(),
+            Some(2),
+            "a link gated for lateness must keep the escalation it earned"
+        );
     }
 
     #[test]
