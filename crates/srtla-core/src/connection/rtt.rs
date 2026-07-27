@@ -13,6 +13,11 @@ const SLOW_WINDOW_SAMPLES: usize = 100;
 /// Number of samples in the min-RTT sample filter.
 const RTT_SAMPLE_FILTER_SIZE: usize = 15;
 
+/// Upper bound on a round trip we are willing to believe. Anything longer is
+/// a clock jump or a packet-log entry that outlived its send, not a path
+/// measurement, and folding it in would poison the estimator for minutes.
+const MAX_PLAUSIBLE_RTT_MS: u64 = 10_000;
+
 /// EWMA weight for the mean-absolute-successive-difference (MASD) of
 /// RTT. MASD is the average step size between consecutive samples; it
 /// measures jitter without being fooled by a slow standing-queue ramp
@@ -108,6 +113,29 @@ impl RttTracker {
         self.rtt_min_fast_window.clear();
         self.rtt_min_slow_window.clear();
         self.rtt_sample_filter.clear();
+    }
+
+    /// Fold one round trip into the smoothed RTT, rejecting samples that
+    /// cannot be real. Returns the accepted sample in ms, or `None`.
+    ///
+    /// Every per-link RTT source funnels through here — the SRT cumulative
+    /// ACK, the SRTLA per-packet ACK, and the keepalive echo — so all three
+    /// apply the same guard and, more importantly, all three actually reach
+    /// the estimator. A source that computes a round trip and then drops it
+    /// leaves the smoothed RTT frozen on any path where it is the only
+    /// probe, which silently blinds every consumer downstream (stall
+    /// gating, the weak-link delay tiers, the BDP in-flight cap).
+    ///
+    /// `rtt == 0` is rejected as hard as an implausibly long one: a same-ms
+    /// reply or a future timestamp from clock skew would seed `rtt_min_ms`
+    /// at zero and make the link look infinitely fast.
+    pub fn record_round_trip(&mut self, sent_ms: u64, now_ms: u64) -> Option<u64> {
+        let rtt = now_ms.saturating_sub(sent_ms);
+        if rtt == 0 || rtt > MAX_PLAUSIBLE_RTT_MS {
+            return None;
+        }
+        self.update_estimate(rtt, now_ms);
+        Some(rtt)
     }
 
     pub fn update_estimate(&mut self, rtt_ms: u64, now_ms: u64) {
@@ -235,12 +263,7 @@ impl RttTracker {
         }
         if let Some(ts) = extract_keepalive_timestamp(data) {
             let now = now_ms;
-            let rtt = now.saturating_sub(ts);
-            // Reject rtt == 0 (same-ms reply or future timestamp from clock skew):
-            // a 0ms RTT is not a real sample and would seed rtt_min_ms = 0, making
-            // the link look artificially fast. Matches the ACK path (ack_nak.rs).
-            if rtt > 0 && rtt <= 10_000 {
-                self.update_estimate(rtt, now);
+            if let Some(rtt) = self.record_round_trip(ts, now) {
                 self.waiting_for_keepalive_response = false;
                 debug!(
                     "{}: RTT from keepalive: {}ms (kalman: {:.1}ms, velocity: {:.2}ms/s, jitter: \

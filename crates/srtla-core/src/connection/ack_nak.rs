@@ -52,11 +52,7 @@ impl SrtlaConnection {
 
         // Update RTT estimate if we found the acked packet
         if let Some(sent_ms) = ack_send_time_ms {
-            let now = now_ms;
-            let rtt = now.saturating_sub(sent_ms);
-            if rtt > 0 && rtt <= 10_000 {
-                self.rtt.update_estimate(rtt, now);
-            }
+            self.rtt.record_round_trip(sent_ms, now_ms);
         }
     }
 
@@ -75,8 +71,8 @@ impl SrtlaConnection {
     /// Handle SRTLA ACK for a specific sequence. O(1) remove.
     #[inline]
     pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool, now_ms: u64) -> bool {
-        let found = self.packet_log.remove(&seq).is_some();
-        if found {
+        let sent_ms = self.packet_log.remove(&seq);
+        if let Some(sent_ms) = sent_ms {
             self.in_flight_packets = self.packet_log.len() as i32;
 
             // Delivery proof for `stall_deselect`: this link OWNED the acked seq,
@@ -84,6 +80,16 @@ impl SrtlaConnection {
             // and at the keepalive-RTT site only (see `packet_io.rs`), never on
             // generic inbound bytes, so a stalled-but-echoing link stays stale.
             self.last_ack_or_rtt_sample_ms = now_ms;
+
+            // ...and the same ACK is a per-link round trip: we sent this exact
+            // sequence on this exact socket and the receiver acknowledged it
+            // back on it. Dropping the send timestamp here used to throw that
+            // sample away, which mattered most where it was the only one left:
+            // a stall-gated link carries no unique payload and earns no SRT
+            // ACKs, so its duplicate probes are the sole live measurement of
+            // the path, and the rejoin decision was reading an estimate that
+            // had not moved since the link went quiet.
+            self.rtt.record_round_trip(sent_ms, now_ms);
 
             if classic_mode {
                 self.congestion.handle_srtla_ack_specific_classic(
@@ -101,7 +107,7 @@ impl SrtlaConnection {
                 );
             }
         }
-        found
+        sent_ms.is_some()
     }
 
     pub fn handle_srtla_ack_global(&mut self) {

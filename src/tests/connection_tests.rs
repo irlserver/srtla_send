@@ -290,6 +290,61 @@ mod tests {
     }
 
     #[test]
+    fn test_srtla_ack_feeds_the_smoothed_rtt() {
+        // An SRTLA ACK is a per-link round trip: this link sent the sequence on
+        // its own socket and the receiver acknowledged it back on that socket.
+        // It used to be consumed for delivery proof only, with the send
+        // timestamp discarded — which left a gated link, whose duplicate probes
+        // earn nothing but these ACKs, driving its rejoin decision off a frozen
+        // RTT estimate.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        assert!(
+            !conn.rtt.kalman_rtt.is_initialized(),
+            "precondition: no RTT measured yet"
+        );
+
+        conn.register_packet(100, t0);
+        assert!(conn.handle_srtla_ack_specific(100, false, t0 + 50));
+
+        assert!(
+            conn.rtt.kalman_rtt.is_initialized(),
+            "the ACK's round trip must reach the estimator"
+        );
+        assert!(
+            (conn.get_smooth_rtt_ms() - 50.0).abs() < 1.0,
+            "smoothed RTT should be ~50ms, got {}",
+            conn.get_smooth_rtt_ms()
+        );
+    }
+
+    #[test]
+    fn test_srtla_ack_rejects_implausible_round_trip() {
+        // Same guard as every other RTT source: a zero-length round trip would
+        // seed rtt_min_ms at zero and make the link look infinitely fast.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        conn.register_packet(100, t0);
+        conn.register_packet(200, t0);
+
+        assert!(conn.handle_srtla_ack_specific(100, false, t0));
+        assert!(
+            !conn.rtt.kalman_rtt.is_initialized(),
+            "a same-millisecond ACK is not a measurement"
+        );
+
+        assert!(conn.handle_srtla_ack_specific(200, false, t0 + 20_000));
+        assert!(
+            !conn.rtt.kalman_rtt.is_initialized(),
+            "a 20s round trip is a clock jump, not a path measurement"
+        );
+    }
+
+    #[test]
     fn test_classic_vs_enhanced_mode_ack_handling() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
