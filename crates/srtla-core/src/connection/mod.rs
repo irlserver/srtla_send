@@ -19,6 +19,8 @@ use smallvec::SmallVec;
 use srtla_protocol::*;
 use tracing::debug;
 
+use crate::selection::classifier::WeakReason;
+
 pub const STARTUP_GRACE_MS: u64 = 5_000;
 
 /// Number of RTT probes required before a link transitions from Warming to Live.
@@ -290,6 +292,17 @@ pub struct SrtlaConnection {
     /// tick from `WeakLinkFilter::classify`. Consumed by Enhanced
     /// selection as an admission gate.
     pub weak: bool,
+    /// Why the classifier called this link weak. Selection needs the reason,
+    /// not just the verdict: a *late* link must be kept off unique payload
+    /// entirely, while an under-used one has to keep carrying a little real
+    /// traffic to earn back the share that clears the verdict.
+    pub weak_reason: WeakReason,
+    /// Transient per-select flag: this link is held out of the payload
+    /// rotation on quality grounds — it is late (or loss-degraded) while a
+    /// healthy link can carry, or it lost the sole-carrier election.
+    /// Recomputed on every selection pass, like `stall_gated`. Read by the
+    /// shell to decide which links get duplicate probes.
+    pub(crate) quality_excluded: bool,
     /// Latest CC state from `LinkCcController::tick_all`. Drives the CC
     /// controller's own per-window bitrate backoff. It is intentionally
     /// *not* a routing-admission gate: `BackingOff` flips on a single
@@ -360,6 +373,8 @@ impl SrtlaConnection {
             batch_sender: BatchSender::new(),
             phase: LinkPhase::Registering,
             weak: false,
+            weak_reason: crate::selection::classifier::WeakReason::Healthy,
+            quality_excluded: false,
             cc_backing_off: false,
             cc_target_bps: 0,
             loss_degraded: false,
@@ -738,6 +753,14 @@ impl SrtlaConnection {
     pub(crate) fn arm_rejoin_ramp(&mut self, now_ms: u64, ramp_ms: u64) {
         self.stall_rejoin_ramp_start_ms = now_ms;
         self.stall_rejoin_ramp_ms = ramp_ms;
+    }
+
+    /// Whether this link is currently held out of the payload rotation on
+    /// quality grounds. The shell reads this to decide which links get
+    /// duplicate probes; stats and selection read the underlying flags.
+    #[inline(always)]
+    pub fn is_quality_excluded(&self) -> bool {
+        self.quality_excluded
     }
 
     /// Whether this link currently holds the sole-carrier role (stats export).

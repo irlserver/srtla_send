@@ -64,6 +64,8 @@ fn build_connection(local_ip: IpAddr, label: String) -> SrtlaConnection {
         batch_sender: BatchSender::new(),
         phase: LinkPhase::Live,
         weak: false,
+        weak_reason: crate::selection::classifier::WeakReason::Healthy,
+        quality_excluded: false,
         cc_backing_off: false,
         cc_target_bps: 0,
         loss_degraded: false,

@@ -434,16 +434,26 @@ pub async fn forward_via_connection(
     }
 }
 
-/// Duplicate-packet probing on stall-gated links (librist-style warm restore).
+/// Duplicate-packet probing on links held out of the rotation (librist-style
+/// warm restore).
 ///
-/// A gated link carries no unique payload, so its only delivery proof would be
-/// the 1 s keepalive echo — which proves the path echoes 38-byte control
+/// A held-out link carries no unique payload, so its only delivery proof would
+/// be the 1 s keepalive echo — which proves the path echoes 38-byte control
 /// frames, not that it can deliver data-sized packets. Instead, one in
 /// [`srtla_core::config_snapshot::STALL_PROBE_ONE_IN_N`] routed data packets is
-/// *also* queued on each gated link. The copy reuses the original SRT sequence
-/// number: the SRT receiver dedups it, so a lost or late probe can never stall
-/// the receiver buffer, while a delivered one earns the gated link an SRTLA ACK
-/// on its own socket — exactly the sustained proof the rejoin dwell requires.
+/// *also* queued on each held-out link. The copy reuses the original SRT
+/// sequence number: the SRT receiver dedups it, so a lost or late probe can
+/// never stall the receiver buffer, while a delivered one earns the link an
+/// SRTLA ACK on its own socket — both the sustained delivery proof the rejoin
+/// dwell requires and (since the ACK carries a round trip) the RTT sample the
+/// recovery decision reads.
+///
+/// Covers both reasons a link is held out: the stall gate, and the quality
+/// exclusion for a link that is *late* rather than merely under-used. The
+/// distinction matters — a late link must not be given unique payload at all,
+/// because a sequence number committed to a path running a second behind is
+/// precisely the hole the receiver's reorder buffer stalls on, so the trickle
+/// that keeps it measurable has to be redundant.
 ///
 /// Deliberately NOT inserted into `seq_tracker`: the tracker must keep mapping
 /// the sequence to the link that carried the unique copy, so a NAK still
@@ -462,7 +472,7 @@ async fn send_stall_probes(
         if i == sel_idx {
             continue;
         }
-        if !conn.is_stall_gated() || !conn.connected {
+        if !(conn.is_stall_gated() || conn.is_quality_excluded()) || !conn.connected {
             continue;
         }
         if !conn.stall_probe_due() {

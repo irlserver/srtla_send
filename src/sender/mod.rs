@@ -271,12 +271,17 @@ pub async fn run_sender_with_config(
                         let link_cc_snapshots = link_cc_controller
                             .tick_all(&connections, srtla_core::utils::now_ms());
                         for conn in connections.iter_mut() {
-                            conn.weak = classification
+                            let entry = classification
                                 .per_link
                                 .iter()
-                                .find(|e| e.conn_id == conn.conn_id)
-                                .map(|e| e.weak)
-                                .unwrap_or(false);
+                                .find(|e| e.conn_id == conn.conn_id);
+                            conn.weak = entry.map(|e| e.weak).unwrap_or(false);
+                            // Selection needs the reason, not just the verdict:
+                            // a late link is kept off unique payload entirely,
+                            // an under-used one keeps a trickle of it.
+                            conn.weak_reason = entry
+                                .map(|e| e.reason)
+                                .unwrap_or(srtla_core::selection::classifier::WeakReason::Healthy);
                             let cc_snap = link_cc_snapshots.get(&conn.conn_id);
                             conn.cc_backing_off = cc_snap
                                 .map(|s| s.state == srtla_core::selection::link_cc::CcState::BackingOff)

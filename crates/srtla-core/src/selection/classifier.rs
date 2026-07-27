@@ -117,6 +117,19 @@ pub enum WeakReason {
     Bypassed,
 }
 
+impl WeakReason {
+    /// Whether this verdict is about *delay* — the link is late, not merely
+    /// under-used. Selection treats the two differently: a late link must not
+    /// carry unique payload at all (its packets are what stalls the receiver's
+    /// reorder buffer), while an under-used one is kept on a small share of
+    /// real traffic, which is how it earns back the throughput share that
+    /// clears the verdict.
+    #[inline(always)]
+    pub fn is_delay(self) -> bool {
+        matches!(self, WeakReason::HighRtt | WeakReason::QueueBuilding)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LinkClassification {
     pub conn_id: u64,

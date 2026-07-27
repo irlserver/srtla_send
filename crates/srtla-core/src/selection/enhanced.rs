@@ -359,6 +359,28 @@ pub fn select_connection(
     });
     let sole_carrier = elect_sole_carrier(conns, current_time_ms, any_quality_ok);
 
+    // Decide who is held out of the payload rotation entirely, as opposed to
+    // merely demoted. Two cases, both about latency rather than capacity:
+    //
+    //  - A *late* link (delay-weak, or loss-degraded) while a healthy link can
+    //    carry. Every unique sequence number committed to a link running a
+    //    second behind is a hole the receiver's reorder buffer has to wait on,
+    //    so the demoted-but-still-carrying trickle is itself the glitch. Such
+    //    a link is instead probed with duplicates by the shell, which costs
+    //    the receiver nothing (it dedups by sequence) and still earns the ACK
+    //    and RTT samples the recovery decision needs.
+    //  - Anyone who lost the sole-carrier election.
+    //
+    // A link that is weak only for *share* reasons keeps its crushed-score
+    // trickle: it is not late, it is under-used, and unique traffic is exactly
+    // what it needs to earn back the throughput share that clears the verdict.
+    for (i, c) in conns.iter_mut().enumerate() {
+        let schedulable = !c.is_timed_out(current_time_ms) && c.is_schedulable() && !c.stall_gated;
+        let late = c.loss_degraded || (c.weak && c.weak_reason.is_delay());
+        c.quality_excluded = schedulable
+            && ((any_unconstrained && late) || (sole_carrier.is_some() && Some(i) != sole_carrier));
+    }
+
     // Score connections by base score; apply quality multiplier if enabled.
     //
     // Only the best link is tracked; nothing consumes the runner-up's rank.
@@ -373,25 +395,26 @@ pub fn select_connection(
         if c.is_timed_out(current_time_ms) || !c.is_schedulable() || c.stall_gated {
             continue;
         }
-        // With every link quality-gated, exactly one was elected to carry the
-        // payload; the rest are held out so the stream commits to one path
-        // instead of alternating between equally bad ones. The election only
-        // ever returns a link that passed the checks above, so this can never
-        // empty the candidate pool.
-        if let Some(carrier) = sole_carrier
-            && i != carrier
-        {
+        // Held out on quality grounds: a late link while a healthy one can
+        // carry, or a loser of the sole-carrier election. Both cases are
+        // computed above and both guarantee some other link is still
+        // rankable, so this can never empty the candidate pool.
+        if c.quality_excluded {
             continue;
         }
         // Hard-skip only the in-flight cap: it bounds queueing delay and
         // is transient (self-clears as the link drains), so piling more
-        // on is counterproductive. Quality gates (`weak`,
-        // `loss_degraded`) instead crush the score but keep the link
-        // rankable, so it is never starved into a permanent weak lock.
+        // on is counterproductive.
         if any_unconstrained && in_flight_cap_exceeded(c) {
             continue;
         }
-        let quality_gated = any_unconstrained && (c.weak || c.loss_degraded);
+        // Whatever weak links are left here are weak for share reasons only
+        // — the late ones were held out above. Crush the score but keep them
+        // rankable: the resulting trickle of real traffic is what lets a
+        // share-weak link earn back the share that clears the verdict, and
+        // without it the classifier reads the starvation it caused as more
+        // evidence of weakness.
+        let quality_gated = any_unconstrained && c.weak;
         let gate_mult = if quality_gated {
             GATED_LINK_PENALTY
         } else {
@@ -653,6 +676,74 @@ mod tests {
             "a link released from exclusion drained while out, so it must ramp rather than seize \
              the stream on its inflated score"
         );
+    }
+
+    #[test]
+    fn a_late_link_is_held_out_of_the_rotation_entirely() {
+        use crate::selection::classifier::WeakReason;
+
+        let mut conns = two_conns();
+        let now = crate::utils::now_ms();
+        conns[0].weak = true;
+        conns[0].weak_reason = WeakReason::HighRtt;
+        // Link 0 would win on raw score: the healthy link is the busy one.
+        conns[1].in_flight_packets = 40;
+
+        assert_eq!(select_connection(&mut conns, None, now, true), Some(1));
+        assert!(
+            conns[0].is_quality_excluded(),
+            "a late link must be held out, not trickled: every unique sequence number on it is a \
+             hole the receiver waits for"
+        );
+    }
+
+    #[test]
+    fn an_under_used_link_keeps_its_trickle_of_real_traffic() {
+        use crate::selection::classifier::WeakReason;
+
+        let mut conns = two_conns();
+        let now = crate::utils::now_ms();
+        conns[0].weak = true;
+        conns[0].weak_reason = WeakReason::LowShare;
+        conns[1].in_flight_packets = 40;
+
+        assert_eq!(select_connection(&mut conns, None, now, true), Some(1));
+        assert!(
+            !conns[0].is_quality_excluded(),
+            "share weakness is not lateness — the link needs real traffic to earn back the share \
+             that clears the verdict"
+        );
+    }
+
+    #[test]
+    fn a_loss_degraded_link_is_held_out_whatever_the_weak_reason() {
+        let mut conns = two_conns();
+        let now = crate::utils::now_ms();
+        conns[0].loss_degraded = true;
+        conns[1].in_flight_packets = 40;
+
+        assert_eq!(select_connection(&mut conns, None, now, true), Some(1));
+        assert!(conns[0].is_quality_excluded());
+    }
+
+    #[test]
+    fn nothing_is_held_out_when_no_healthy_link_can_carry() {
+        use crate::selection::classifier::WeakReason;
+
+        // Both links late: the exclusion must not fire on every link at once.
+        // One is elected to carry and the other is held out, but a link is
+        // always returned.
+        let mut conns = two_conns();
+        let now = crate::utils::now_ms();
+        for c in conns.iter_mut() {
+            c.weak = true;
+            c.weak_reason = WeakReason::HighRtt;
+        }
+        let picked = select_connection(&mut conns, None, now, true);
+        assert!(picked.is_some(), "selection must never drop the packet");
+        let picked = picked.unwrap();
+        assert!(!conns[picked].is_quality_excluded());
+        assert!(conns[picked].is_sole_carrier());
     }
 
     #[test]
