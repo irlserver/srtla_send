@@ -488,7 +488,18 @@ async fn send_stall_probes(
             continue;
         }
         trace!("{}: sending duplicate probe (seq {:?})", conn.label, seq);
-        let needs_flush = conn.queue_data_packet(pkt, seq, packet_time_ms);
+        // Flag the copy as a retransmission. The receiver dedups it by sequence
+        // either way, but an SRTLA-patched receiver feeds every *non*-retransmit
+        // into its reorder-hold estimator — the inter-link transit spread that
+        // delays its loss reports. A probe from a link running a second behind
+        // would pin that hold near its ceiling and slow recovery of real losses
+        // on the healthy links, to no purpose: the probed link carries no unique
+        // payload, so no gap is ever filled by waiting for it. See
+        // `set_srt_data_retransmit` for why flipping the bit is safe on traffic
+        // this proxy never decrypts.
+        let mut probe: SmallVec<u8, 1500> = SmallVec::from_slice_copy(pkt);
+        srtla_protocol::set_srt_data_retransmit(&mut probe);
+        let needs_flush = conn.queue_data_packet(&probe, seq, packet_time_ms);
         if needs_flush
             && let Some(io) = conn_io.get(&conn.conn_id)
             && let Err(e) = send_connection_batch(conn, &io.socket).await

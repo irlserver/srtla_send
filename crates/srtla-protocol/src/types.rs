@@ -70,3 +70,35 @@ pub fn get_srt_sequence_number(buf: &[u8]) -> Option<u32> {
 pub fn is_srt_data_retransmit(buf: &[u8]) -> bool {
     buf.len() >= 8 && (buf[0] & 0x80) == 0 && (buf[4] & 0x04) != 0
 }
+
+/// Set the R bit on a copy of an SRT data packet, marking it a retransmission.
+///
+/// Used for the duplicate probes sent on links held out of the payload
+/// rotation. The receiver dedups them by sequence number either way, but the
+/// flag changes how it accounts for them, and on an SRTLA-patched receiver that
+/// matters: every *non*-retransmitted data packet feeds the reorder-hold
+/// estimator, which measures the transit spread between bonded links and delays
+/// loss reports by up to that spread. A probe from a link running a second
+/// behind therefore pins the receiver's NAK hold near its ceiling — slowing
+/// recovery of genuine losses on the *healthy* links — even though the probed
+/// link carries no unique payload, so no gap will ever be filled by waiting for
+/// it. Flagged as a retransmit, the probe is excluded from that estimator, and
+/// from the reorder-tolerance ratchet on a stock receiver.
+///
+/// Safe to flip on an encrypted packet we never decrypted: the receiver zeroes
+/// this bit before computing the AES-GCM auth tag (and restores it after), so
+/// the tag never covered it. Dedup, the SRTLA per-packet ACK, and TSBPD are all
+/// indifferent to it.
+///
+/// Assumes the peers negotiated `SRT_OPT_REXMITFLG`, without which bit 26 is
+/// part of a 27-bit message number rather than a flag. Every libsrt advertises
+/// it unconditionally, and this crate already *reads* the bit as R in
+/// [`is_srt_data_retransmit`], so the assumption is not a new one.
+///
+/// No-op on anything that is not an SRT data packet.
+#[inline]
+pub fn set_srt_data_retransmit(buf: &mut [u8]) {
+    if buf.len() >= 8 && (buf[0] & 0x80) == 0 {
+        buf[4] |= 0x04;
+    }
+}

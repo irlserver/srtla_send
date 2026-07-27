@@ -29,7 +29,7 @@ pub use parsers::{
 #[allow(unused_imports)]
 pub use types::{
     ConnectionInfo, get_packet_type, get_srt_sequence_number, is_srt_ack, is_srt_data_retransmit,
-    is_srtla_keepalive, is_srtla_reg1, is_srtla_reg2, is_srtla_reg3,
+    is_srtla_keepalive, is_srtla_reg1, is_srtla_reg2, is_srtla_reg3, set_srt_data_retransmit,
 };
 
 #[cfg(test)]
@@ -121,6 +121,36 @@ mod tests {
         flags[0..4].copy_from_slice(&100u32.to_be_bytes());
         flags[4] = 0xf8; // PP=11 O=1 KK=11, R=0
         assert!(!is_srt_data_retransmit(&flags));
+
+        // Setting the bit is the inverse of reading it, and touches nothing
+        // else in the header — the sequence number in particular, which is
+        // what the receiver dedups a probe copy by.
+        let mut probe = [0u8; 16];
+        probe[0..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        probe[4..8].copy_from_slice(&0x0abc_defau32.to_be_bytes());
+        let before = probe;
+        set_srt_data_retransmit(&mut probe);
+        assert!(is_srt_data_retransmit(&probe), "R bit must be set");
+        assert_eq!(probe[0..4], before[0..4], "sequence number must not move");
+        assert_eq!(
+            probe[4] & !0x04,
+            before[4] & !0x04,
+            "no other flag in the second word may change"
+        );
+        assert_eq!(probe[5..], before[5..], "message number must not move");
+        // Idempotent: a copy of an already-retransmitted packet stays valid.
+        set_srt_data_retransmit(&mut probe);
+        assert!(is_srt_data_retransmit(&probe));
+
+        // Control packets and runt buffers are left alone.
+        let mut ctrl = [0u8; 16];
+        ctrl[0] = 0x80;
+        let ctrl_before = ctrl;
+        set_srt_data_retransmit(&mut ctrl);
+        assert_eq!(ctrl, ctrl_before, "control packets must not be touched");
+        let mut runt = [0u8; 4];
+        set_srt_data_retransmit(&mut runt);
+        assert_eq!(runt, [0u8; 4], "a runt buffer must not be indexed into");
 
         // Control packets (MSB set) are never retransmits.
         let mut ctrl = [0u8; 16];
