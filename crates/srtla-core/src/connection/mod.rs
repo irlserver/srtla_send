@@ -122,6 +122,39 @@ impl Default for CachedQuality {
     }
 }
 
+/// Share of its natural score a link should compete with while ramping back
+/// in after a stall gate, rising linearly from
+/// [`crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR`] to `1.0` over `ramp_ms`.
+///
+/// A gated link is the best-looking link in the pool, and that is an artefact.
+/// It carries nothing but 1-in-N duplicate probes, so its in-flight count
+/// drains to zero, while time-based window recovery keeps growing its window
+/// because no traffic means no NAKs — and the score is `window / (in_flight +
+/// 1)`. The instant the latch releases it therefore outranks every working
+/// link by a wide margin, clears the switch hysteresis without effort, and
+/// takes the whole stream. On a marginal link that refills the queue it just
+/// drained, so it re-stalls and re-gates, which is a stable oscillation rather
+/// than a recovery: librist measured the same loop on bonded cellular at a
+/// ~15 s period, for as long as the link stayed marginal.
+///
+/// Ramping makes the link earn its share back under a growing load, so it
+/// reveals congestion on the way up and settles at what it can actually carry.
+/// `ramp_start == 0` (never gated) or an elapsed ramp both mean full score.
+#[inline]
+pub fn rejoin_ramp_multiplier(ramp_start_ms: u64, ramp_ms: u64, now_ms: u64) -> f64 {
+    use crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR;
+    if ramp_start_ms == 0 || ramp_ms == 0 {
+        return 1.0;
+    }
+    let elapsed = now_ms.saturating_sub(ramp_start_ms);
+    if elapsed >= ramp_ms {
+        return 1.0;
+    }
+    let progress = elapsed as f64 / ramp_ms as f64;
+    (STALL_REJOIN_RAMP_FLOOR + (1.0 - STALL_REJOIN_RAMP_FLOOR) * progress)
+        .clamp(STALL_REJOIN_RAMP_FLOOR, 1.0)
+}
+
 pub struct SrtlaConnection {
     pub conn_id: u64,
     #[allow(dead_code)]
@@ -190,6 +223,16 @@ pub struct SrtlaConnection {
     /// Rolling counter driving the 1-in-N duplicate-probe cadence while gated
     /// (see [`crate::config_snapshot::STALL_PROBE_ONE_IN_N`]).
     pub(crate) stall_probe_counter: u32,
+    /// `now_ms()` when the stall latch last released; `0` = no ramp running.
+    /// Enhanced selection scales this link's score up from
+    /// [`crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR`] to full over
+    /// [`Self::stall_rejoin_ramp_ms`] from this instant, so a link that just
+    /// rejoined earns its share back under a growing load instead of seizing
+    /// the stream on the first packet (see [`rejoin_ramp_multiplier`]).
+    pub(crate) stall_rejoin_ramp_start_ms: u64,
+    /// Length of the ramp above, snapshotted from the rejoin dwell when the
+    /// latch released so the read path needs no config.
+    pub(crate) stall_rejoin_ramp_ms: u64,
     /// Fast transient tier below the stall latch: true while this loaded link
     /// has received *nothing at all* for the silence-pull window (see
     /// [`Self::is_briefly_silent`]). Unlike the latch it keys on
@@ -282,6 +325,8 @@ impl SrtlaConnection {
             stall_recovery_since_ms: 0,
             stall_gate_events: 0,
             stall_probe_counter: 0,
+            stall_rejoin_ramp_start_ms: 0,
+            stall_rejoin_ramp_ms: 0,
             silence_pulled: false,
             silence_pulls: 0,
             conn_timeout_ms: crate::config_snapshot::CONN_TIMEOUT_MS,
@@ -651,10 +696,34 @@ impl SrtlaConnection {
         }
         let dwell_ms = stale_ms.saturating_mul(crate::config_snapshot::STALL_REJOIN_DWELL_MULT);
         if now_ms.saturating_sub(self.stall_recovery_since_ms) >= dwell_ms {
-            debug!("{}: stall latch released after sustained proof", self.label);
+            debug!(
+                "{}: stall latch released after sustained proof, ramping share back over {}ms",
+                self.label, dwell_ms
+            );
             self.stall_latched_since_ms = 0;
             self.stall_recovery_since_ms = 0;
+            // Arm the share ramp: the link has proven it can deliver probes,
+            // not that it can carry the stream (see `rejoin_ramp_multiplier`).
+            self.stall_rejoin_ramp_start_ms = now_ms;
+            self.stall_rejoin_ramp_ms = dwell_ms;
         }
+    }
+
+    /// Fraction of its natural score this link should compete with right now,
+    /// in `[STALL_REJOIN_RAMP_FLOOR, 1.0]`. `1.0` whenever no ramp is running.
+    #[inline]
+    pub fn rejoin_ramp_multiplier(&self, now_ms: u64) -> f64 {
+        rejoin_ramp_multiplier(
+            self.stall_rejoin_ramp_start_ms,
+            self.stall_rejoin_ramp_ms,
+            now_ms,
+        )
+    }
+
+    /// Whether a post-rejoin share ramp is currently running (stats/telemetry).
+    #[inline(always)]
+    pub fn is_rejoin_ramping(&self, now_ms: u64) -> bool {
+        self.rejoin_ramp_multiplier(now_ms) < 1.0
     }
 
     /// Whether the stall latch is currently engaged (independent of whether a
@@ -669,6 +738,10 @@ impl SrtlaConnection {
     pub(crate) fn clear_stall_latch(&mut self) {
         self.stall_latched_since_ms = 0;
         self.stall_recovery_since_ms = 0;
+        // Including any ramp the latch left behind: with the guard off,
+        // scoring must be byte-for-byte baseline.
+        self.stall_rejoin_ramp_start_ms = 0;
+        self.stall_rejoin_ramp_ms = 0;
     }
 
     /// Whether this link is currently stall-gated (routing view; stats export).
@@ -869,6 +942,12 @@ impl SrtlaConnection {
         self.stall_latched_since_ms = 0;
         self.stall_recovery_since_ms = 0;
         self.stall_probe_counter = 0;
+        // The rejoin ramp exists to stop an inflated window from seizing the
+        // stream; a reset link goes back to the default window with an empty
+        // packet log, which is the same cold start every link makes at
+        // startup, so there is nothing left to ramp.
+        self.stall_rejoin_ramp_start_ms = 0;
+        self.stall_rejoin_ramp_ms = 0;
         // `silence_pulls` survives like `stall_gate_events`: both count
         // engagements over the link's life.
         self.silence_pulled = false;
@@ -969,5 +1048,55 @@ impl SrtlaConnection {
         // Reset reconnection tracking
         self.reconnection.last_reconnect_attempt_ms = now;
         self.reconnection.reconnect_failure_count = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR;
+
+    #[test]
+    fn ramp_is_inert_when_no_ramp_is_running() {
+        // Never gated.
+        assert_eq!(rejoin_ramp_multiplier(0, 1000, 500), 1.0);
+        // Armed with a zero-length dwell (degenerate config).
+        assert_eq!(rejoin_ramp_multiplier(100, 0, 500), 1.0);
+        // Ramp already elapsed.
+        assert_eq!(rejoin_ramp_multiplier(100, 1000, 1100), 1.0);
+        assert_eq!(rejoin_ramp_multiplier(100, 1000, 9999), 1.0);
+    }
+
+    #[test]
+    fn ramp_rises_linearly_from_the_floor_to_full() {
+        assert_eq!(
+            rejoin_ramp_multiplier(100, 1000, 100),
+            STALL_REJOIN_RAMP_FLOOR
+        );
+        let quarter = rejoin_ramp_multiplier(100, 1000, 350);
+        let half = rejoin_ramp_multiplier(100, 1000, 600);
+        let three_quarters = rejoin_ramp_multiplier(100, 1000, 850);
+        assert!((quarter - (STALL_REJOIN_RAMP_FLOOR + 0.95 * 0.25)).abs() < 1e-9);
+        assert!((half - (STALL_REJOIN_RAMP_FLOOR + 0.95 * 0.50)).abs() < 1e-9);
+        assert!((three_quarters - (STALL_REJOIN_RAMP_FLOOR + 0.95 * 0.75)).abs() < 1e-9);
+        assert!(quarter < half && half < three_quarters && three_quarters < 1.0);
+    }
+
+    #[test]
+    fn ramp_never_scores_a_rejoining_link_to_zero() {
+        // The link has to carry something, or it can never reveal how it
+        // behaves under load and the ramp would gate it forever.
+        for elapsed in 0..10 {
+            let m = rejoin_ramp_multiplier(1000, 100_000, 1000 + elapsed);
+            assert!(m >= STALL_REJOIN_RAMP_FLOOR, "ramp dropped to {m}");
+        }
+    }
+
+    #[test]
+    fn ramp_tolerates_a_clock_that_went_backwards() {
+        assert_eq!(
+            rejoin_ramp_multiplier(1000, 500, 900),
+            STALL_REJOIN_RAMP_FLOOR
+        );
     }
 }

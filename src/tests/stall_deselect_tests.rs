@@ -357,6 +357,126 @@ mod tests {
         assert!(!conns[0].stall_latched(), "guard off must clear the latch");
     }
 
+    // --- Post-rejoin share ramp (librist !375 afdc7ed6: a leg that rejoins at
+    // full weight re-floods the queue it drained while gated and re-mutes
+    // seconds later, oscillating for as long as the link stays marginal) ---
+
+    /// Route `count` packets and return how many each link won. Mirrors the
+    /// real feedback loop: routing a packet raises the winner's in-flight
+    /// count, which lowers its own score for the next one.
+    fn route(
+        conns: &mut [srtla_core::connection::SrtlaConnection],
+        now: u64,
+        count: usize,
+    ) -> (usize, usize) {
+        let mut picks = (0usize, 0usize);
+        for _ in 0..count {
+            // `last_idx: None` on every packet so the result is pure score,
+            // with no switch hysteresis mixed in.
+            match select_connection_idx(conns, None, now, &enhanced()) {
+                Some(0) => {
+                    picks.0 += 1;
+                    conns[0].in_flight_packets += 1;
+                }
+                Some(1) => {
+                    picks.1 += 1;
+                    conns[1].in_flight_packets += 1;
+                }
+                other => panic!("selection returned {other:?} with two usable links"),
+            }
+        }
+        picks
+    }
+
+    /// Drive link 0 through a full gate-and-release cycle and leave both links
+    /// at the moment of release: link 0 drained (as gating guarantees), link 1
+    /// carrying the stream. Returns that timestamp.
+    fn gate_then_release(conns: &mut [srtla_core::connection::SrtlaConnection], t0: u64) -> u64 {
+        make_stalled(&mut conns[0], t0);
+        make_healthy_busy(&mut conns[1], t0);
+        let _ = select_connection_idx(conns, None, t0, &enhanced());
+        assert!(conns[0].stall_gated, "precondition: link 0 gated");
+
+        // Gated means no unique payload, so the backlog drains to nothing.
+        conns[0].in_flight_packets = 0;
+
+        // Fresh delivery proof, sustained across the rejoin dwell.
+        let run_start = t0 + 100;
+        for c in conns.iter_mut() {
+            c.last_received = Some(run_start);
+            c.last_ack_or_rtt_sample_ms = run_start;
+        }
+        let _ = select_connection_idx(conns, None, run_start, &enhanced());
+        assert!(conns[0].stall_latched(), "one sample must not release");
+
+        let released = run_start + dwell_ms();
+        for c in conns.iter_mut() {
+            c.last_received = Some(released);
+            c.last_ack_or_rtt_sample_ms = released;
+        }
+        let _ = select_connection_idx(conns, None, released, &enhanced());
+        assert!(!conns[0].stall_latched(), "sustained proof must release");
+        released
+    }
+
+    #[test]
+    fn rejoining_link_ramps_its_share_instead_of_seizing_the_stream() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let released = gate_then_release(&mut conns, now_ms());
+
+        assert!(
+            conns[0].is_rejoin_ramping(released),
+            "releasing the latch must arm the share ramp"
+        );
+
+        // Both links start this round where the gate left them: link 0 drained
+        // by the gating, link 1 carrying the whole stream. On raw score that
+        // makes the *rejoining* link look 65x better than the one actually
+        // doing the work — the artefact the ramp exists to neutralise.
+        conns[0].in_flight_packets = 0;
+        conns[1].in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS * 2;
+        let (rejoiner, incumbent) = route(&mut conns, released, 60);
+
+        assert!(
+            rejoiner < incumbent,
+            "the rejoining link must not take the stream off the working one (rejoiner \
+             {rejoiner}, incumbent {incumbent})"
+        );
+        assert!(
+            rejoiner > 0,
+            "it must still carry something, or it can never prove itself"
+        );
+    }
+
+    #[test]
+    fn the_ramp_expires_and_the_link_competes_at_full_score() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let released = gate_then_release(&mut conns, now_ms());
+
+        // Same starting state, but the ramp has run its course.
+        let done = released + dwell_ms();
+        for c in conns.iter_mut() {
+            c.last_received = Some(done);
+            c.last_ack_or_rtt_sample_ms = done;
+        }
+        assert!(
+            !conns[0].is_rejoin_ramping(done),
+            "the ramp must expire on its own"
+        );
+
+        conns[0].in_flight_packets = 0;
+        conns[1].in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS * 2;
+        let (rejoiner, incumbent) = route(&mut conns, done, 60);
+
+        assert!(
+            rejoiner > incumbent,
+            "with the ramp expired the recovered link competes on raw capacity again (rejoiner \
+             {rejoiner}, incumbent {incumbent})"
+        );
+    }
+
     // --- RTT-adaptive staleness window (librist !375 field lesson: the
     // reaction window is the glitch window) ---
 

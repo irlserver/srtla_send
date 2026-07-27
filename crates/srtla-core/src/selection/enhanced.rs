@@ -197,7 +197,13 @@ pub fn select_connection(
         // go-live every link is warming, so an exclusion here would empty the
         // candidate pool and drop the stream; an equal de-rating leaves the
         // relative ranking intact and traffic flows immediately.
-        let base = c.get_score() as f64 * c.phase_weight();
+        // The rejoin ramp de-rates a link that just came out of a stall gate.
+        // Its score is inflated by the gating itself — no payload means the
+        // in-flight count drained to zero while time-based window recovery
+        // kept growing the window — so without the ramp it wins the first
+        // packet after release outright and refills the queue it just drained.
+        let base =
+            c.get_score() as f64 * c.phase_weight() * c.rejoin_ramp_multiplier(current_time_ms);
         let cap_mult = cc_soft_cap_multiplier(c);
         let score = if !enable_quality {
             base * cap_mult * gate_mult

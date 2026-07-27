@@ -39,6 +39,13 @@ pub const STALL_STALE_FLOOR_MS: u64 = 1000;
 /// cannot flap back in and re-glitch the stream.
 pub const STALL_REJOIN_DWELL_MULT: u64 = 2;
 
+/// Share a link starts the post-rejoin ramp at, as a fraction of its natural
+/// selection score. Non-zero so a rejoining link is always ranked (it must
+/// carry *something* to reveal how it behaves under load), and comfortably
+/// above the quality-gate penalty so a healthy rejoiner still outranks a link
+/// that is actively failing.
+pub const STALL_REJOIN_RAMP_FLOOR: f64 = 0.05;
+
 /// Duplicate-probe rate on a stall-gated link: one copy of every Nth routed
 /// data packet is also sent on each gated link. The copies are redundant (the
 /// SRT receiver dedups by sequence number), so a late or lost probe cannot
