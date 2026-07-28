@@ -7,11 +7,11 @@ use srtla_core::registration::SrtlaRegistrationManager;
 use srtla_core::selection::select_connection_idx;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, UplinkPacket};
-use crate::config::ConfigSnapshot;
+use crate::config::{ConfigSnapshot, DynamicConfig};
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -137,6 +137,7 @@ pub async fn handle_uplink_packet(
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
     config_snap: &ConfigSnapshot,
+    config: &DynamicConfig,
 ) {
     if packet.bytes.is_empty() {
         return;
@@ -167,6 +168,15 @@ pub async fn handle_uplink_packet(
                             )
                         }
                     }
+                }
+                // The SRT peer told us how deep its receive buffer is. That is
+                // the deadline every link is judged against, so it belongs on
+                // the shared config where the next `ConfigSnapshot` picks it up
+                // — not on the link that happened to carry the handshake.
+                if let Some(latency_ms) = incoming.negotiated_latency_ms
+                    && config.set_negotiated_latency_ms(latency_ms as u32)
+                {
+                    info!("SRT delivery budget is now {latency_ms}ms (from the peer's handshake)");
                 }
                 if let Err(err) = process_connection_events(
                     idx,
@@ -206,6 +216,7 @@ pub async fn drain_packet_queue(
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
     config_snap: &ConfigSnapshot,
+    config: &DynamicConfig,
 ) {
     // Process up to MAX_DRAIN_PACKETS to prevent CPU spikes from large queue bursts.
     // Remaining packets will be processed on the next event loop iteration.
@@ -223,6 +234,7 @@ pub async fn drain_packet_queue(
                     local_listener,
                     seq_tracker,
                     config_snap,
+                    config,
                 )
                 .await;
                 processed += 1;

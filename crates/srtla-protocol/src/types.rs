@@ -11,6 +11,26 @@ pub struct ConnectionInfo {
     pub bitrate_bytes_per_sec: u32,
 }
 
+/// TSBPD latency declared in an SRT handshake's HSREQ/HSRSP extension block.
+///
+/// Both halves are in milliseconds and each is `None` when the peer did not set
+/// the matching TSBPD flag, in which case the 16 bits are meaningless rather
+/// than zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SrtHandshakeLatency {
+    /// True for `SRT_CMD_HSRSP` (the responder's answer), false for
+    /// `SRT_CMD_HSREQ` (the initiator's proposal). Only the response carries
+    /// negotiated values: the responder resolves the two sides as
+    /// `max(own, proposed)` before echoing them back.
+    pub is_response: bool,
+    /// The sender of this block will *receive* with this TSBPD delay — i.e. how
+    /// long it holds a packet before delivering it downstream. From an HSRSP,
+    /// this is the deadline every packet we route has to beat.
+    pub rcv_ms: Option<u16>,
+    /// The delay the sender of this block expects its own peer to receive with.
+    pub snd_ms: Option<u16>,
+}
+
 /// Helper functions for packet type checking (used in tests)
 #[allow(dead_code)]
 pub fn is_srtla_reg1(buf: &[u8]) -> bool {

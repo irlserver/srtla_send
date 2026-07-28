@@ -45,6 +45,9 @@ use tracing::{debug, info, warn};
 pub use uplink::ConnIo;
 pub use uplink::ConnIoMap;
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
+// Re-exported so the handshake-sniffing tests drive the real receive path.
+#[allow(unused_imports)]
+pub(crate) use uplink_recv::process_uplink_packet;
 
 use crate::config::DynamicConfig;
 use crate::stats::SharedStats;
@@ -230,6 +233,7 @@ pub async fn run_sender_with_config(
                             &local_listener,
                             &seq_tracker,
                             &config_snap,
+                            &config,
                         )
                         .await;
                     }
@@ -246,6 +250,7 @@ pub async fn run_sender_with_config(
                                 &local_listener,
                                 &seq_tracker,
                                 &config_snap,
+                                &config,
                             ).await;
                             drain_packet_queue(
                                 &mut packet_rx,
@@ -257,6 +262,7 @@ pub async fn run_sender_with_config(
                                 &local_listener,
                                 &seq_tracker,
                                 &config_snap,
+                                &config,
                             ).await;
                         } else {
                             return Ok(());
@@ -354,6 +360,7 @@ pub async fn run_sender_with_config(
                             &local_listener,
                             &seq_tracker,
                             &config_snap,
+                            &config,
                         )
                         .await;
                     }
@@ -405,6 +412,7 @@ pub async fn run_sender_with_config(
                 &local_listener,
                 &seq_tracker,
                 &config_snap,
+                &config,
             )
             .await;
         }

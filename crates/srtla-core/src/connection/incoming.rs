@@ -13,4 +13,9 @@ pub struct SrtlaIncoming {
     /// sends it after `process_packet` returns, keeping the receive path free of
     /// uplink I/O.
     pub reg1_send: Option<[u8; SRTLA_TYPE_REG1_LEN]>,
+    /// TSBPD receive delay (ms) the far-end SRT listener declared in its
+    /// handshake response, when one just crossed this link. Session-scoped
+    /// rather than per-link: the shell stores it on the shared config, where the
+    /// delay budget in `ConfigSnapshot` picks it up.
+    pub negotiated_latency_ms: Option<u16>,
 }

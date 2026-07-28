@@ -130,6 +130,12 @@ pub struct ConfigSnapshot {
     /// Per-link liveness timeout in ms (default [`CONN_TIMEOUT_MS`]). Silence
     /// past this tears the link down and re-registers it.
     pub conn_timeout_ms: u64,
+    /// One-way delivery budget in ms: the TSBPD receive delay the far-end SRT
+    /// listener declared in its handshake response, so the deadline a packet on
+    /// any link has to beat. Zero until the handshake crosses (and on a peer
+    /// that runs without TSBPD), in which case consumers fall back to
+    /// estimating a budget from their own RTT samples.
+    pub negotiated_latency_ms: u32,
 }
 
 impl Default for ConfigSnapshot {
@@ -141,6 +147,7 @@ impl Default for ConfigSnapshot {
             stall_min_in_flight: STALL_MIN_IN_FLIGHT_PACKETS,
             stall_ack_stale_ms: STALL_ACK_STALE_MS,
             conn_timeout_ms: CONN_TIMEOUT_MS,
+            negotiated_latency_ms: 0,
         }
     }
 }

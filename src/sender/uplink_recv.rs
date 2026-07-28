@@ -114,6 +114,27 @@ pub async fn process_uplink_packet(
                     incoming.srtla_ack_numbers.push(seq);
                 }
             }
+        } else if pt == SRT_TYPE_HANDSHAKE {
+            // The far end declares its TSBPD receive delay in the clear here,
+            // and this is the only place we can see it: the scheduler otherwise
+            // has to guess a delay budget from its own RTT samples. Only the
+            // response is worth reading — an HSREQ crossing the other way is
+            // the local caller's *proposal*, whereas the responder has already
+            // resolved both sides to max(own, proposed) by the time it answers.
+            if let Some(hs) = parse_srt_handshake_latency(data)
+                && hs.is_response
+                && let Some(rcv_ms) = hs.rcv_ms
+            {
+                debug!(
+                    "{}: SRT peer declared a {}ms receive buffer",
+                    conn.label, rcv_ms
+                );
+                incoming.negotiated_latency_ms = Some(rcv_ms);
+            }
+            // Sniffing only — the handshake still belongs to the client.
+            incoming
+                .forward_to_client
+                .push(SmallVec::from_slice_copy(data));
         } else if pt == SRTLA_TYPE_KEEPALIVE {
             if conn
                 .rtt

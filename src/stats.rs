@@ -218,6 +218,12 @@ pub struct StatsSnapshot {
     /// Delay tier the cascade chose this tick (ms).
     pub weak_link_selected_delay_ms: u32,
 
+    /// One-way delivery budget in ms read off the SRT peer's handshake — the
+    /// TSBPD delay it will hold packets for. Zero until the handshake crosses,
+    /// or if the peer runs without TSBPD; the classifier estimates a budget
+    /// from its own RTT samples in that case.
+    pub negotiated_latency_ms: u32,
+
     /// Per-link details
     pub links: Vec<LinkStats>,
 }
@@ -233,6 +239,7 @@ impl Default for StatsSnapshot {
             total_in_flight: 0,
             weak_link_estimated_max_delay_ms: 0,
             weak_link_selected_delay_ms: 0,
+            negotiated_latency_ms: 0,
             links: Vec::new(),
         }
     }
@@ -277,6 +284,7 @@ impl SharedStats {
                 .map(|c| c.estimated_max_delay_ms)
                 .unwrap_or(0),
             weak_link_selected_delay_ms: classification.map(|c| c.selected_delay_ms).unwrap_or(0),
+            negotiated_latency_ms: config.negotiated_latency_ms,
             ..Default::default()
         };
 

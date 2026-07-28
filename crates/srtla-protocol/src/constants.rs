@@ -10,7 +10,6 @@ pub const SRTLA_TYPE_REG_NGP: u16 = 0x9211;
 pub const SRTLA_TYPE_REG_NAK: u16 = 0x9212;
 
 // SRT protocol constants (some used in tests or for protocol completeness)
-#[allow(dead_code)]
 pub const SRT_TYPE_HANDSHAKE: u16 = 0x8000;
 pub const SRT_TYPE_ACK: u16 = 0x8002;
 pub const SRT_TYPE_NAK: u16 = 0x8003;
@@ -18,6 +17,47 @@ pub const SRT_TYPE_NAK: u16 = 0x8003;
 pub const SRT_TYPE_SHUTDOWN: u16 = 0x8005;
 #[allow(dead_code)]
 pub const SRT_TYPE_DATA: u16 = 0x0000;
+
+// SRT handshake layout, for reading the negotiated TSBPD latency off the wire
+// (see `parse_srt_handshake_latency`). Field names and offsets follow libsrt's
+// `CHandShake` / `SrtHSRequest`.
+
+/// SRT control-packet header: `F|control type`, subtype, type-specific info,
+/// timestamp, destination socket ID. The handshake body follows it.
+pub const SRT_CONTROL_HEADER_LEN: usize = 16;
+
+/// Length of the UDT handshake body (libsrt's `CHandShake::m_iContentSize`):
+/// version, type, ISN, MSS, flight flag size, request type, socket ID, cookie,
+/// and a 16-byte peer address. SRT extension blocks follow it.
+pub const SRT_HANDSHAKE_CIF_LEN: usize = 48;
+
+/// Handshake version that carries SRT extension blocks. HSv4 sends its SRT
+/// handshake as a separate `UMSG_EXT` control packet instead, so extension
+/// parsing only ever applies to version 5.
+pub const SRT_HS_VERSION_5: u32 = 5;
+
+/// `URQ_CONCLUSION`: the second handshake phase, the only one carrying
+/// extensions. Induction (1), rendezvous agreement (-2) and the >= 1000
+/// rejection codes all fail this check.
+pub const SRT_HS_REQTYPE_CONCLUSION: i32 = -1;
+
+/// `CHandShake::HS_EXT_HSREQ` — bit in the handshake's extension field saying
+/// an HSREQ/HSRSP block is present.
+pub const SRT_HS_EXT_FLAG_HSREQ: u32 = 1 << 0;
+
+/// Extension-block commands we read. `SRT_CMD_HSREQ` is sent by the initiator,
+/// `SRT_CMD_HSRSP` is the responder's answer and carries the *negotiated*
+/// values.
+pub const SRT_HS_EXT_CMD_HSREQ: u16 = 1;
+pub const SRT_HS_EXT_CMD_HSRSP: u16 = 2;
+
+/// Words in an HSREQ/HSRSP block: version, flags, latency (`SRT_HS_E_SIZE`).
+pub const SRT_HS_EXT_HSREQ_WORDS: usize = 3;
+
+/// TSBPD flags in the HSREQ/HSRSP flags word. Each says whether the
+/// corresponding half of the latency word carries a real value.
+pub const SRT_HS_OPT_TSBPDSND: u32 = 1 << 0;
+pub const SRT_HS_OPT_TSBPDRCV: u32 = 1 << 1;
 
 // Packet size constants
 pub const SRTLA_ID_LEN: usize = 256;

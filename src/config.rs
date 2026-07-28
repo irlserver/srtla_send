@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 // The hot-path snapshot type + its default constants are core; they live in
 // `config_snapshot` (free of this module's control/stats coupling). Re-exported
@@ -32,6 +32,9 @@ pub struct DynamicConfig {
     stall_min_in_flight: Arc<AtomicI32>,
     stall_ack_stale_ms: Arc<AtomicU64>,
     conn_timeout_ms: Arc<AtomicU64>,
+    /// Learned from the wire rather than configured: see
+    /// [`DynamicConfig::set_negotiated_latency_ms`].
+    negotiated_latency_ms: Arc<AtomicU32>,
 }
 
 impl Default for DynamicConfig {
@@ -49,6 +52,7 @@ impl DynamicConfig {
             stall_min_in_flight: Arc::new(AtomicI32::new(STALL_MIN_IN_FLIGHT_PACKETS)),
             stall_ack_stale_ms: Arc::new(AtomicU64::new(STALL_ACK_STALE_MS)),
             conn_timeout_ms: Arc::new(AtomicU64::new(CONN_TIMEOUT_MS)),
+            negotiated_latency_ms: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -70,6 +74,7 @@ impl DynamicConfig {
             conn_timeout_ms: Arc::new(AtomicU64::new(
                 conn_timeout_ms.clamp(CONN_TIMEOUT_MS_MIN, CONN_TIMEOUT_MS_MAX),
             )),
+            negotiated_latency_ms: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -85,7 +90,23 @@ impl DynamicConfig {
             stall_min_in_flight: self.stall_min_in_flight.load(Ordering::Relaxed),
             stall_ack_stale_ms: self.stall_ack_stale_ms.load(Ordering::Relaxed),
             conn_timeout_ms: self.conn_timeout_ms.load(Ordering::Relaxed),
+            negotiated_latency_ms: self.negotiated_latency_ms.load(Ordering::Relaxed),
         }
+    }
+
+    /// Record the TSBPD receive delay the far-end SRT listener declared in its
+    /// handshake response. Returns true if this changed the stored value.
+    ///
+    /// Unlike everything else here this is not operator configuration — it is
+    /// read off the wire by [`crate::sender::uplink_recv`] as the handshake
+    /// crosses. It arrives once per SRT session, shortly after the first link
+    /// registers, and changes only if the session is re-established on
+    /// different terms; until then consumers see 0 and estimate a budget from
+    /// their own RTT samples instead.
+    pub fn set_negotiated_latency_ms(&self, latency_ms: u32) -> bool {
+        self.negotiated_latency_ms
+            .swap(latency_ms, Ordering::Relaxed)
+            != latency_ms
     }
 
     /// Get the current scheduling mode.
