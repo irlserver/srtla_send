@@ -447,6 +447,144 @@ mod tests {
         );
     }
 
+    // --- Timeliness of the proof itself (librist !375, 6ed9d2a3: delivery on a
+    // leg queued deeper than the receiver's buffer is not evidence of anything) ---
+
+    fn set_rtt(conn: &mut srtla_core::connection::SrtlaConnection, rtt_ms: f64) {
+        for _ in 0..16 {
+            conn.rtt.kalman_rtt.update(rtt_ms);
+        }
+        assert!(
+            (conn.get_smooth_rtt_ms() - rtt_ms).abs() < rtt_ms * 0.1,
+            "the RTT estimator must have converged for the test to mean anything"
+        );
+    }
+
+    fn with_budget(budget_ms: u32) -> ConfigSnapshot {
+        ConfigSnapshot {
+            negotiated_latency_ms: budget_ms,
+            ..enhanced()
+        }
+    }
+
+    /// Gate a link at `rtt_ms`, then feed it an unbroken run of fresh delivery
+    /// proof for three dwells through the real selection path. Returns whether
+    /// the latch ever released.
+    fn rejoins_at(rtt_ms: f64, budget_ms: u32) -> bool {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        let config = with_budget(budget_ms);
+
+        set_rtt(&mut conns[0], rtt_ms);
+        make_stalled(&mut conns[0], now);
+        make_healthy_busy(&mut conns[1], now);
+        let _ = select_connection_idx(&mut conns, None, now, &config);
+        assert!(conns[0].stall_latched(), "precondition: the latch engaged");
+
+        // The state a held-out link reaches for free: backlog drained, probes
+        // and keepalives answered, delivery proof fresh every tick.
+        conns[0].in_flight_packets = 0;
+        let mut t = now;
+        while t <= now + dwell_ms() * 3 {
+            t += 100;
+            conns[0].last_ack_or_rtt_sample_ms = t;
+            conns[1].last_ack_or_rtt_sample_ms = t;
+            let _ = select_connection_idx(&mut conns, None, t, &config);
+            if !conns[0].stall_latched() {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn proof_from_a_link_slower_than_the_buffer_does_not_count() {
+        // 2s round trip is 1s one way. Against a 500ms receive buffer nothing
+        // this link delivers can be played, so the fresh proof it keeps
+        // producing — keepalive echoes cost it nothing — is not evidence that
+        // it can carry the stream again.
+        assert!(
+            !rejoins_at(2000.0, 500),
+            "a link that cannot beat the deadline must not clear the dwell"
+        );
+    }
+
+    #[test]
+    fn the_same_link_rejoins_when_the_buffer_can_absorb_it() {
+        // Identical link and identical proof; only the receiver's buffer
+        // differs. 1s of one-way delay fits inside 4s, so the dwell decides as
+        // it always has.
+        assert!(rejoins_at(2000.0, 4000));
+    }
+
+    #[test]
+    fn an_undeclared_buffer_leaves_the_dwell_untouched() {
+        // No handshake seen (or a peer without TSBPD): there is nothing to
+        // measure against, so withholding proof would strand the link forever.
+        assert!(rejoins_at(2000.0, 0));
+    }
+
+    #[test]
+    fn a_link_that_speeds_back_up_is_let_in() {
+        // Nothing here stops RTT being measured, so a path that genuinely
+        // recovers crosses back over the bar on its own — the link is still
+        // retried, it just stops being retried on evidence it never earned.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        let config = with_budget(500);
+
+        set_rtt(&mut conns[0], 2000.0);
+        make_stalled(&mut conns[0], now);
+        make_healthy_busy(&mut conns[1], now);
+        let _ = select_connection_idx(&mut conns, None, now, &config);
+        assert!(conns[0].stall_latched());
+
+        conns[0].in_flight_packets = 0;
+        let mut t = now;
+        for _ in 0..(dwell_ms() * 2 / 100) {
+            t += 100;
+            conns[0].last_ack_or_rtt_sample_ms = t;
+            conns[1].last_ack_or_rtt_sample_ms = t;
+            let _ = select_connection_idx(&mut conns, None, t, &config);
+        }
+        assert!(
+            conns[0].stall_latched(),
+            "two dwells of untimely proof must not add up to a rejoin"
+        );
+
+        // The path clears. 200ms round trip is 100ms one way, inside the 500ms
+        // buffer with room to spare.
+        set_rtt(&mut conns[0], 200.0);
+        let deadline = t + dwell_ms() * 3;
+        while t <= deadline {
+            t += 100;
+            conns[0].last_ack_or_rtt_sample_ms = t;
+            conns[1].last_ack_or_rtt_sample_ms = t;
+            let _ = select_connection_idx(&mut conns, None, t, &config);
+            if !conns[0].stall_latched() {
+                return;
+            }
+        }
+        panic!("a recovered link must rejoin once its proof is timely again");
+    }
+
+    #[test]
+    fn timeliness_is_measured_one_way_against_the_buffer() {
+        use srtla_core::connection::delivery_proof_is_timely;
+
+        // Half the round trip has to fit: 1000ms one way exactly fills a
+        // 1000ms buffer, 1001ms does not.
+        assert!(delivery_proof_is_timely(2000.0, 1000));
+        assert!(!delivery_proof_is_timely(2002.0, 1000));
+
+        // No declared buffer, and no RTT baseline yet, are both "nothing to
+        // check against" rather than grounds to withhold proof.
+        assert!(delivery_proof_is_timely(9999.0, 0));
+        assert!(delivery_proof_is_timely(0.0, 10));
+    }
+
     #[test]
     fn backlog_drain_alone_does_not_release_the_latch() {
         // Cumulative SRT ACKs delivered via the healthy links drain the stalled

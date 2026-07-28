@@ -7,9 +7,11 @@
 //!
 //! ## Algorithm
 //!
-//! 1. Estimate a per-stream max delay budget. We don't have a peer-side
-//!    estimate, so derive it locally as `max(longest_rtt * 3, 500ms)`
-//!    capped at `5000ms`.
+//! 1. Establish a per-stream max delay budget. Preferably the receive
+//!    buffer the SRT peer declared in its handshake, doubled onto the
+//!    round-trip scale the tiers are compared on; failing that (no
+//!    handshake seen yet, or a peer without TSBPD) derive one locally as
+//!    `max(longest_rtt * 3, 500ms)` capped at `5000ms`.
 //! 2. Three delay tiers: `best = 40%`, `safe = 50%`, `max = 60%` of the
 //!    estimate, capped at 2.5s / 2.5s / 5s.
 //! 3. Bucket each link's recent throughput by which tier its RTT meets.
@@ -54,6 +56,15 @@ const RTT_TO_DELAY_BUDGET_MULT: f64 = 3.0;
 const MIN_BUDGET_MS: u32 = 500;
 /// Hard upper bound on the derived budget.
 const MAX_BUDGET_MS: u32 = 5000;
+
+/// Ceiling on a budget taken from the peer's declared receive buffer. Well
+/// above any real SRT latency, and above the largest round trip the RTT
+/// estimator will accept, so past here a bigger budget cannot change a verdict
+/// — it exists only to bound a garbage or hostile value, not to tune anything.
+/// [`MAX_BUDGET_MS`] deliberately does not apply: that one bounds an estimate
+/// derived from our own RTT, and clamping a measured buffer down to it would
+/// make every latency above ~2.5s look identical.
+const MAX_NEGOTIATED_BUDGET_MS: u32 = 20_000;
 
 /// Bandwidth-share cutoffs for tier selection.
 const SHARE_85_PERMILLE: u64 = 850;
@@ -207,7 +218,16 @@ impl WeakLinkFilter {
         Self::default()
     }
 
-    pub fn classify(&mut self, conns: &[SrtlaConnection]) -> ClassificationResult {
+    /// Classify every link for this tick.
+    ///
+    /// `negotiated_latency_ms` is the receive buffer the SRT peer declared in
+    /// its handshake, or 0 if it has not crossed yet — see
+    /// [`delay_budget_ms`] for how the tiers are cut from it.
+    pub fn classify(
+        &mut self,
+        conns: &[SrtlaConnection],
+        negotiated_latency_ms: u32,
+    ) -> ClassificationResult {
         let mut per_link: Vec<LinkClassification> = Vec::with_capacity(conns.len());
 
         // First pass: gather signals from connected links.
@@ -252,7 +272,7 @@ impl WeakLinkFilter {
             };
         }
 
-        let estimated_max_delay_ms = derive_max_delay_budget(longest_rtt_ms);
+        let estimated_max_delay_ms = delay_budget_ms(negotiated_latency_ms, longest_rtt_ms);
         let target_best = target_best_delay_ms(estimated_max_delay_ms);
         let target_safe = target_safe_delay_ms(estimated_max_delay_ms);
         let target_max = target_max_delay_ms(estimated_max_delay_ms);
@@ -472,6 +492,29 @@ fn derive_max_delay_budget(longest_rtt_ms: u32) -> u32 {
     raw.clamp(MIN_BUDGET_MS, MAX_BUDGET_MS)
 }
 
+/// The delay budget the tiers are cut from, preferring the peer's declared
+/// receive buffer over an estimate derived from our own RTT.
+///
+/// The tiers are compared against *round trips*, so a one-way deadline has to
+/// be doubled to sit on the same scale. `target_max` is 60% of what comes back,
+/// which then means a link is late once its one-way delay eats 60% of the
+/// receiver's buffer — leaving the rest for jitter and retransmission, which is
+/// what the tier ratios were chosen to express in the first place.
+///
+/// `negotiated_latency_ms == 0` means the peer never told us (no handshake yet,
+/// or a peer running without TSBPD), and the RTT estimate stands. Note that at
+/// a large declared buffer [`TARGET_BEST_SAFE_CAP_MS`] collapses the best and
+/// safe tiers onto each other; the cascade degrades to two tiers rather than
+/// three, which costs granularity but no correctness.
+fn delay_budget_ms(negotiated_latency_ms: u32, longest_rtt_ms: u32) -> u32 {
+    if negotiated_latency_ms == 0 {
+        return derive_max_delay_budget(longest_rtt_ms);
+    }
+    negotiated_latency_ms
+        .saturating_mul(2)
+        .clamp(MIN_BUDGET_MS, MAX_NEGOTIATED_BUDGET_MS)
+}
+
 fn target_best_delay_ms(est_ms: u32) -> u32 {
     ((est_ms as u64 * 40) / 100).min(TARGET_BEST_SAFE_CAP_MS as u64) as u32
 }
@@ -550,6 +593,76 @@ mod tests {
     }
 
     #[test]
+    fn the_peers_declared_buffer_wins_over_the_rtt_estimate() {
+        // A 4s receive buffer is an 8s round-trip budget, whatever our own RTT
+        // happens to be. Left to the estimate, a 200ms link would have produced
+        // a 600ms budget and judged everything against that.
+        assert_eq!(delay_budget_ms(4000, 200), 8000);
+        assert_eq!(derive_max_delay_budget(200), 600);
+
+        // Nothing declared: the estimate still stands.
+        assert_eq!(delay_budget_ms(0, 500), derive_max_delay_budget(500));
+
+        // The estimate's own ceiling must not apply here — clamping a declared
+        // buffer to it would make every latency above 2.5s indistinguishable.
+        assert!(delay_budget_ms(4000, 200) > MAX_BUDGET_MS);
+    }
+
+    #[test]
+    fn a_declared_buffer_is_bounded_at_both_ends() {
+        // These 16 bits come off the network. A nonsense-small value would mark
+        // every link late; a nonsense-large one is just noise past the point
+        // the RTT estimator can produce a sample that fails any tier.
+        assert_eq!(delay_budget_ms(10, 200), MIN_BUDGET_MS);
+        assert_eq!(
+            delay_budget_ms(u16::MAX as u32, 200),
+            MAX_NEGOTIATED_BUDGET_MS
+        );
+    }
+
+    #[test]
+    fn a_link_is_late_against_the_real_buffer_not_the_guess() {
+        // Two links at 900ms and 50ms. The estimate derives its budget from the
+        // *longest* RTT — 3 x 900 = 2700, max tier 1620 — so the slow link
+        // clears a bar it set itself. What decides whether 900ms is too slow is
+        // how long the receiver will actually wait.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(crate::test_helpers::create_test_connections(2));
+        conns[0].bitrate.current_bitrate_bps = 1_000_000.0;
+        set_rtt(&mut conns[0], 50.0);
+        conns[1].bitrate.current_bitrate_bps = 1_000_000.0;
+        set_rtt(&mut conns[1], 900.0);
+        let slow = conns[1].conn_id;
+
+        // Guessing: the slow link sets its own bar and passes.
+        let mut filter = WeakLinkFilter::new();
+        for _ in 0..=WEAK_SUSTAIN_TICKS {
+            filter.classify(&conns, 0);
+        }
+        let (weak, _) = verdict(&filter.classify(&conns, 0), slow);
+        assert!(!weak, "the RTT estimate cannot see that 900ms is too slow");
+
+        // A 500ms receive buffer: budget 1000, max tier 600. 900ms of round
+        // trip is 450ms one way, most of the buffer gone before a
+        // retransmission is even possible.
+        let mut filter = WeakLinkFilter::new();
+        for _ in 0..=WEAK_SUSTAIN_TICKS {
+            filter.classify(&conns, 500);
+        }
+        let (weak, reason) = verdict(&filter.classify(&conns, 500), slow);
+        assert!(weak, "a link that busts the real buffer must be weak");
+        assert_eq!(reason, WeakReason::HighRtt);
+
+        // A 4s buffer over the same links: 900ms is comfortably inside it.
+        let mut filter = WeakLinkFilter::new();
+        for _ in 0..=WEAK_SUSTAIN_TICKS {
+            filter.classify(&conns, 4000);
+        }
+        let (weak, _) = verdict(&filter.classify(&conns, 4000), slow);
+        assert!(!weak, "a generous buffer must not condemn the same link");
+    }
+
+    #[test]
     fn pick_tier_picks_best_when_85pct_fits() {
         let tier = pick_tier(1000.0, 900.0, 950.0, 1000.0, 100, 200, 300);
         assert_eq!(tier, 100);
@@ -570,7 +683,7 @@ mod tests {
     #[test]
     fn empty_classification_returns_bypassed() {
         let mut filter = WeakLinkFilter::new();
-        let result = filter.classify(&[]);
+        let result = filter.classify(&[], 0);
         assert_eq!(result.selected_delay_ms, 0);
         assert!(result.per_link.is_empty());
     }
@@ -613,14 +726,14 @@ mod tests {
 
         // Share-weak every tick, and stays gated right up to the trigger tick.
         for tick in 0..PROBATION_INTERVAL_TICKS {
-            let r = filter.classify(&conns);
+            let r = filter.classify(&conns, 0);
             let (weak, reason) = verdict(&r, id);
             assert!(weak, "tick {tick}: starved link should be weak");
             assert_eq!(reason, WeakReason::LowShare);
         }
 
         // Window opens: real traffic is the only way to re-prove share.
-        let (weak, reason) = verdict(&filter.classify(&conns), id);
+        let (weak, reason) = verdict(&filter.classify(&conns, 0), id);
         assert!(!weak, "probation must re-test the starved link");
         assert_eq!(reason, WeakReason::Healthy);
     }
@@ -636,26 +749,26 @@ mod tests {
         let mut filter = WeakLinkFilter::new();
 
         for _ in 0..PROBATION_INTERVAL_TICKS {
-            filter.classify(&conns);
+            filter.classify(&conns, 0);
         }
         // First window tick: still fast, so the re-test proceeds.
-        let (weak, _) = verdict(&filter.classify(&conns), id);
+        let (weak, _) = verdict(&filter.classify(&conns, 0), id);
         assert!(!weak, "precondition: the window opened");
 
         // Loaded at last, the link turns out to be badly late. A delay verdict
         // needs WEAK_SUSTAIN_TICKS consecutive samples to latch.
         set_rtt(&mut conns[1], 3000.0);
-        let (weak, _) = verdict(&filter.classify(&conns), id);
+        let (weak, _) = verdict(&filter.classify(&conns, 0), id);
         assert!(!weak, "one late sample is still just a blip");
 
-        let (weak, reason) = verdict(&filter.classify(&conns), id);
+        let (weak, reason) = verdict(&filter.classify(&conns, 0), id);
         assert!(weak, "a sustained delay verdict must end the re-test");
         assert_eq!(reason, WeakReason::HighRtt);
 
         // ...and it is cancelled, not merely suspended: the remaining window
         // ticks must not resume handing the link unique payload.
         for tick in 0..PROBATION_WINDOW_TICKS {
-            let (weak, reason) = verdict(&filter.classify(&conns), id);
+            let (weak, reason) = verdict(&filter.classify(&conns, 0), id);
             assert!(weak, "tick {tick} after cancellation must stay gated");
             assert_eq!(reason, WeakReason::HighRtt);
         }
@@ -687,27 +800,27 @@ mod tests {
 
         // First re-test, at the base interval.
         for _ in 0..PROBATION_INTERVAL_TICKS {
-            filter.classify(&conns);
+            filter.classify(&conns, 0);
         }
-        let (weak, _) = verdict(&filter.classify(&conns), id);
+        let (weak, _) = verdict(&filter.classify(&conns, 0), id);
         assert!(!weak, "precondition: the first window opened");
         // Run the window out. The link is still starved, so it fails.
         for _ in 1..PROBATION_WINDOW_TICKS {
-            filter.classify(&conns);
+            filter.classify(&conns, 0);
         }
 
         // Where the old code re-tested again, the link must stay gated.
         for tick in 0..PROBATION_INTERVAL_TICKS {
-            let (weak, _) = verdict(&filter.classify(&conns), id);
+            let (weak, _) = verdict(&filter.classify(&conns, 0), id);
             assert!(weak, "tick {tick}: a failed re-test must not retry on time");
         }
         // It gets its second chance only after the doubled interval — the last
         // of which is the arming tick, still gated.
         for tick in 0..PROBATION_INTERVAL_TICKS {
-            let (weak, _) = verdict(&filter.classify(&conns), id);
+            let (weak, _) = verdict(&filter.classify(&conns, 0), id);
             assert!(weak, "tick {tick}: still inside the doubled interval");
         }
-        let (weak, _) = verdict(&filter.classify(&conns), id);
+        let (weak, _) = verdict(&filter.classify(&conns, 0), id);
         assert!(!weak, "the doubled interval must still re-test eventually");
     }
 
@@ -721,10 +834,10 @@ mod tests {
 
         // Earn and fail one window, escalating to 2x.
         for _ in 0..=PROBATION_INTERVAL_TICKS {
-            filter.classify(&conns);
+            filter.classify(&conns, 0);
         }
         for _ in 1..PROBATION_WINDOW_TICKS {
-            filter.classify(&conns);
+            filter.classify(&conns, 0);
         }
         assert_eq!(
             filter.probation_backoff.get(&id).copied(),
@@ -734,7 +847,7 @@ mod tests {
 
         // The link recovers and carries a real share outside any window.
         conns[1].bitrate.current_bitrate_bps = 900_000.0;
-        let (weak, _) = verdict(&filter.classify(&conns), id);
+        let (weak, _) = verdict(&filter.classify(&conns, 0), id);
         assert!(!weak, "a link at full share is not weak");
         assert_eq!(
             filter.probation_backoff.get(&id).copied(),
@@ -752,14 +865,14 @@ mod tests {
         let mut filter = WeakLinkFilter::new();
 
         for _ in 0..=PROBATION_INTERVAL_TICKS {
-            filter.classify(&conns);
+            filter.classify(&conns, 0);
         }
         // Loaded at last, the link turns out to be late; the window cancels.
         set_rtt(&mut conns[1], 3000.0);
         for _ in 0..=WEAK_SUSTAIN_TICKS {
-            filter.classify(&conns);
+            filter.classify(&conns, 0);
         }
-        let (weak, reason) = verdict(&filter.classify(&conns), id);
+        let (weak, reason) = verdict(&filter.classify(&conns, 0), id);
         assert!(weak, "precondition: the re-test was cancelled");
         assert_eq!(reason, WeakReason::HighRtt);
         assert_eq!(
@@ -780,7 +893,7 @@ mod tests {
         let mut filter = WeakLinkFilter::new();
 
         for tick in 0..(PROBATION_INTERVAL_TICKS * 2) {
-            let (weak, reason) = verdict(&filter.classify(&conns), id);
+            let (weak, reason) = verdict(&filter.classify(&conns, 0), id);
             assert!(weak, "tick {tick}: a late link stays weak");
             if tick >= WEAK_SUSTAIN_TICKS {
                 assert_eq!(

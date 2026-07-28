@@ -103,13 +103,15 @@ pub fn select_connection_idx(
 /// flag, latch, and pull are all cleared, restoring byte-for-byte baseline
 /// selection.
 ///
-/// Also refreshes each link's `conn_timeout_ms` from the snapshot, so the
-/// runtime-tunable liveness window reaches `is_timed_out` callers that do
+/// Also refreshes each link's `conn_timeout_ms` and `delay_budget_ms` from the
+/// snapshot, so the runtime-tunable liveness window and the peer's declared
+/// receive buffer reach `is_timed_out` and `update_stall_latch` callers that do
 /// not carry a config.
 #[inline]
 fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config: &ConfigSnapshot) {
     for c in conns.iter_mut() {
         c.conn_timeout_ms = config.conn_timeout_ms;
+        c.delay_budget_ms = config.negotiated_latency_ms;
     }
 
     if !config.stall_deselect {

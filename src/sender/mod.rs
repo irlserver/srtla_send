@@ -286,7 +286,9 @@ pub async fn run_sender_with_config(
                         // Run the weak-link classifier and per-link CC
                         // controller, stamp results onto each connection
                         // for selection to consume, and surface via stats.
-                        let classification = weak_link_filter.classify(&connections);
+                        let housekeeping_snap = config.snapshot();
+                        let classification = weak_link_filter
+                            .classify(&connections, housekeeping_snap.negotiated_latency_ms);
                         let link_cc_snapshots = link_cc_controller
                             .tick_all(&connections, srtla_core::utils::now_ms());
                         for conn in connections.iter_mut() {
@@ -311,7 +313,7 @@ pub async fn run_sender_with_config(
                         }
                         shared_stats.update(
                             &connections,
-                            &config.snapshot(),
+                            &housekeeping_snap,
                             Some(&classification),
                             Some(&link_cc_snapshots),
                         );

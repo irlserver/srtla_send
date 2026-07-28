@@ -56,6 +56,7 @@ fn build_connection(local_ip: IpAddr, label: String) -> SrtlaConnection {
         silence_pulled: false,
         silence_pulls: 0,
         conn_timeout_ms: crate::config_snapshot::CONN_TIMEOUT_MS,
+        delay_budget_ms: 0,
         rtt: RttTracker::default(),
         congestion: CongestionControl::default(),
         bitrate: BitrateTracker::new(now_ms()),

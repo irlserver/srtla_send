@@ -194,6 +194,44 @@ pub fn stall_rejoin_backoff_next(
     doubled.min(crate::config_snapshot::STALL_REJOIN_BACKOFF_MAX)
 }
 
+/// Whether delivery proof measured at this round trip is worth anything,
+/// against a one-way delivery deadline of `budget_ms`.
+///
+/// The rejoin dwell asks a gated link to hold fresh delivery proof, and treats
+/// holding it as evidence the link can carry the stream again. On a gated link
+/// that evidence is close to free: a completed keepalive round trip stamps
+/// proof once a second, and a 38-byte control frame echoes fine on a path that
+/// could not deliver a frame of video in time. The backoff in
+/// [`stall_rejoin_backoff_next`] slows how often such a link is let back in but
+/// cannot tell that it should not be let back in at all.
+///
+/// So require the round trip to fit the deadline as well as be recent. Half of
+/// it is the one-way delay — the symmetric-path assumption used throughout this
+/// module — and it has to land inside the receiver's buffer, because a packet
+/// arriving after that is dropped rather than played whatever else is true
+/// about the link. librist reached the same rule from the receiving end: a leg
+/// queued deeper than the buffer keeps delivering packets that can never be
+/// output, so those arrivals stopped counting as evidence of anything.
+///
+/// This gates only the *release*. Engaging the latch stays a question of
+/// silence and backlog, so lateness does not become a second, redundant way to
+/// gate a link — that verdict already belongs to the weak-link classifier.
+/// Nothing here stops RTT being measured, so a link that genuinely recovers
+/// crosses back over this bar on its own; one that never recovers simply stops
+/// asking to.
+///
+/// A `budget_ms` of 0 means the peer never told us its buffer depth (see
+/// [`crate::config_snapshot::ConfigSnapshot::negotiated_latency_ms`]), and a
+/// non-positive RTT means the link has no baseline yet. Neither is grounds to
+/// withhold proof, so both pass.
+#[inline]
+pub fn delivery_proof_is_timely(smooth_rtt_ms: f64, budget_ms: u32) -> bool {
+    if budget_ms == 0 || smooth_rtt_ms <= 0.0 {
+        return true;
+    }
+    (smooth_rtt_ms / 2.0) <= budget_ms as f64
+}
+
 pub struct SrtlaConnection {
     pub conn_id: u64,
     #[allow(dead_code)]
@@ -339,6 +377,12 @@ pub struct SrtlaConnection {
     /// every selection pass so `is_timed_out` (called from paths that do not
     /// carry a config) always sees the current runtime value.
     pub(crate) conn_timeout_ms: u64,
+    /// One-way delivery deadline in ms — the receive buffer the SRT peer
+    /// declared in its handshake. Refreshed from the config snapshot alongside
+    /// `conn_timeout_ms`, for the same reason: `update_stall_latch` runs from
+    /// paths that do not carry a config. Zero until the handshake crosses (see
+    /// [`crate::config_snapshot::ConfigSnapshot::negotiated_latency_ms`]).
+    pub(crate) delay_budget_ms: u32,
     // Sub-structs for organized state management
     pub rtt: RttTracker,
     #[cfg(feature = "test-internals")]
@@ -439,6 +483,7 @@ impl SrtlaConnection {
             silence_pulled: false,
             silence_pulls: 0,
             conn_timeout_ms: crate::config_snapshot::CONN_TIMEOUT_MS,
+            delay_budget_ms: 0,
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
             bitrate: BitrateTracker::new(now),
@@ -850,8 +895,12 @@ impl SrtlaConnection {
         }
 
         let stale_ms = self.effective_stall_stale_ms(stale_ceiling_ms);
+        // Recent *and* fast enough to matter: see `delivery_proof_is_timely`.
+        // Both conditions restart the dwell, so a link only rejoins on a run of
+        // proof that a packet of real payload could have ridden.
         let proof_fresh = self.last_ack_or_rtt_sample_ms != 0
-            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) < stale_ms;
+            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) < stale_ms
+            && delivery_proof_is_timely(self.get_smooth_rtt_ms(), self.delay_budget_ms);
         if !proof_fresh {
             self.stall_recovery_since_ms = 0;
             return;
