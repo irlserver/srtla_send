@@ -45,6 +45,9 @@ use tracing::{debug, info, warn};
 pub use uplink::ConnIo;
 pub use uplink::ConnIoMap;
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
+// Re-exported so the handshake-sniffing tests drive the real receive path.
+#[allow(unused_imports)]
+pub(crate) use uplink_recv::process_uplink_packet;
 
 use crate::config::DynamicConfig;
 use crate::stats::SharedStats;
@@ -72,6 +75,24 @@ pub async fn run_sender_with_config(
         ips_file,
         config.mode()
     );
+    // Bind the local SRT listener FIRST, ahead of reading the ips file and
+    // dialing any uplink. An encoder is typically pointed at this port the
+    // moment the process is spawned, with no readiness handshake, so every
+    // await before the bind is a window where that connect finds a closed port.
+    // Uplink setup is the worst offender: it resolves the receiver and dials
+    // each bonded link sequentially, so with a hostname receiver the window is
+    // one uncached DNS lookup per modem and grows with the size of the bond —
+    // exactly the multi-link case this sender exists for. Binding a UDP port
+    // needs nothing from the uplinks, so it belongs up here.
+    //
+    // It also removes a rare startup failure: an uplink's ephemeral source port
+    // landing on `local_srt_port` used to make this wildcard bind fail with
+    // AddrInUse.
+    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, local_srt_port)))
+        .await
+        .context("bind local SRT UDP listener")?;
+    info!("listening for SRT on [::]:{}", local_srt_port);
+
     let ips = read_ip_list(ips_file).await?;
     debug!(
         "uplink IPs loaded: {}",
@@ -93,11 +114,6 @@ pub async fn run_sender_with_config(
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
-
-    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, local_srt_port)))
-        .await
-        .context("bind local SRT UDP listener")?;
-    info!("listening for SRT on [::]:{}", local_srt_port);
 
     let mut reg = SrtlaRegistrationManager::new();
 
@@ -217,6 +233,7 @@ pub async fn run_sender_with_config(
                             &local_listener,
                             &seq_tracker,
                             &config_snap,
+                            &config,
                         )
                         .await;
                     }
@@ -233,6 +250,7 @@ pub async fn run_sender_with_config(
                                 &local_listener,
                                 &seq_tracker,
                                 &config_snap,
+                                &config,
                             ).await;
                             drain_packet_queue(
                                 &mut packet_rx,
@@ -244,6 +262,7 @@ pub async fn run_sender_with_config(
                                 &local_listener,
                                 &seq_tracker,
                                 &config_snap,
+                                &config,
                             ).await;
                         } else {
                             return Ok(());
@@ -267,16 +286,23 @@ pub async fn run_sender_with_config(
                         // Run the weak-link classifier and per-link CC
                         // controller, stamp results onto each connection
                         // for selection to consume, and surface via stats.
-                        let classification = weak_link_filter.classify(&connections);
+                        let housekeeping_snap = config.snapshot();
+                        let classification = weak_link_filter
+                            .classify(&connections, housekeeping_snap.negotiated_latency_ms);
                         let link_cc_snapshots = link_cc_controller
                             .tick_all(&connections, srtla_core::utils::now_ms());
                         for conn in connections.iter_mut() {
-                            conn.weak = classification
+                            let entry = classification
                                 .per_link
                                 .iter()
-                                .find(|e| e.conn_id == conn.conn_id)
-                                .map(|e| e.weak)
-                                .unwrap_or(false);
+                                .find(|e| e.conn_id == conn.conn_id);
+                            conn.weak = entry.map(|e| e.weak).unwrap_or(false);
+                            // Selection needs the reason, not just the verdict:
+                            // a late link is kept off unique payload entirely,
+                            // an under-used one keeps a trickle of it.
+                            conn.weak_reason = entry
+                                .map(|e| e.reason)
+                                .unwrap_or(srtla_core::selection::classifier::WeakReason::Healthy);
                             let cc_snap = link_cc_snapshots.get(&conn.conn_id);
                             conn.cc_backing_off = cc_snap
                                 .map(|s| s.state == srtla_core::selection::link_cc::CcState::BackingOff)
@@ -287,7 +313,7 @@ pub async fn run_sender_with_config(
                         }
                         shared_stats.update(
                             &connections,
-                            &config.snapshot(),
+                            &housekeeping_snap,
                             Some(&classification),
                             Some(&link_cc_snapshots),
                         );
@@ -336,6 +362,7 @@ pub async fn run_sender_with_config(
                             &local_listener,
                             &seq_tracker,
                             &config_snap,
+                            &config,
                         )
                         .await;
                     }
@@ -387,6 +414,7 @@ pub async fn run_sender_with_config(
                 &local_listener,
                 &seq_tracker,
                 &config_snap,
+                &config,
             )
             .await;
         }

@@ -19,7 +19,6 @@ pub use batch_recv::{BatchUdpSocket, RecvMmsgBuffer};
 // Exported for library consumers; the CLI binary does not construct it. Unix
 // only: it binds by raw fd, which Windows does not have.
 #[cfg(unix)]
-#[allow(unused_imports)]
 pub use socket::CallbackBinder;
 pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};
 use srtla_core::connection::BATCH_SEND_SIZE;

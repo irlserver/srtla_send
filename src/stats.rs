@@ -163,6 +163,18 @@ pub struct LinkStats {
     /// HARQ stalls — rate telemetry, not an alarm; compare against
     /// `stall_gate_events` to tell micro-stalls from real black holes.
     pub silence_pulls: u64,
+    /// Whether this link is the elected sole carrier: every schedulable link
+    /// is quality-gated, and this is the one still carrying the payload.
+    pub sole_carrier: bool,
+    /// Whether a sibling holds that role and this link is being held out of
+    /// the rotation because of it.
+    pub sole_carrier_excluded: bool,
+    /// Cumulative sole-carrier handovers *from another link* to this one.
+    /// Taking a vacant role is not counted, so this is a pure churn signal —
+    /// climbing every second or two is the ping-pong this election exists to
+    /// prevent, and says the margin or the minimum hold is wrong for these
+    /// links. Use the `sole_carrier` flag to see whether it engaged at all.
+    pub sole_carrier_elections: u64,
 
     // --- In-flight cap soft admission gate ---
     //
@@ -206,6 +218,12 @@ pub struct StatsSnapshot {
     /// Delay tier the cascade chose this tick (ms).
     pub weak_link_selected_delay_ms: u32,
 
+    /// One-way delivery budget in ms read off the SRT peer's handshake — the
+    /// TSBPD delay it will hold packets for. Zero until the handshake crosses,
+    /// or if the peer runs without TSBPD; the classifier estimates a budget
+    /// from its own RTT samples in that case.
+    pub negotiated_latency_ms: u32,
+
     /// Per-link details
     pub links: Vec<LinkStats>,
 }
@@ -221,6 +239,7 @@ impl Default for StatsSnapshot {
             total_in_flight: 0,
             weak_link_estimated_max_delay_ms: 0,
             weak_link_selected_delay_ms: 0,
+            negotiated_latency_ms: 0,
             links: Vec::new(),
         }
     }
@@ -265,6 +284,7 @@ impl SharedStats {
                 .map(|c| c.estimated_max_delay_ms)
                 .unwrap_or(0),
             weak_link_selected_delay_ms: classification.map(|c| c.selected_delay_ms).unwrap_or(0),
+            negotiated_latency_ms: config.negotiated_latency_ms,
             ..Default::default()
         };
 
@@ -363,6 +383,9 @@ impl SharedStats {
                 stall_gated: conn.stall_latched(),
                 stall_gate_events: conn.stall_gate_events(),
                 silence_pulls: conn.silence_pulls(),
+                sole_carrier: conn.is_sole_carrier(),
+                sole_carrier_excluded: conn.is_sole_carrier_excluded(),
+                sole_carrier_elections: conn.sole_carrier_elections(),
                 in_flight_cap_packets: in_flight_cap_pkts,
                 in_flight_cap_active,
             };

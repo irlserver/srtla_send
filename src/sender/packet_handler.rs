@@ -7,11 +7,11 @@ use srtla_core::registration::SrtlaRegistrationManager;
 use srtla_core::selection::select_connection_idx;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, UplinkPacket};
-use crate::config::ConfigSnapshot;
+use crate::config::{ConfigSnapshot, DynamicConfig};
 
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
@@ -74,8 +74,16 @@ pub async fn process_connection_events(
     let current_time_ms = srtla_core::utils::now_ms();
 
     for ack in incoming.ack_numbers.iter() {
+        // Every link prunes on a cumulative ACK — the receiver has the data,
+        // whichever link carried it — but only the link that carried the
+        // unique copy may take an RTT sample from it. The tracker never
+        // records duplicate probes, so a probing link resolves to `None` here
+        // and keeps its estimator free of round trips earned by the link that
+        // actually delivered.
+        let owner = seq_tracker.get(*ack, current_time_ms);
         for c in connections.iter_mut() {
-            c.handle_srt_ack(*ack as i32, current_time_ms);
+            let owns = owner == Some(c.conn_id);
+            c.handle_srt_ack(*ack as i32, current_time_ms, owns);
         }
     }
 
@@ -129,6 +137,7 @@ pub async fn handle_uplink_packet(
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
     config_snap: &ConfigSnapshot,
+    config: &DynamicConfig,
 ) {
     if packet.bytes.is_empty() {
         return;
@@ -159,6 +168,15 @@ pub async fn handle_uplink_packet(
                             )
                         }
                     }
+                }
+                // The SRT peer told us how deep its receive buffer is. That is
+                // the deadline every link is judged against, so it belongs on
+                // the shared config where the next `ConfigSnapshot` picks it up
+                // — not on the link that happened to carry the handshake.
+                if let Some(latency_ms) = incoming.negotiated_latency_ms
+                    && config.set_negotiated_latency_ms(latency_ms as u32)
+                {
+                    info!("SRT delivery budget is now {latency_ms}ms (from the peer's handshake)");
                 }
                 if let Err(err) = process_connection_events(
                     idx,
@@ -198,6 +216,7 @@ pub async fn drain_packet_queue(
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
     config_snap: &ConfigSnapshot,
+    config: &DynamicConfig,
 ) {
     // Process up to MAX_DRAIN_PACKETS to prevent CPU spikes from large queue bursts.
     // Remaining packets will be processed on the next event loop iteration.
@@ -215,6 +234,7 @@ pub async fn drain_packet_queue(
                     local_listener,
                     seq_tracker,
                     config_snap,
+                    config,
                 )
                 .await;
                 processed += 1;
@@ -328,7 +348,8 @@ pub async fn handle_srt_packet(
             if seq.is_some()
                 && (critical_window.is_critical_now(packet_time_ms)
                     || srtla_protocol::is_srt_data_retransmit(pkt))
-                && let Some(best_idx) = srtla_core::priority::select_best_quality_idx(connections)
+                && let Some(best_idx) =
+                    srtla_core::priority::select_best_quality_idx(connections, packet_time_ms)
                 && sel_idx != Some(best_idx)
             {
                 trace!(
@@ -351,9 +372,16 @@ pub async fn handle_srt_packet(
                     packet_time_ms,
                 )
                 .await;
-                if seq.is_some() {
-                    send_stall_probes(sel_idx, pkt, seq, connections, conn_io, packet_time_ms)
-                        .await;
+                if let Some(probe_seq) = seq {
+                    send_stall_probes(
+                        sel_idx,
+                        pkt,
+                        probe_seq,
+                        connections,
+                        conn_io,
+                        packet_time_ms,
+                    )
+                    .await;
                 }
             } else {
                 warn!("no available connection to forward packet from {}", src);
@@ -434,26 +462,38 @@ pub async fn forward_via_connection(
     }
 }
 
-/// Duplicate-packet probing on stall-gated links (librist-style warm restore).
+/// Duplicate-packet probing on links held out of the rotation (librist-style
+/// warm restore).
 ///
-/// A gated link carries no unique payload, so its only delivery proof would be
-/// the 1 s keepalive echo — which proves the path echoes 38-byte control
+/// A held-out link carries no unique payload, so its only delivery proof would
+/// be the 1 s keepalive echo — which proves the path echoes 38-byte control
 /// frames, not that it can deliver data-sized packets. Instead, one in
 /// [`srtla_core::config_snapshot::STALL_PROBE_ONE_IN_N`] routed data packets is
-/// *also* queued on each gated link. The copy reuses the original SRT sequence
-/// number: the SRT receiver dedups it, so a lost or late probe can never stall
-/// the receiver buffer, while a delivered one earns the gated link an SRTLA ACK
-/// on its own socket — exactly the sustained proof the rejoin dwell requires.
+/// *also* queued on each held-out link. The copy reuses the original SRT
+/// sequence number: the SRT receiver dedups it, so a lost or late probe can
+/// never stall the receiver buffer, while a delivered one earns the link an
+/// SRTLA ACK on its own socket — both the sustained delivery proof the rejoin
+/// dwell requires and (since the ACK carries a round trip) the RTT sample the
+/// recovery decision reads.
+///
+/// Covers both reasons a link is held out: the stall gate, and the quality
+/// exclusion for a link that is *late* rather than merely under-used. The
+/// distinction matters — a late link must not be given unique payload at all,
+/// because a sequence number committed to a path running a second behind is
+/// precisely the hole the receiver's reorder buffer stalls on, so the trickle
+/// that keeps it measurable has to be redundant.
 ///
 /// Deliberately NOT inserted into `seq_tracker`: the tracker must keep mapping
 /// the sequence to the link that carried the unique copy, so a NAK still
 /// penalizes the link that actually lost stream data. The SRTLA ACK for the
 /// probe attributes correctly because `process_connection_events` matches the
-/// arrival link's packet log first.
+/// arrival link first, and the probe is recorded in that link's own
+/// sweep-proof probe log (see `SrtlaConnection::queue_probe_packet`) rather
+/// than the packet log a cumulative ACK would prune it from.
 async fn send_stall_probes(
     sel_idx: usize,
     pkt: &[u8],
-    seq: Option<u32>,
+    probe_seq: u32,
     connections: &mut [SrtlaConnection],
     conn_io: &ConnIoMap,
     packet_time_ms: u64,
@@ -462,14 +502,28 @@ async fn send_stall_probes(
         if i == sel_idx {
             continue;
         }
-        if !conn.is_stall_gated() || !conn.connected {
+        if !(conn.is_stall_gated() || conn.is_quality_excluded()) || !conn.connected {
             continue;
         }
         if !conn.stall_probe_due() {
             continue;
         }
-        trace!("{}: sending duplicate probe (seq {:?})", conn.label, seq);
-        let needs_flush = conn.queue_data_packet(pkt, seq, packet_time_ms);
+        trace!(
+            "{}: sending duplicate probe (seq {})",
+            conn.label, probe_seq
+        );
+        // Flag the copy as a retransmission. The receiver dedups it by sequence
+        // either way, but an SRTLA-patched receiver feeds every *non*-retransmit
+        // into its reorder-hold estimator — the inter-link transit spread that
+        // delays its loss reports. A probe from a link running a second behind
+        // would pin that hold near its ceiling and slow recovery of real losses
+        // on the healthy links, to no purpose: the probed link carries no unique
+        // payload, so no gap is ever filled by waiting for it. See
+        // `set_srt_data_retransmit` for why flipping the bit is safe on traffic
+        // this proxy never decrypts.
+        let mut probe: SmallVec<u8, 1500> = SmallVec::from_slice_copy(pkt);
+        srtla_protocol::set_srt_data_retransmit(&mut probe);
+        let needs_flush = conn.queue_probe_packet(&probe, probe_seq, packet_time_ms);
         if needs_flush
             && let Some(io) = conn_io.get(&conn.conn_id)
             && let Err(e) = send_connection_batch(conn, &io.socket).await

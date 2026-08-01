@@ -39,6 +39,40 @@ pub const STALL_STALE_FLOOR_MS: u64 = 1000;
 /// cannot flap back in and re-glitch the stream.
 pub const STALL_REJOIN_DWELL_MULT: u64 = 2;
 
+/// Ceiling on the rejoin-dwell backoff multiplier (see
+/// [`crate::connection::stall_rejoin_backoff_next`]). At the floor staleness
+/// window this caps the wait between retries at ~32s: long enough that a
+/// chronically failing link stops costing the stream a transition every few
+/// seconds, short enough that a link recovering after a long outage is still
+/// picked back up within a shot.
+pub const STALL_REJOIN_BACKOFF_MAX: u32 = 16;
+
+/// How long a rejoin must last, as a multiple of the effective staleness
+/// window, to count as having held. Matches the base rejoin dwell
+/// ([`STALL_REJOIN_DWELL_MULT`]) plus the drop dwell: anything shorter and the
+/// link re-stalled inside the time it took to rejoin, which is the oscillation
+/// the backoff exists to damp. Deliberately measured against the *base* dwell,
+/// not the backed-off one, so the bar to clear does not rise with the penalty.
+pub const STALL_REJOIN_PROBATION_MULT: u64 = STALL_REJOIN_DWELL_MULT + 1;
+
+/// Size at which the outstanding-probe log starts expiring entries. A probe is
+/// only removed by its own SRTLA ACK, which may never arrive, so the log needs
+/// a bound. Well above the number a link can have outstanding at the 1-in-N
+/// probe rate even at a multi-second RTT.
+pub const PROBE_LOG_SOFT_CAP: usize = 128;
+
+/// Age at which an unanswered probe is dropped from that log. Matches the
+/// longest round trip the RTT estimator will accept: past it, no arriving ACK
+/// could produce a usable measurement anyway.
+pub const PROBE_LOG_MAX_AGE_MS: u64 = 10_000;
+
+/// Share a link starts the post-rejoin ramp at, as a fraction of its natural
+/// selection score. Non-zero so a rejoining link is always ranked (it must
+/// carry *something* to reveal how it behaves under load), and comfortably
+/// above the quality-gate penalty so a healthy rejoiner still outranks a link
+/// that is actively failing.
+pub const STALL_REJOIN_RAMP_FLOOR: f64 = 0.05;
+
 /// Duplicate-probe rate on a stall-gated link: one copy of every Nth routed
 /// data packet is also sent on each gated link. The copies are redundant (the
 /// SRT receiver dedups by sequence number), so a late or lost probe cannot
@@ -96,6 +130,12 @@ pub struct ConfigSnapshot {
     /// Per-link liveness timeout in ms (default [`CONN_TIMEOUT_MS`]). Silence
     /// past this tears the link down and re-registers it.
     pub conn_timeout_ms: u64,
+    /// One-way delivery budget in ms: the TSBPD receive delay the far-end SRT
+    /// listener declared in its handshake response, so the deadline a packet on
+    /// any link has to beat. Zero until the handshake crosses (and on a peer
+    /// that runs without TSBPD), in which case consumers fall back to
+    /// estimating a budget from their own RTT samples.
+    pub negotiated_latency_ms: u32,
 }
 
 impl Default for ConfigSnapshot {
@@ -107,6 +147,7 @@ impl Default for ConfigSnapshot {
             stall_min_in_flight: STALL_MIN_IN_FLIGHT_PACKETS,
             stall_ack_stale_ms: STALL_ACK_STALE_MS,
             conn_timeout_ms: CONN_TIMEOUT_MS,
+            negotiated_latency_ms: 0,
         }
     }
 }

@@ -192,6 +192,39 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
 
     writeln!(
         out,
+        "# HELP srtla_send_link_sole_carrier link is the elected sole carrier while every link is \
+         quality gated (0/1)"
+    )
+    .ok();
+    writeln!(out, "# TYPE srtla_send_link_sole_carrier gauge").ok();
+    for link in &snap.links {
+        writeln!(
+            out,
+            r#"srtla_send_link_sole_carrier{{ip="{}"}} {}"#,
+            link.ip,
+            if link.sole_carrier { 1 } else { 0 }
+        )
+        .ok();
+    }
+
+    writeln!(
+        out,
+        "# HELP srtla_send_link_sole_carrier_elections cumulative sole-carrier handovers taken \
+         from another link"
+    )
+    .ok();
+    writeln!(out, "# TYPE srtla_send_link_sole_carrier_elections counter").ok();
+    for link in &snap.links {
+        writeln!(
+            out,
+            r#"srtla_send_link_sole_carrier_elections{{ip="{}"}} {}"#,
+            link.ip, link.sole_carrier_elections
+        )
+        .ok();
+    }
+
+    writeln!(
+        out,
         "# HELP srtla_send_link_silence_pulls cumulative fast silence-pull engagements"
     )
     .ok();

@@ -59,6 +59,15 @@ pub fn select_connection_idx(
 
     match config.mode {
         SchedulingMode::Classic => {
+            // The quality gates are Enhanced-only, and the mode is switchable
+            // at runtime, so their transient flags have to be cleared here or
+            // they freeze at whatever they held the instant the mode changed.
+            // A stuck `quality_excluded` would keep the shell sending duplicate
+            // probes to a link Classic is also routing unique payload to, and a
+            // stuck `sole_carrier` would sit in stats and Prometheus forever.
+            for c in conns.iter_mut() {
+                c.clear_quality_gate_state();
+            }
             // Classic mode: simple capacity-based selection (no dampening, matches original C)
             classic::select_connection(conns, current_time_ms)
         }
@@ -94,13 +103,15 @@ pub fn select_connection_idx(
 /// flag, latch, and pull are all cleared, restoring byte-for-byte baseline
 /// selection.
 ///
-/// Also refreshes each link's `conn_timeout_ms` from the snapshot, so the
-/// runtime-tunable liveness window reaches `is_timed_out` callers that do
+/// Also refreshes each link's `conn_timeout_ms` and `delay_budget_ms` from the
+/// snapshot, so the runtime-tunable liveness window and the peer's declared
+/// receive buffer reach `is_timed_out` and `update_stall_latch` callers that do
 /// not carry a config.
 #[inline]
 fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config: &ConfigSnapshot) {
     for c in conns.iter_mut() {
         c.conn_timeout_ms = config.conn_timeout_ms;
+        c.delay_budget_ms = config.negotiated_latency_ms;
     }
 
     if !config.stall_deselect {

@@ -1,7 +1,96 @@
 use smallvec::SmallVec;
 
 use super::constants::*;
-use super::types::{ConnectionInfo, get_packet_type};
+use super::types::{ConnectionInfo, SrtHandshakeLatency, get_packet_type};
+
+/// Read a big-endian 32-bit word at `off`, or `None` if it does not fit.
+#[inline]
+fn be32(buf: &[u8], off: usize) -> Option<u32> {
+    let bytes = buf.get(off..off + 4)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// Extract the TSBPD latency an SRT conclusion handshake declares.
+///
+/// SRT negotiates its receiver buffer depth in the clear during the handshake,
+/// and every one of those packets crosses this proxy: an `SRT_CMD_HSRSP` block
+/// from the far end tells us, in milliseconds, exactly how long it will hold a
+/// packet before delivering it. That is the deadline any link we route over has
+/// to beat, and it is the only authoritative figure we can get — the scheduler
+/// otherwise has to guess a budget from its own RTT measurements.
+///
+/// Layout, all words big-endian:
+///
+/// ```text
+///  0            16               64
+///  +------------+----------------+------------------+
+///  | ctrl hdr   | handshake body | extension blocks |
+///  +------------+----------------+------------------+
+/// ```
+///
+/// Each extension block is one spec word — command in the high 16 bits, body
+/// length in 32-bit words in the low 16 — followed by that body. HSREQ/HSRSP
+/// bodies are `version, flags, latency`, and the latency word packs the
+/// receive delay in its high half and the send delay in its low half.
+///
+/// Returns `None` for anything that is not an HSv5 conclusion handshake
+/// carrying such a block, which includes induction packets, rejections, HSv4
+/// (whose SRT handshake is a separate `UMSG_EXT` control packet, not an
+/// extension block), and any truncated or self-inconsistent input.
+pub fn parse_srt_handshake_latency(buf: &[u8]) -> Option<SrtHandshakeLatency> {
+    if get_packet_type(buf)? != SRT_TYPE_HANDSHAKE {
+        return None;
+    }
+    let body = buf.get(SRT_CONTROL_HEADER_LEN..)?;
+    if body.len() < SRT_HANDSHAKE_CIF_LEN {
+        return None;
+    }
+
+    if be32(body, 0)? != SRT_HS_VERSION_5 {
+        return None;
+    }
+    // Word 5 is the request type. Only the conclusion phase carries extensions;
+    // checking it also stops us reading an induction packet's extension field,
+    // which holds a magic cookie rather than flags.
+    if be32(body, 20)? as i32 != SRT_HS_REQTYPE_CONCLUSION {
+        return None;
+    }
+    // Word 1 is `encryption field | extension field`; the HSREQ bit lives in
+    // the low half.
+    if (be32(body, 4)? & 0xffff) & SRT_HS_EXT_FLAG_HSREQ == 0 {
+        return None;
+    }
+
+    // Walk the blocks. HSREQ/HSRSP is not required to come first — a stream ID,
+    // key material, congestion, filter or group block may precede it. Each step
+    // consumes at least the 4-byte spec word, so `rest` strictly shrinks and
+    // the loop terminates on any input.
+    let mut rest = body.get(SRT_HANDSHAKE_CIF_LEN..)?;
+    while rest.len() >= 4 {
+        let spec = be32(rest, 0)?;
+        let cmd = (spec >> 16) as u16;
+        let block_len = ((spec & 0xffff) as usize) * 4;
+        // A length running past the packet means the handshake is truncated or
+        // lying; either way there is nothing further to read.
+        let block = rest.get(4..4 + block_len)?;
+
+        if cmd == SRT_HS_EXT_CMD_HSREQ || cmd == SRT_HS_EXT_CMD_HSRSP {
+            if block.len() < SRT_HS_EXT_HSREQ_WORDS * 4 {
+                return None;
+            }
+            let flags = be32(block, 4)?;
+            let latency = be32(block, 8)?;
+            return Some(SrtHandshakeLatency {
+                is_response: cmd == SRT_HS_EXT_CMD_HSRSP,
+                rcv_ms: ((flags & SRT_HS_OPT_TSBPDRCV) != 0).then_some((latency >> 16) as u16),
+                snd_ms: ((flags & SRT_HS_OPT_TSBPDSND) != 0).then_some((latency & 0xffff) as u16),
+            });
+        }
+
+        rest = &rest[4 + block_len..];
+    }
+    None
+}
 
 pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
     if buf.len() < 10 {

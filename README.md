@@ -136,7 +136,25 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 - `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `/tmp/srtla.sock`)
 - `--priority-bind <ADDR:PORT>`: UDP sidecar address for encoder keyframe priority hints
 - `--metrics-bind <ADDR:PORT>`: Expose a Prometheus scrape endpoint at `/metrics`
-- `-v, --version`: Print version and exit
+- `-v, --version`: Print version and exit (see [Version output](#version-output))
+
+### Version output
+
+`srtla_send -v` prints the crate version, an optional git build-metadata parenthetical, and the package name:
+
+```bash
+$ ./target/release/srtla_send -v
+3.0.0 (main@974c8b9) [srtla_send]
+```
+
+The parenthetical is emitted only when the build could resolve a commit. Building outside a git checkout (an exported source tarball, a container that copies only `src/`, a vendored crate) is a normal build with nothing to name, so the metadata is omitted entirely rather than filled with a placeholder:
+
+```bash
+$ ./target/release/srtla_send -v
+3.0.0 [srtla_send]
+```
+
+A tag build (detached HEAD) reports the bare hash, `3.0.0 (974c8b9) [srtla_send]`, and a build from a modified working tree suffixes the hash with `-dirty`.
 
 ## Example Usage
 

@@ -24,6 +24,7 @@ pub mod sender;
 pub mod stats;
 pub mod subscriptions;
 pub mod toml_config;
+pub mod version;
 
 // Test helpers module - available when test-internals feature is enabled
 #[cfg(any(test, feature = "test-internals"))]

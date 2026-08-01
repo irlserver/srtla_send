@@ -18,7 +18,18 @@ impl SrtlaConnection {
     /// - Tracks highest_acked_seq to skip already-processed ACKs
     /// - Only removes packets in the range (highest_acked_seq, ack]
     /// - O(k) where k is packets in range, not O(n) for entire log
-    pub fn handle_srt_ack(&mut self, ack: i32, now_ms: u64) {
+    ///
+    /// `owns_acked_seq` says whether *this* link carried the unique copy of
+    /// `ack`, and gates the RTT sample. An SRT cumulative ACK is a flow-level
+    /// signal: the shell hands it to every link so they all prune, but it only
+    /// proves delivery by whichever link actually carried the sequence. A link
+    /// that holds `ack` merely as a duplicate probe would otherwise measure the
+    /// round trip of the *healthy* link that delivered the real copy and record
+    /// it as its own — a fast sample invented for a path that never delivered
+    /// anything, exactly on the links whose lateness is the thing being
+    /// measured. The shell resolves ownership through the sequence tracker,
+    /// which deliberately never records probe copies.
+    pub fn handle_srt_ack(&mut self, ack: i32, now_ms: u64, owns_acked_seq: bool) {
         // Skip if this ACK doesn't advance our highest acked sequence
         // This handles duplicate ACKs and out-of-order ACKs efficiently
         if ack <= self.highest_acked_seq {
@@ -50,13 +61,9 @@ impl SrtlaConnection {
         }
         self.in_flight_packets = self.packet_log.len() as i32;
 
-        // Update RTT estimate if we found the acked packet
-        if let Some(sent_ms) = ack_send_time_ms {
-            let now = now_ms;
-            let rtt = now.saturating_sub(sent_ms);
-            if rtt > 0 && rtt <= 10_000 {
-                self.rtt.update_estimate(rtt, now);
-            }
+        // Update RTT estimate if we found the acked packet *and* it was ours.
+        if owns_acked_seq && let Some(sent_ms) = ack_send_time_ms {
+            self.rtt.record_round_trip(sent_ms, now_ms);
         }
     }
 
@@ -75,8 +82,20 @@ impl SrtlaConnection {
     /// Handle SRTLA ACK for a specific sequence. O(1) remove.
     #[inline]
     pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool, now_ms: u64) -> bool {
-        let found = self.packet_log.remove(&seq).is_some();
-        if found {
+        // A probe this link sent, answered on this link. It proves the path
+        // delivered a data-sized packet and yields a real round trip, but it is
+        // not payload: it must not move the congestion window, or a held-out
+        // link would inflate the very window that makes it seize the stream on
+        // release. Checked first — the sweep-proof log is where a slow link's
+        // probes actually survive to be answered.
+        if let Some(sent_ms) = self.probe_log.remove(&seq) {
+            self.last_ack_or_rtt_sample_ms = now_ms;
+            self.rtt.record_round_trip(sent_ms, now_ms);
+            return true;
+        }
+
+        let sent_ms = self.packet_log.remove(&seq);
+        if let Some(sent_ms) = sent_ms {
             self.in_flight_packets = self.packet_log.len() as i32;
 
             // Delivery proof for `stall_deselect`: this link OWNED the acked seq,
@@ -84,6 +103,12 @@ impl SrtlaConnection {
             // and at the keepalive-RTT site only (see `packet_io.rs`), never on
             // generic inbound bytes, so a stalled-but-echoing link stays stale.
             self.last_ack_or_rtt_sample_ms = now_ms;
+
+            // ...and the same ACK is a per-link round trip: we sent this exact
+            // sequence on this exact socket and the receiver acknowledged it
+            // back on it. Dropping the send timestamp here used to throw that
+            // sample away.
+            self.rtt.record_round_trip(sent_ms, now_ms);
 
             if classic_mode {
                 self.congestion.handle_srtla_ack_specific_classic(
@@ -101,7 +126,7 @@ impl SrtlaConnection {
                 );
             }
         }
-        found
+        sent_ms.is_some()
     }
 
     pub fn handle_srtla_ack_global(&mut self) {

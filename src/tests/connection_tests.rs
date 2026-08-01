@@ -68,7 +68,7 @@ mod tests {
         assert_eq!(initial_in_flight, 5);
 
         // ACK the first three packets (acknowledge packets 10, 20, 30)
-        conn.handle_srt_ack(30, now_ms());
+        conn.handle_srt_ack(30, now_ms(), true);
 
         // Should have reduced in-flight count
         assert!(conn.in_flight_packets < 5);
@@ -77,7 +77,7 @@ mod tests {
         let initial_window = conn.window;
         conn.congestion.consecutive_acks_without_nak = 4; // Trigger window increase
         conn.congestion.last_window_increase_ms = now_ms() - 300; // Make sure enough time passed
-        conn.handle_srt_ack(40, now_ms());
+        conn.handle_srt_ack(40, now_ms(), true);
 
         assert!(conn.window >= initial_window);
     }
@@ -287,6 +287,171 @@ mod tests {
         let initial_window = conn.window;
         conn.handle_srtla_ack_global();
         assert_eq!(conn.window, initial_window + 1);
+    }
+
+    #[test]
+    fn cumulative_ack_only_measures_rtt_on_the_link_that_carried_the_seq() {
+        // A link held out of the payload rotation carries duplicate probes, so
+        // the same sequence sits in two links' packet logs. The cumulative ACK
+        // is broadcast to both — it prunes both, because the receiver has the
+        // data — but it must only measure the link that actually delivered it.
+        // Measuring the probing link would fold the *healthy* link's round trip
+        // into the estimator of the link whose lateness is the thing being
+        // judged, inventing fast samples for a path that delivered nothing.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let t0 = now_ms();
+
+        // Link 0 carries the unique copy; link 1 holds a duplicate probe.
+        conns[0].register_packet(30, t0);
+        conns[1].register_packet(30, t0);
+
+        // The ACK lands 40ms later. Link 0 owns seq 30; link 1 does not.
+        conns[0].handle_srt_ack(30, t0 + 40, true);
+        conns[1].handle_srt_ack(30, t0 + 40, false);
+
+        assert!(
+            conns[0].rtt.kalman_rtt.is_initialized(),
+            "the carrying link must measure the round trip"
+        );
+        assert!(
+            !conns[1].rtt.kalman_rtt.is_initialized(),
+            "the probing link must not adopt the carrier's round trip"
+        );
+        assert_eq!(
+            conns[1].in_flight_packets, 0,
+            "...but it must still prune: the receiver does have the data"
+        );
+    }
+
+    #[test]
+    fn a_probe_survives_the_cumulative_ack_sweep_and_is_still_measurable() {
+        // The race this exists to close. A slow link's probe is answered by its
+        // own SRTLA ACK one long round trip later, but the *healthy* link
+        // delivers the unique twin almost immediately, so the receiver's
+        // cumulative ACK sweeps past that sequence first. While probes lived in
+        // the shared packet log, the sweep deleted the entry and the probe's
+        // own ACK then matched nothing: no delivery proof, no RTT sample, on
+        // exactly the links whose recovery the probes exist to measure.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        conn.queue_probe_packet(&[0u8; 100], 30, t0);
+        assert_eq!(
+            conn.in_flight_packets, 0,
+            "a probe is not payload this link owes; it must not count in-flight"
+        );
+
+        // The healthy link delivers the twin; the cumulative ACK sweeps past 30.
+        conn.handle_srt_ack(30, t0 + 40, false);
+
+        // A full second later, this link's own ACK for the probe finally lands.
+        assert!(
+            conn.handle_srtla_ack_specific(30, false, t0 + 1000),
+            "the probe must still be matchable after the sweep"
+        );
+        assert_eq!(
+            conn.last_ack_or_rtt_sample_ms,
+            t0 + 1000,
+            "a delivered probe is delivery proof — what the rejoin dwell counts"
+        );
+        assert!(
+            (conn.get_smooth_rtt_ms() - 1000.0).abs() < 1.0,
+            "and it must measure the link's real round trip, got {}",
+            conn.get_smooth_rtt_ms()
+        );
+    }
+
+    #[test]
+    fn a_probe_ack_does_not_grow_the_congestion_window() {
+        // A probe proves the path delivers; it is not payload. Letting its ACK
+        // grow the window would inflate the very score that makes a held-out
+        // link seize the stream the moment it is readmitted.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        conn.window = 5000;
+        conn.queue_probe_packet(&[0u8; 100], 77, t0);
+        assert!(conn.handle_srtla_ack_specific(77, false, t0 + 50));
+
+        assert_eq!(
+            conn.window, 5000,
+            "a probe ACK must leave the congestion window alone"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_probe_log_stays_bounded() {
+        // Probes are only removed by their own ACK, which may never come.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        for seq in 0..5000u32 {
+            conn.queue_probe_packet(&[0u8; 100], seq, t0 + u64::from(seq));
+        }
+        assert!(
+            conn.probe_log.len() <= srtla_core::config_snapshot::PROBE_LOG_SOFT_CAP,
+            "probe log grew to {}",
+            conn.probe_log.len()
+        );
+    }
+
+    #[test]
+    fn test_srtla_ack_feeds_the_smoothed_rtt() {
+        // An SRTLA ACK is a per-link round trip: this link sent the sequence on
+        // its own socket and the receiver acknowledged it back on that socket.
+        // It used to be consumed for delivery proof only, with the send
+        // timestamp discarded — which left a gated link, whose duplicate probes
+        // earn nothing but these ACKs, driving its rejoin decision off a frozen
+        // RTT estimate.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        assert!(
+            !conn.rtt.kalman_rtt.is_initialized(),
+            "precondition: no RTT measured yet"
+        );
+
+        conn.register_packet(100, t0);
+        assert!(conn.handle_srtla_ack_specific(100, false, t0 + 50));
+
+        assert!(
+            conn.rtt.kalman_rtt.is_initialized(),
+            "the ACK's round trip must reach the estimator"
+        );
+        assert!(
+            (conn.get_smooth_rtt_ms() - 50.0).abs() < 1.0,
+            "smoothed RTT should be ~50ms, got {}",
+            conn.get_smooth_rtt_ms()
+        );
+    }
+
+    #[test]
+    fn test_srtla_ack_rejects_implausible_round_trip() {
+        // Same guard as every other RTT source: a zero-length round trip would
+        // seed rtt_min_ms at zero and make the link look infinitely fast.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let t0 = now_ms();
+
+        conn.register_packet(100, t0);
+        conn.register_packet(200, t0);
+
+        assert!(conn.handle_srtla_ack_specific(100, false, t0));
+        assert!(
+            !conn.rtt.kalman_rtt.is_initialized(),
+            "a same-millisecond ACK is not a measurement"
+        );
+
+        assert!(conn.handle_srtla_ack_specific(200, false, t0 + 20_000));
+        assert!(
+            !conn.rtt.kalman_rtt.is_initialized(),
+            "a 20s round trip is a clock jump, not a path measurement"
+        );
     }
 
     #[test]
@@ -587,7 +752,7 @@ mod tests {
 
         // Verify that packets can be found and acknowledged
         let recent_seq = (PKT_LOG_SIZE + 5) as i32;
-        conn.handle_srt_ack(recent_seq, now_ms());
+        conn.handle_srt_ack(recent_seq, now_ms(), true);
 
         // Should have reduced in-flight count and removed acked packets from log
         assert!(conn.in_flight_packets < PKT_LOG_SIZE as i32 + 10);
@@ -816,9 +981,10 @@ mod tests {
         assert_eq!(connections[2].in_flight_packets, 1);
 
         // Broadcast a cumulative ACK of 30 to every uplink, exactly as
-        // process_connection_events does (`for c in connections { c.handle_srt_ack }`).
-        for c in connections.iter_mut() {
-            c.handle_srt_ack(30, now_ms());
+        // process_connection_events does. Uplink 0 carried seq 30, so only it
+        // is told it owns the ACK; the others prune without measuring.
+        for (i, c) in connections.iter_mut().enumerate() {
+            c.handle_srt_ack(30, now_ms(), i == 0);
         }
 
         assert_eq!(

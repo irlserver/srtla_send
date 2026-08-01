@@ -1,29 +1,23 @@
+// The CLI is a thin shell over the `srtla_send` library: it parses arguments,
+// starts the optional sidecars, picks an egress binder for the platform, and
+// hands off to `sender::run_sender_with_config`. Consuming the library rather
+// than re-declaring its modules keeps one compilation of the tree instead of
+// two, and keeps the library's embedder-facing surface (the Android and Apple
+// binders no CLI ever constructs) from reading as dead code here.
 use anyhow::{Context, Result};
 use clap::Parser;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
+use srtla_core::mode::SchedulingMode;
+use srtla_send::{
+    config, control_socket, metrics, net, priority_listener, sender, stats, subscriptions,
+    toml_config, version,
+};
 use tracing_subscriber::EnvFilter;
 
 // Use mimalloc as the global allocator for the binary (non-Windows only)
 #[cfg(not(windows))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-mod config;
-mod control;
-mod control_socket;
-mod metrics;
-mod net;
-mod priority_listener;
-mod sender;
-mod stats;
-mod subscriptions;
-mod toml_config;
-
-// Test helpers for binary tests
-#[cfg(any(test, feature = "test-internals"))]
-mod test_helpers;
-
-use srtla_core::mode::SchedulingMode;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -146,19 +140,7 @@ async fn main() -> Result<()> {
 
     let args = Cli::parse();
     if args.print_version {
-        let version = env!("CARGO_PKG_VERSION");
-        let git_hash = env!("GIT_HASH");
-        let git_branch = env!("GIT_BRANCH");
-        let git_dirty = env!("GIT_DIRTY");
-
-        println!(
-            "{} ({}@{}{}) [{}]",
-            version,
-            git_branch,
-            git_hash,
-            git_dirty,
-            env!("CARGO_PKG_NAME")
-        );
+        println!("{}", version::version_line());
         return Ok(());
     }
 

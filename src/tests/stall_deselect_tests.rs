@@ -302,6 +302,289 @@ mod tests {
         assert!(!c.stall_latched());
     }
 
+    // --- Rejoin-dwell backoff (librist !375, 9dc8c406: a drained link always
+    // satisfies the rejoin condition, so a fixed dwell oscillates forever) ---
+
+    /// Drive one gate/rejoin cycle: stall the link at `start`, then hold fresh
+    /// proof until the latch releases. Returns the instant it released, or
+    /// `None` if it was still latched `limit_ms` after the stall.
+    fn cycle_until_rejoin(
+        c: &mut srtla_core::connection::SrtlaConnection,
+        start: u64,
+        limit_ms: u64,
+    ) -> Option<u64> {
+        make_stalled(c, start);
+        c.update_stall_latch(start, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(c.stall_latched(), "precondition: the latch engaged");
+        // Backlog drains and the link keeps answering probes — the state a
+        // held-out link reaches trivially, whatever it can carry under load.
+        c.in_flight_packets = 0;
+        let mut t = start;
+        while t <= start + limit_ms {
+            t += 100;
+            c.last_ack_or_rtt_sample_ms = t;
+            c.update_stall_latch(t, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+            if !c.stall_latched() {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_rejoin_that_immediately_re_stalls_doubles_the_dwell() {
+        // The hole this closes: the dwell only asks for sustained delivery
+        // proof, which a drained link supplies from its probes alone. A link
+        // that cannot carry its share rejoined, reflooded and re-gated on a
+        // fixed ~6s period for as long as the path stayed marginal, each cycle
+        // costing a payload-path transition.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        // First cycle runs at the base dwell and is free of any penalty.
+        let first = cycle_until_rejoin(c, now, dwell_ms() * 4).expect("first rejoin");
+        assert!(
+            first - now <= dwell_ms() + 200,
+            "the first rejoin must use the base dwell"
+        );
+        assert_eq!(c.stall_rejoin_backoff(), 1, "the first gate is free");
+
+        // It re-stalls at once — well inside the probation window.
+        let second = cycle_until_rejoin(c, first + 100, dwell_ms() * 8).expect("second rejoin");
+        assert_eq!(
+            c.stall_rejoin_backoff(),
+            2,
+            "a rejoin that did not hold must double the dwell"
+        );
+        assert!(
+            second - first > dwell_ms(),
+            "the second rejoin must wait longer than the base dwell: took {}ms",
+            second - first
+        );
+
+        // And again: the escalation compounds rather than resetting.
+        let third = cycle_until_rejoin(c, second + 100, dwell_ms() * 16).expect("third rejoin");
+        assert_eq!(c.stall_rejoin_backoff(), 4);
+        assert!(
+            third - second > 2 * dwell_ms(),
+            "the third wait must exceed the doubled dwell: took {}ms",
+            third - second
+        );
+    }
+
+    #[test]
+    fn a_rejoin_that_holds_clears_the_backoff() {
+        // A link recovering from a transient spike must not keep paying for an
+        // earlier failure, or one bad patch would exile it for minutes.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        let first = cycle_until_rejoin(c, now, dwell_ms() * 4).expect("first rejoin");
+        let second = cycle_until_rejoin(c, first + 100, dwell_ms() * 8).expect("second rejoin");
+        assert_eq!(c.stall_rejoin_backoff(), 2, "precondition: escalated");
+
+        // This time the rejoin outlasts probation before the link stalls again.
+        let probation_ms =
+            STALL_ACK_STALE_MS * srtla_core::config_snapshot::STALL_REJOIN_PROBATION_MULT;
+        let late = second + probation_ms + 1000;
+        let third = cycle_until_rejoin(c, late, dwell_ms() * 4).expect("third rejoin");
+        assert_eq!(
+            c.stall_rejoin_backoff(),
+            1,
+            "a rejoin that held must clear the escalation"
+        );
+        assert!(
+            third - late <= dwell_ms() + 200,
+            "and the next dwell must be back to the base: took {}ms",
+            third - late
+        );
+    }
+
+    #[test]
+    fn the_rejoin_backoff_saturates() {
+        // Still retried, just rarely — an exiled link must never be abandoned.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let mut t = now_ms();
+        let c = &mut conns[0];
+
+        for _ in 0..8 {
+            t = cycle_until_rejoin(c, t + 100, dwell_ms() * 64).expect("rejoin still happens")
+        }
+        assert_eq!(
+            c.stall_rejoin_backoff(),
+            srtla_core::config_snapshot::STALL_REJOIN_BACKOFF_MAX,
+            "the multiplier must stop at the ceiling"
+        );
+    }
+
+    #[test]
+    fn a_long_wait_does_not_stretch_the_share_ramp() {
+        // Only the wait scales. How gently a link is reloaded is a property of
+        // the link, not of how long it sat out; scaling the ramp too would pin
+        // a recovered link at the ramp floor for minutes.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        let first = cycle_until_rejoin(c, now, dwell_ms() * 4).expect("first rejoin");
+        let second = cycle_until_rejoin(c, first + 100, dwell_ms() * 8).expect("second rejoin");
+        assert_eq!(c.stall_rejoin_backoff(), 2, "precondition: escalated");
+
+        // The ramp still completes one base dwell after the (delayed) rejoin.
+        assert!(
+            c.is_rejoin_ramping(second + dwell_ms() - 100),
+            "the ramp must still be running just short of the base dwell"
+        );
+        assert!(
+            !c.is_rejoin_ramping(second + dwell_ms()),
+            "and must be done at the base dwell, not the backed-off one"
+        );
+    }
+
+    // --- Timeliness of the proof itself (librist !375, 6ed9d2a3: delivery on a
+    // leg queued deeper than the receiver's buffer is not evidence of anything) ---
+
+    fn set_rtt(conn: &mut srtla_core::connection::SrtlaConnection, rtt_ms: f64) {
+        for _ in 0..16 {
+            conn.rtt.kalman_rtt.update(rtt_ms);
+        }
+        assert!(
+            (conn.get_smooth_rtt_ms() - rtt_ms).abs() < rtt_ms * 0.1,
+            "the RTT estimator must have converged for the test to mean anything"
+        );
+    }
+
+    fn with_budget(budget_ms: u32) -> ConfigSnapshot {
+        ConfigSnapshot {
+            negotiated_latency_ms: budget_ms,
+            ..enhanced()
+        }
+    }
+
+    /// Gate a link at `rtt_ms`, then feed it an unbroken run of fresh delivery
+    /// proof for three dwells through the real selection path. Returns whether
+    /// the latch ever released.
+    fn rejoins_at(rtt_ms: f64, budget_ms: u32) -> bool {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        let config = with_budget(budget_ms);
+
+        set_rtt(&mut conns[0], rtt_ms);
+        make_stalled(&mut conns[0], now);
+        make_healthy_busy(&mut conns[1], now);
+        let _ = select_connection_idx(&mut conns, None, now, &config);
+        assert!(conns[0].stall_latched(), "precondition: the latch engaged");
+
+        // The state a held-out link reaches for free: backlog drained, probes
+        // and keepalives answered, delivery proof fresh every tick.
+        conns[0].in_flight_packets = 0;
+        let mut t = now;
+        while t <= now + dwell_ms() * 3 {
+            t += 100;
+            conns[0].last_ack_or_rtt_sample_ms = t;
+            conns[1].last_ack_or_rtt_sample_ms = t;
+            let _ = select_connection_idx(&mut conns, None, t, &config);
+            if !conns[0].stall_latched() {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn proof_from_a_link_slower_than_the_buffer_does_not_count() {
+        // 2s round trip is 1s one way. Against a 500ms receive buffer nothing
+        // this link delivers can be played, so the fresh proof it keeps
+        // producing — keepalive echoes cost it nothing — is not evidence that
+        // it can carry the stream again.
+        assert!(
+            !rejoins_at(2000.0, 500),
+            "a link that cannot beat the deadline must not clear the dwell"
+        );
+    }
+
+    #[test]
+    fn the_same_link_rejoins_when_the_buffer_can_absorb_it() {
+        // Identical link and identical proof; only the receiver's buffer
+        // differs. 1s of one-way delay fits inside 4s, so the dwell decides as
+        // it always has.
+        assert!(rejoins_at(2000.0, 4000));
+    }
+
+    #[test]
+    fn an_undeclared_buffer_leaves_the_dwell_untouched() {
+        // No handshake seen (or a peer without TSBPD): there is nothing to
+        // measure against, so withholding proof would strand the link forever.
+        assert!(rejoins_at(2000.0, 0));
+    }
+
+    #[test]
+    fn a_link_that_speeds_back_up_is_let_in() {
+        // Nothing here stops RTT being measured, so a path that genuinely
+        // recovers crosses back over the bar on its own — the link is still
+        // retried, it just stops being retried on evidence it never earned.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        let config = with_budget(500);
+
+        set_rtt(&mut conns[0], 2000.0);
+        make_stalled(&mut conns[0], now);
+        make_healthy_busy(&mut conns[1], now);
+        let _ = select_connection_idx(&mut conns, None, now, &config);
+        assert!(conns[0].stall_latched());
+
+        conns[0].in_flight_packets = 0;
+        let mut t = now;
+        for _ in 0..(dwell_ms() * 2 / 100) {
+            t += 100;
+            conns[0].last_ack_or_rtt_sample_ms = t;
+            conns[1].last_ack_or_rtt_sample_ms = t;
+            let _ = select_connection_idx(&mut conns, None, t, &config);
+        }
+        assert!(
+            conns[0].stall_latched(),
+            "two dwells of untimely proof must not add up to a rejoin"
+        );
+
+        // The path clears. 200ms round trip is 100ms one way, inside the 500ms
+        // buffer with room to spare.
+        set_rtt(&mut conns[0], 200.0);
+        let deadline = t + dwell_ms() * 3;
+        while t <= deadline {
+            t += 100;
+            conns[0].last_ack_or_rtt_sample_ms = t;
+            conns[1].last_ack_or_rtt_sample_ms = t;
+            let _ = select_connection_idx(&mut conns, None, t, &config);
+            if !conns[0].stall_latched() {
+                return;
+            }
+        }
+        panic!("a recovered link must rejoin once its proof is timely again");
+    }
+
+    #[test]
+    fn timeliness_is_measured_one_way_against_the_buffer() {
+        use srtla_core::connection::delivery_proof_is_timely;
+
+        // Half the round trip has to fit: 1000ms one way exactly fills a
+        // 1000ms buffer, 1001ms does not.
+        assert!(delivery_proof_is_timely(2000.0, 1000));
+        assert!(!delivery_proof_is_timely(2002.0, 1000));
+
+        // No declared buffer, and no RTT baseline yet, are both "nothing to
+        // check against" rather than grounds to withhold proof.
+        assert!(delivery_proof_is_timely(9999.0, 0));
+        assert!(delivery_proof_is_timely(0.0, 10));
+    }
+
     #[test]
     fn backlog_drain_alone_does_not_release_the_latch() {
         // Cumulative SRT ACKs delivered via the healthy links drain the stalled
@@ -355,6 +638,126 @@ mod tests {
         let _ = select_connection_idx(&mut conns, None, now, &off);
         assert!(!conns[0].stall_gated, "guard off must clear the flag");
         assert!(!conns[0].stall_latched(), "guard off must clear the latch");
+    }
+
+    // --- Post-rejoin share ramp (librist !375 afdc7ed6: a leg that rejoins at
+    // full weight re-floods the queue it drained while gated and re-mutes
+    // seconds later, oscillating for as long as the link stays marginal) ---
+
+    /// Route `count` packets and return how many each link won. Mirrors the
+    /// real feedback loop: routing a packet raises the winner's in-flight
+    /// count, which lowers its own score for the next one.
+    fn route(
+        conns: &mut [srtla_core::connection::SrtlaConnection],
+        now: u64,
+        count: usize,
+    ) -> (usize, usize) {
+        let mut picks = (0usize, 0usize);
+        for _ in 0..count {
+            // `last_idx: None` on every packet so the result is pure score,
+            // with no switch hysteresis mixed in.
+            match select_connection_idx(conns, None, now, &enhanced()) {
+                Some(0) => {
+                    picks.0 += 1;
+                    conns[0].in_flight_packets += 1;
+                }
+                Some(1) => {
+                    picks.1 += 1;
+                    conns[1].in_flight_packets += 1;
+                }
+                other => panic!("selection returned {other:?} with two usable links"),
+            }
+        }
+        picks
+    }
+
+    /// Drive link 0 through a full gate-and-release cycle and leave both links
+    /// at the moment of release: link 0 drained (as gating guarantees), link 1
+    /// carrying the stream. Returns that timestamp.
+    fn gate_then_release(conns: &mut [srtla_core::connection::SrtlaConnection], t0: u64) -> u64 {
+        make_stalled(&mut conns[0], t0);
+        make_healthy_busy(&mut conns[1], t0);
+        let _ = select_connection_idx(conns, None, t0, &enhanced());
+        assert!(conns[0].stall_gated, "precondition: link 0 gated");
+
+        // Gated means no unique payload, so the backlog drains to nothing.
+        conns[0].in_flight_packets = 0;
+
+        // Fresh delivery proof, sustained across the rejoin dwell.
+        let run_start = t0 + 100;
+        for c in conns.iter_mut() {
+            c.last_received = Some(run_start);
+            c.last_ack_or_rtt_sample_ms = run_start;
+        }
+        let _ = select_connection_idx(conns, None, run_start, &enhanced());
+        assert!(conns[0].stall_latched(), "one sample must not release");
+
+        let released = run_start + dwell_ms();
+        for c in conns.iter_mut() {
+            c.last_received = Some(released);
+            c.last_ack_or_rtt_sample_ms = released;
+        }
+        let _ = select_connection_idx(conns, None, released, &enhanced());
+        assert!(!conns[0].stall_latched(), "sustained proof must release");
+        released
+    }
+
+    #[test]
+    fn rejoining_link_ramps_its_share_instead_of_seizing_the_stream() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let released = gate_then_release(&mut conns, now_ms());
+
+        assert!(
+            conns[0].is_rejoin_ramping(released),
+            "releasing the latch must arm the share ramp"
+        );
+
+        // Both links start this round where the gate left them: link 0 drained
+        // by the gating, link 1 carrying the whole stream. On raw score that
+        // makes the *rejoining* link look 65x better than the one actually
+        // doing the work — the artefact the ramp exists to neutralise.
+        conns[0].in_flight_packets = 0;
+        conns[1].in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS * 2;
+        let (rejoiner, incumbent) = route(&mut conns, released, 60);
+
+        assert!(
+            rejoiner < incumbent,
+            "the rejoining link must not take the stream off the working one (rejoiner \
+             {rejoiner}, incumbent {incumbent})"
+        );
+        assert!(
+            rejoiner > 0,
+            "it must still carry something, or it can never prove itself"
+        );
+    }
+
+    #[test]
+    fn the_ramp_expires_and_the_link_competes_at_full_score() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let released = gate_then_release(&mut conns, now_ms());
+
+        // Same starting state, but the ramp has run its course.
+        let done = released + dwell_ms();
+        for c in conns.iter_mut() {
+            c.last_received = Some(done);
+            c.last_ack_or_rtt_sample_ms = done;
+        }
+        assert!(
+            !conns[0].is_rejoin_ramping(done),
+            "the ramp must expire on its own"
+        );
+
+        conns[0].in_flight_packets = 0;
+        conns[1].in_flight_packets = STALL_MIN_IN_FLIGHT_PACKETS * 2;
+        let (rejoiner, incumbent) = route(&mut conns, done, 60);
+
+        assert!(
+            rejoiner > incumbent,
+            "with the ramp expired the recovered link competes on raw capacity again (rejoiner \
+             {rejoiner}, incumbent {incumbent})"
+        );
     }
 
     // --- RTT-adaptive staleness window (librist !375 field lesson: the
