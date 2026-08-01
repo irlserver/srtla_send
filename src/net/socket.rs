@@ -45,7 +45,6 @@ impl UplinkBinder for SourceIpBinder {
 ///
 /// Exported for library consumers; the CLI binary never constructs it.
 #[cfg(unix)]
-#[allow(dead_code)]
 pub struct CallbackBinder<F>(pub F)
 where
     F: Fn(RawFd, IpAddr) -> std::io::Result<()> + Send + Sync;

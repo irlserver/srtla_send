@@ -12,6 +12,16 @@ mod config;
 mod control;
 mod control_socket;
 mod metrics;
+// `net` is a library surface before it is a CLI one: besides the binder the CLI
+// picks, it carries the host-integration binders that embedders construct
+// (Android's `CallbackBinder` over the raw fd, `AppleInterfaceBinder`'s
+// host-supplied interface overrides). The binary compiles its own copy of the
+// module tree and instantiates exactly one binder per platform, so whatever the
+// current target does not pick reads as dead *here* while staying live public
+// API in the library: on Darwin that is `SourceIpBinder`, elsewhere the Apple
+// module is not compiled at all. The allowance therefore belongs on the binary's
+// copy, not on the API itself.
+#[allow(dead_code, unused_imports)]
 mod net;
 mod priority_listener;
 mod sender;
