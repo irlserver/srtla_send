@@ -1,0 +1,33 @@
+crates/srtla-protocol/src/parsers.rs
+  s_554e2f77d77883::t_97b9e6698e3f5b 166-177,180,187
+src/tests/protocol_tests.rs
+  s_554e2f77d77883::t_1b02068c050afa 147-150,152-159,161-163,169-170,176,180-194,198
+  s_554e2f77d77883::t_48fa21104b4230 407,409
+tests/parser_proptest.rs
+  s_554e2f77d77883::t_85fb40870a5a88 31-40
+  s_554e2f77d77883::t_ca0db51240b3bd 71
+  s_554e2f77d77883::t_e79791bc6a7059 129
+  s_554e2f77d77883::t_a84891e5261f39 143
+src/tests/integration_tests.rs
+  s_554e2f77d77883::t_a4483bfe3ec989 137,142-143
+  s_554e2f77d77883::t_9630a3dad73a88 47-49,51,57,60-61
+src/tests/end_to_end_tests.rs
+  s_554e2f77d77883::t_94fd080aec843e 304-305
+  s_554e2f77d77883::t_a1ff8f82bee290 182-185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "44cab6264f060c3d9acaa35074debc390d2e663a",
+  "prompts": {},
+  "sessions": {
+    "s_554e2f77d77883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3de32592-6fc4-4d38-a438-7ddcec0c4989",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
