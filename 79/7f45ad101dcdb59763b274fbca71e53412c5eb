@@ -1,0 +1,27 @@
+crates/network-sim/src/bench/delivery.rs
+  s_554e2f77d77883::t_91af35ce59eb1d 93-117,432-469,475-511
+  s_554e2f77d77883::t_3902e4f3ace31c 470-474
+  s_554e2f77d77883::t_56f02b676e716f 512
+crates/network-sim/src/bin/bench_source.rs
+  s_554e2f77d77883::t_3902e4f3ace31c 27-28,30-35
+  s_554e2f77d77883::t_ad686aecfc6b52 21,51,67-70,147
+crates/network-sim/src/bin/bench_runner.rs
+  s_554e2f77d77883::t_ad686aecfc6b52 453,468,476,482-485,487-494,496-497,500-504
+  s_554e2f77d77883::t_3902e4f3ace31c 498-499
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "797f45ad101dcdb59763b274fbca71e53412c5eb",
+  "prompts": {},
+  "sessions": {
+    "s_554e2f77d77883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3de32592-6fc4-4d38-a438-7ddcec0c4989",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
