@@ -30,7 +30,7 @@ mod unix_impl {
     use std::os::unix::io::{AsRawFd, RawFd};
     use std::task::{Context, Poll, ready};
 
-    use socket2::Socket;
+    use socket2::{SockAddr, Socket};
     use tokio::io::Interest;
     use tokio::io::unix::AsyncFd;
 
@@ -64,17 +64,31 @@ mod unix_impl {
     /// This wraps a `socket2::Socket` in tokio's `AsyncFd` for proper async
     /// readability polling, then uses `recvmmsg` to receive multiple packets
     /// in a single syscall.
+    ///
+    /// The socket is deliberately **not** connected: `peer` carries the receiver
+    /// address explicitly on every send, and the receive path accepts datagrams
+    /// from any source. See [`BatchUdpSocket::new`].
     pub struct BatchUdpSocket {
         inner: AsyncFd<Socket>,
+        peer: SockAddr,
     }
 
     impl BatchUdpSocket {
-        /// Create a new BatchUdpSocket from a socket2::Socket.
+        /// Create a new BatchUdpSocket from a socket2::Socket, sending to `peer`.
         ///
-        /// The socket must already be bound, connected, and set to non-blocking mode.
-        pub fn new(socket: Socket) -> std::io::Result<Self> {
+        /// The socket must already be bound and set to non-blocking mode, and
+        /// must **not** be connected. A connected UDP socket makes the kernel
+        /// drop any datagram whose source differs from the connect address,
+        /// which breaks two real deployments: a multi-homed receiver that replies
+        /// from a different local address than the one we sent to, and a NAT or
+        /// load balancer that rewrites the reply source. The reference C sender
+        /// binds its source address and then uses `sendto`/`recvfrom` for the
+        /// same reason, so accepting any source is also the interoperable
+        /// behavior.
+        pub fn new(socket: Socket, peer: SocketAddr) -> std::io::Result<Self> {
             Ok(Self {
                 inner: AsyncFd::with_interest(socket, Interest::READABLE | Interest::WRITABLE)?,
+                peer: peer.into(),
             })
         }
 
@@ -117,12 +131,12 @@ mod unix_impl {
             std::future::poll_fn(|cx| self.poll_recv_batch(cx, buffer)).await
         }
 
-        /// Send data to the connected peer asynchronously.
+        /// Send data to the peer asynchronously.
         pub async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
             loop {
                 let mut guard = self.inner.ready(Interest::WRITABLE).await?;
 
-                match self.inner.get_ref().send(buf) {
+                match self.inner.get_ref().send_to(buf, &self.peer) {
                     Ok(n) => return Ok(n),
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                         guard.clear_ready();
@@ -138,10 +152,10 @@ mod unix_impl {
         /// Returns WouldBlock if the socket is not ready.
         #[allow(dead_code)]
         pub fn try_send(&self, buf: &[u8]) -> std::io::Result<usize> {
-            self.inner.get_ref().send(buf)
+            self.inner.get_ref().send_to(buf, &self.peer)
         }
 
-        /// Send several datagrams to the connected peer in one `sendmmsg` syscall.
+        /// Send several datagrams to the peer in one `sendmmsg` syscall.
         ///
         /// Returns the number of datagrams the kernel accepted, which may be
         /// fewer than requested: `sendmmsg` reports a short send rather than
@@ -189,8 +203,11 @@ mod unix_impl {
                     iov_base: bufs[i].as_ptr() as *mut libc::c_void,
                     iov_len: bufs[i].len(),
                 };
-                // The socket is connected, so the destination is implicit and
-                // msg_name stays null.
+                // The socket is unconnected, so every datagram carries its
+                // destination. `sendmmsg` only reads through msg_name; the cast
+                // to *mut is required by the C signature.
+                msgs[i].msg_hdr.msg_name = self.peer.as_ptr() as *mut libc::c_void;
+                msgs[i].msg_hdr.msg_namelen = self.peer.len();
                 msgs[i].msg_hdr.msg_iov = std::ptr::addr_of_mut!(iov[i]);
                 msgs[i].msg_hdr.msg_iovlen = 1;
             }
@@ -530,19 +547,25 @@ mod fallback_impl {
     /// Fallback async UDP socket for non-Linux platforms.
     ///
     /// Uses tokio's UdpSocket directly since recvmmsg is not available.
+    ///
+    /// As on Linux, the socket is left unconnected and `peer` supplies the
+    /// destination on every send; see the Linux [`BatchUdpSocket::new`] for why.
     pub struct BatchUdpSocket {
         inner: UdpSocket,
+        peer: SocketAddr,
     }
 
     impl BatchUdpSocket {
-        /// Create a new BatchUdpSocket from a socket2::Socket.
+        /// Create a new BatchUdpSocket from a socket2::Socket, sending to `peer`.
         ///
-        /// The socket must already be bound, connected, and set to non-blocking mode.
-        pub fn new(socket: Socket) -> std::io::Result<Self> {
+        /// The socket must already be bound and set to non-blocking mode, and
+        /// must not be connected.
+        pub fn new(socket: Socket, peer: SocketAddr) -> std::io::Result<Self> {
             // Convert socket2::Socket to std::net::UdpSocket
             let std_socket: std::net::UdpSocket = socket.into();
             Ok(Self {
                 inner: UdpSocket::from_std(std_socket)?,
+                peer,
             })
         }
 
@@ -562,12 +585,12 @@ mod fallback_impl {
             }
         }
 
-        /// Send data to the connected peer.
+        /// Send data to the peer.
         pub async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
-            self.inner.send(buf).await
+            self.inner.send_to(buf, self.peer).await
         }
 
-        /// Send several datagrams to the connected peer.
+        /// Send several datagrams to the peer.
         ///
         /// There is no `sendmmsg` off Linux, so this sends one at a time and
         /// exists only to keep [`BatchSender::flush`] platform-agnostic. It
@@ -576,7 +599,7 @@ mod fallback_impl {
         pub async fn send_batch(&self, bufs: &[&[u8]]) -> std::io::Result<usize> {
             let mut sent = 0;
             for buf in bufs {
-                match self.inner.send(buf).await {
+                match self.inner.send_to(buf, self.peer).await {
                     Ok(_) => sent += 1,
                     // Mirror `sendmmsg`: once at least one datagram is away, a
                     // failure is reported as a short send, not an error. The
@@ -592,7 +615,7 @@ mod fallback_impl {
         /// Try to send data without blocking.
         #[allow(dead_code)]
         pub fn try_send(&self, buf: &[u8]) -> std::io::Result<usize> {
-            self.inner.try_send(buf)
+            self.inner.try_send_to(buf, self.peer)
         }
 
         /// Try to receive data without blocking.

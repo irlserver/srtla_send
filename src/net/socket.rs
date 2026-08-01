@@ -10,7 +10,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tracing::warn;
 
 /// Strategy for steering a freshly created uplink socket onto a specific egress
-/// path before it is connected.
+/// path.
 ///
 /// On a multi-homed Linux host each uplink owns a source IP, and source-based
 /// routing makes binding that source IP sufficient to pick the egress
@@ -22,8 +22,8 @@ use tracing::warn;
 /// The uplink identity stays keyed on `IpAddr` in both cases; only the act of
 /// steering the socket differs.
 pub trait UplinkBinder: Send + Sync {
-    /// Steer `sock` (already created with buffers set, not yet connected) onto
-    /// the egress identified by `ip`.
+    /// Steer `sock` (already created with buffers set, no traffic yet) onto the
+    /// egress identified by `ip`.
     fn bind(&self, sock: &Socket, ip: IpAddr) -> Result<()>;
 }
 
@@ -41,7 +41,7 @@ impl UplinkBinder for SourceIpBinder {
 /// Binder that delegates to a host-supplied closure over the raw fd. The Android
 /// integration wires this to `ConnectivityManager` / `Network.bindSocket`,
 /// keying on the same `IpAddr` used as the uplink identity. The closure must
-/// steer the fd onto the intended radio before the socket is connected.
+/// steer the fd onto the intended radio before the socket carries traffic.
 ///
 /// Exported for library consumers; the CLI binary never constructs it.
 #[cfg(unix)]
@@ -60,7 +60,10 @@ where
 }
 
 /// Create a UDP socket with the standard nonblocking and buffer configuration.
-/// The caller applies an [`UplinkBinder`] and then connects.
+///
+/// The caller applies an [`UplinkBinder`] and then hands the socket to
+/// `BatchUdpSocket::new` together with the receiver address. The socket is never
+/// connected; see that constructor for why.
 pub fn create_uplink_socket(domain_for: IpAddr) -> Result<Socket> {
     let domain = match domain_for {
         IpAddr::V4(_) => Domain::IPV4,

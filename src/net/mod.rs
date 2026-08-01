@@ -23,7 +23,7 @@ pub use socket::CallbackBinder;
 pub use socket::{SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote};
 use srtla_core::connection::BATCH_SEND_SIZE;
 
-/// Send every datagram to the connected peer, chunking into `sendmmsg` syscalls.
+/// Send every datagram to the link's peer, chunking into `sendmmsg` syscalls.
 ///
 /// This is the I/O half of a batch flush: the pure [`srtla_core::connection::BatchSender`]
 /// drains the queue, and this transmits the bytes. `sendmmsg` may accept fewer

@@ -26,10 +26,11 @@ pub fn create_test_conn_io() -> ConnIo {
         .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
         .unwrap();
     socket.set_nonblocking(true).unwrap();
+    let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
     ConnIo {
-        socket: Arc::new(BatchUdpSocket::new(socket).unwrap()),
+        socket: Arc::new(BatchUdpSocket::new(socket, remote).unwrap()),
         binder: Arc::new(SourceIpBinder),
-        remote: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+        remote,
     }
 }
 

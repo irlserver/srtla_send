@@ -132,9 +132,8 @@ async fn connect_uplink(
     let remote = resolve_remote(receiver_host, receiver_port).await?;
     let sock = create_uplink_socket(ip)?;
     binder.bind(&sock, ip)?;
-    sock.connect(&remote.into())?;
     sock.set_nonblocking(true)?;
-    let socket = Arc::new(BatchUdpSocket::new(sock)?);
+    let socket = Arc::new(BatchUdpSocket::new(sock, remote)?);
 
     let conn_id = rand::rng().next_u64();
     let label = format!("{}:{} via {}", receiver_host, receiver_port, ip);
@@ -154,9 +153,8 @@ async fn connect_uplink(
 pub async fn reconnect_uplink(conn: &mut SrtlaConnection, io: &mut ConnIo, now: u64) -> Result<()> {
     let sock = create_uplink_socket(conn.local_ip)?;
     io.binder.bind(&sock, conn.local_ip)?;
-    sock.connect(&io.remote.into())?;
     sock.set_nonblocking(true)?;
-    io.socket = Arc::new(BatchUdpSocket::new(sock)?);
+    io.socket = Arc::new(BatchUdpSocket::new(sock, io.remote)?);
 
     conn.reset_for_reconnect(now);
     // Don't reset connection_established_ms for reconnections — only set on REG3.
