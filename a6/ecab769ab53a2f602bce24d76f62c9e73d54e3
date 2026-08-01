@@ -1,0 +1,19 @@
+crates/network-sim/src/bench/plan.rs
+  s_554e2f77d77883::t_32eba9e844f28c 510-524
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "a6ecab769ab53a2f602bce24d76f62c9e73d54e3",
+  "prompts": {},
+  "sessions": {
+    "s_554e2f77d77883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3de32592-6fc4-4d38-a438-7ddcec0c4989",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
