@@ -1,0 +1,24 @@
+docker/bench.Dockerfile
+  s_554e2f77d77883::t_0416767a202332 1-53
+crates/network-sim/src/harness.rs
+  s_554e2f77d77883::t_5f8618b7cafe10 164,166,191-193
+  s_554e2f77d77883::t_a5a7450271d21b 159-163,168-171,173,175-190,194-195
+docker/run-bench.sh
+  s_554e2f77d77883::t_919b863b0816d2 1-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "8b53cf1733e11eb43e971d621f4f11b3cabfb230",
+  "prompts": {},
+  "sessions": {
+    "s_554e2f77d77883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3de32592-6fc4-4d38-a438-7ddcec0c4989",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
