@@ -92,6 +92,11 @@ rustfmt.toml        - Formatting configuration
 - `registration`: Registration manager for SRTLA connection setup
 - `sender`: Main packet forwarding logic, connection selection algorithm
 - `utils`: Common utilities (now_ms, etc.)
+- `version`: `-v/--version` line composition. The build metadata is OPTIONAL: `build.rs` emits an
+  empty string for anything it could not resolve (no git checkout, detached HEAD), and
+  `compose_version_line()` drops the parenthetical entirely rather than printing a placeholder
+  word. Do not reintroduce `"unknown"`, and do not infer "dirty" from a non-zero `git diff` exit
+  code (it exits 128/129 when there is no repository at all).
 
 ### Test Organization
 
