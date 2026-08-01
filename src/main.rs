@@ -1,40 +1,23 @@
+// The CLI is a thin shell over the `srtla_send` library: it parses arguments,
+// starts the optional sidecars, picks an egress binder for the platform, and
+// hands off to `sender::run_sender_with_config`. Consuming the library rather
+// than re-declaring its modules keeps one compilation of the tree instead of
+// two, and keeps the library's embedder-facing surface (the Android and Apple
+// binders no CLI ever constructs) from reading as dead code here.
 use anyhow::{Context, Result};
 use clap::Parser;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
+use srtla_core::mode::SchedulingMode;
+use srtla_send::{
+    config, control_socket, metrics, net, priority_listener, sender, stats, subscriptions,
+    toml_config, version,
+};
 use tracing_subscriber::EnvFilter;
 
 // Use mimalloc as the global allocator for the binary (non-Windows only)
 #[cfg(not(windows))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-mod config;
-mod control;
-mod control_socket;
-mod metrics;
-// `net` is a library surface before it is a CLI one: besides the binder the CLI
-// picks, it carries the host-integration binders that embedders construct
-// (Android's `CallbackBinder` over the raw fd, `AppleInterfaceBinder`'s
-// host-supplied interface overrides). The binary compiles its own copy of the
-// module tree and instantiates exactly one binder per platform, so whatever the
-// current target does not pick reads as dead *here* while staying live public
-// API in the library: on Darwin that is `SourceIpBinder`, elsewhere the Apple
-// module is not compiled at all. The allowance therefore belongs on the binary's
-// copy, not on the API itself.
-#[allow(dead_code, unused_imports)]
-mod net;
-mod priority_listener;
-mod sender;
-mod stats;
-mod subscriptions;
-mod toml_config;
-mod version;
-
-// Test helpers for binary tests
-#[cfg(any(test, feature = "test-internals"))]
-mod test_helpers;
-
-use srtla_core::mode::SchedulingMode;
 
 #[derive(Parser, Debug)]
 #[command(
