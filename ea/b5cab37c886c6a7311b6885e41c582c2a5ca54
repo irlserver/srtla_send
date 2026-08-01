@@ -1,0 +1,37 @@
+src/net/socket.rs
+  s_554e2f77d77883::t_340d9a713e8338 25-26
+  s_554e2f77d77883::t_c000d98830b51e 13
+  s_554e2f77d77883::t_ae5230e85d22d7 44,63-66
+src/net/batch_recv.rs
+  s_554e2f77d77883::t_9c8a267dfc417f 206-210
+  s_554e2f77d77883::t_b4ae553d7aa1c5 33
+  s_554e2f77d77883::t_739abcee22e986 67-70,73,77,79-88,91
+  s_554e2f77d77883::t_0cfbd24d0fb81c 602
+  s_554e2f77d77883::t_d55daf33e7caef 588,590,593
+  s_554e2f77d77883::t_bf5f5a78076e2d 134,139,155,158
+  s_554e2f77d77883::t_bcb01b69c66434 618
+  s_554e2f77d77883::t_66f63092edc22a 550-552,555,559,561-563,568
+src/sender/connections.rs
+  s_554e2f77d77883::t_9d90149078b3cd 136
+  s_554e2f77d77883::t_cab9a4683760be 157
+src/net/mod.rs
+  s_554e2f77d77883::t_0245659a7d9ba0 26
+src/test_helpers.rs
+  s_554e2f77d77883::t_194ff1ba0c3293 29,31,33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "eab5cab37c886c6a7311b6885e41c582c2a5ca54",
+  "prompts": {},
+  "sessions": {
+    "s_554e2f77d77883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3de32592-6fc4-4d38-a438-7ddcec0c4989",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
