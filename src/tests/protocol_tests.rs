@@ -144,50 +144,58 @@ mod tests {
         assert_eq!(parse_srt_ack(&buf[..19]), None);
     }
 
+    /// Build an SRT NAK carrying `entries` as its loss list, with recognizable
+    /// non-zero header words so a parser reading from the wrong offset shows up.
+    fn make_nak(entries: &[u32]) -> Vec<u8> {
+        let mut buf = vec![0u8; SRT_CONTROL_HEADER_LEN + 4 * entries.len()];
+        buf[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
+        buf[8..12].copy_from_slice(&0xdead_beefu32.to_be_bytes()); // timestamp
+        buf[12..16].copy_from_slice(&0x0000_2a2au32.to_be_bytes()); // dst socket id
+        for (i, e) in entries.iter().enumerate() {
+            let off = SRT_CONTROL_HEADER_LEN + 4 * i;
+            buf[off..off + 4].copy_from_slice(&e.to_be_bytes());
+        }
+        buf
+    }
+
     #[test]
     fn test_parse_srt_nak_single() {
-        let mut buf = vec![0u8; 8];
-        buf[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-        buf[4..8].copy_from_slice(&500u32.to_be_bytes());
-
-        let naks = parse_srt_nak(&buf);
+        let naks = parse_srt_nak(&make_nak(&[500]));
         assert_eq!(naks.as_slice(), &[500]);
     }
 
     #[test]
     fn test_parse_srt_nak_range() {
-        let mut buf = vec![0u8; 12];
-        buf[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-        // Range NAK: set high bit and provide start/end
-        let start = 100u32 | 0x8000_0000;
-        buf[4..8].copy_from_slice(&start.to_be_bytes());
-        buf[8..12].copy_from_slice(&103u32.to_be_bytes());
-
-        let naks = parse_srt_nak(&buf);
+        // Range entry: MSB-set start, then the inclusive end.
+        let naks = parse_srt_nak(&make_nak(&[100 | 0x8000_0000, 103]));
         assert_eq!(naks.as_slice(), &[100, 101, 102, 103]);
     }
 
     #[test]
     fn test_parse_srt_nak_mixed() {
-        let mut buf = vec![0u8; 16];
-        buf[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-
-        // First: single NAK
-        buf[4..8].copy_from_slice(&50u32.to_be_bytes());
-
-        // Second: range NAK
-        let start = 100u32 | 0x8000_0000;
-        buf[8..12].copy_from_slice(&start.to_be_bytes());
-        buf[12..16].copy_from_slice(&102u32.to_be_bytes());
-
-        let naks = parse_srt_nak(&buf);
+        let naks = parse_srt_nak(&make_nak(&[50, 100 | 0x8000_0000, 102]));
         assert_eq!(naks.as_slice(), &[50, 100, 101, 102]);
+    }
+
+    // The loss list is the control packet's CIF and starts at offset 16. Parsing
+    // from offset 4 instead reports the timestamp and destination socket id as
+    // lost packets, which then shrink whichever link happens to hold a matching
+    // sequence number.
+    #[test]
+    fn test_parse_srt_nak_ignores_control_header() {
+        let naks = parse_srt_nak(&make_nak(&[7]));
+        assert_eq!(naks.as_slice(), &[7]);
+
+        // A header-only NAK carries no loss list at all.
+        let mut header_only = make_nak(&[]);
+        header_only.truncate(SRT_CONTROL_HEADER_LEN);
+        assert!(parse_srt_nak(&header_only).is_empty());
     }
 
     #[test]
     fn test_parse_srt_nak_invalid() {
         // Wrong packet type
-        let mut buf = vec![0u8; 8];
+        let mut buf = make_nak(&[500]);
         buf[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
         assert!(parse_srt_nak(&buf).is_empty());
 
@@ -396,9 +404,9 @@ mod decode {
         assert!(is_srt_ack(&ack));
         assert_eq!(parse_srt_ack(&ack), Some(424_242));
 
-        let mut nak = vec![0u8; 8];
+        let mut nak = vec![0u8; 20];
         nak[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-        nak[4..8].copy_from_slice(&777u32.to_be_bytes()); // single lost seq at bytes 4..8
+        nak[16..20].copy_from_slice(&777u32.to_be_bytes()); // loss list starts at byte 16
 
         assert_eq!(get_packet_type(&nak), Some(SRT_TYPE_NAK));
         let parsed = parse_srt_nak(&nak);

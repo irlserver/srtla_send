@@ -28,6 +28,16 @@ use srtla_protocol::{
 /// to let proptest synthesize NAK range words, while keeping each case fast.
 const MAX_INPUT: usize = 256;
 
+/// A NAK's loss list is the control packet's CIF: it starts after the full
+/// 16-byte SRT control header, not after the 4-byte type word. Frames built for
+/// these tests carry a header of the right size so the first loss entry lands
+/// where the parser looks for it.
+fn nak_header() -> Vec<u8> {
+    let mut buf = vec![0u8; srtla_protocol::SRT_CONTROL_HEADER_LEN];
+    buf[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
+    buf
+}
+
 prop_compose! {
     fn arb_conn_info()(
         conn_id in any::<u32>(),
@@ -58,9 +68,7 @@ proptest! {
     /// range/single decode branches are exercised far more often.
     #[test]
     fn parse_srt_nak_typed_never_panics_and_is_bounded(payload in prop::collection::vec(any::<u8>(), 0..MAX_INPUT)) {
-        let mut buf = Vec::with_capacity(payload.len() + 4);
-        buf.extend_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-        buf.extend_from_slice(&[0u8, 0u8]);
+        let mut buf = nak_header();
         buf.extend_from_slice(&payload);
         let out = parse_srt_nak(&buf);
         prop_assert!(out.len() <= buf.len() / 4 + 1000);
@@ -118,9 +126,7 @@ proptest! {
     /// clear decodes back to exactly those sequence numbers.
     #[test]
     fn srt_nak_singles_roundtrip(seqs in prop::collection::vec(0u32..0x8000_0000, 0..64)) {
-        let mut buf = Vec::with_capacity(4 + seqs.len() * 4);
-        buf.extend_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-        buf.extend_from_slice(&[0u8, 0u8]);
+        let mut buf = nak_header();
         for &s in &seqs {
             buf.extend_from_slice(&s.to_be_bytes());
         }
@@ -134,9 +140,7 @@ proptest! {
     #[test]
     fn srt_nak_range_roundtrips(start in 0u32..0x7fff_0000, delta in 0u32..200) {
         let end = start + delta;
-        let mut buf = Vec::with_capacity(12);
-        buf.extend_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-        buf.extend_from_slice(&[0u8, 0u8]);
+        let mut buf = nak_header();
         buf.extend_from_slice(&(start | 0x8000_0000).to_be_bytes());
         buf.extend_from_slice(&end.to_be_bytes());
         let parsed = parse_srt_nak(&buf);

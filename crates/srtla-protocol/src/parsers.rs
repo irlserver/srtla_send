@@ -163,16 +163,28 @@ pub fn parse_srt_ack(buf: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]))
 }
 
+/// Parse the loss list of an SRT NAK into individual sequence numbers.
+///
+/// The loss list is the control packet's CIF, so it starts after the full
+/// 16-byte SRT control header — not after the 4-byte type word. An SRTLA ACK
+/// (see [`parse_srtla_ack`]) does start at offset 4, and the two must not be
+/// confused: reading a NAK from offset 4 turns the header's timestamp and
+/// destination socket id into phantom loss reports.
+///
+/// An entry with the MSB set opens an inclusive range whose end is the next
+/// word; the start is masked, the end is not. A range whose end sorts below its
+/// masked start yields nothing, matching the reference implementation, which
+/// has no serial-wraparound handling here.
 #[inline]
 pub fn parse_srt_nak(buf: &[u8]) -> SmallVec<u32, 4> {
-    if buf.len() < 8 {
+    if buf.len() < SRT_CONTROL_HEADER_LEN + 4 {
         return SmallVec::new();
     }
     if get_packet_type(buf) != Some(SRT_TYPE_NAK) {
         return SmallVec::new();
     }
     let mut out = SmallVec::new();
-    let mut i = 4usize;
+    let mut i = SRT_CONTROL_HEADER_LEN;
     while i + 3 < buf.len() {
         let mut id = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
         i += 4;

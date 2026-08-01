@@ -44,20 +44,21 @@ async fn test_srt_ack_nak_parsing() {
     assert_eq!(parse_srt_ack(&ack_packet), Some(54321));
     assert!(is_srt_ack(&ack_packet));
 
-    // Test SRT NAK packet parsing - single NAK
-    let mut nak_packet = vec![0u8; 8];
+    // Test SRT NAK packet parsing - single NAK. The loss list is the control
+    // packet's CIF, so entries start after the 16-byte control header.
+    let mut nak_packet = vec![0u8; 20];
     nak_packet[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-    nak_packet[4..8].copy_from_slice(&12345u32.to_be_bytes());
+    nak_packet[16..20].copy_from_slice(&12345u32.to_be_bytes());
 
     let naks = parse_srt_nak(&nak_packet);
     assert_eq!(naks.as_slice(), &[12345]);
 
     // Test SRT NAK packet parsing - range NAK
-    let mut range_nak_packet = vec![0u8; 12];
+    let mut range_nak_packet = vec![0u8; 24];
     range_nak_packet[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
     let range_start = 1000u32 | 0x8000_0000;
-    range_nak_packet[4..8].copy_from_slice(&range_start.to_be_bytes());
-    range_nak_packet[8..12].copy_from_slice(&1003u32.to_be_bytes());
+    range_nak_packet[16..20].copy_from_slice(&range_start.to_be_bytes());
+    range_nak_packet[20..24].copy_from_slice(&1003u32.to_be_bytes());
 
     let range_naks = parse_srt_nak(&range_nak_packet);
     assert_eq!(range_naks.as_slice(), &[1000, 1001, 1002, 1003]);
@@ -133,13 +134,13 @@ fn test_protocol_constants_consistency() {
 #[test]
 fn test_large_nak_range_limit() {
     // Test that NAK parsing limits range size to prevent memory exhaustion
-    let mut large_range_packet = vec![0u8; 12];
+    let mut large_range_packet = vec![0u8; 24];
     large_range_packet[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
 
     // Create a range that would be > 1000 items
     let range_start = 1u32 | 0x8000_0000;
-    large_range_packet[4..8].copy_from_slice(&range_start.to_be_bytes());
-    large_range_packet[8..12].copy_from_slice(&2000u32.to_be_bytes());
+    large_range_packet[16..20].copy_from_slice(&range_start.to_be_bytes());
+    large_range_packet[20..24].copy_from_slice(&2000u32.to_be_bytes());
 
     let naks = parse_srt_nak(&large_range_packet);
     assert!(

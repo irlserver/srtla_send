@@ -179,10 +179,10 @@ async fn test_ack_nak_sequence_handling() {
     let parsed_acks = parse_srtla_ack(&ack_packet);
     assert_eq!(parsed_acks, sequences);
 
-    // Create SRT NAK packet with mixed single and range NAKs
-    let mut nak_packet = Vec::new();
-    nak_packet.extend_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-    nak_packet.extend_from_slice(&0u16.to_be_bytes()); // Reserved field
+    // Create SRT NAK packet with mixed single and range NAKs. The loss list is
+    // the control packet's CIF, so it follows the full 16-byte control header.
+    let mut nak_packet = vec![0u8; SRT_CONTROL_HEADER_LEN];
+    nak_packet[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
 
     // Single NAK
     nak_packet.extend_from_slice(&200u32.to_be_bytes());
@@ -301,9 +301,8 @@ fn test_memory_usage_bounds() {
     use srtla_protocol::*;
 
     // Test that parsing large NAK ranges doesn't consume excessive memory
-    let mut large_nak = Vec::new();
-    large_nak.extend_from_slice(&SRT_TYPE_NAK.to_be_bytes());
-    large_nak.extend_from_slice(&0u32.to_be_bytes()); // Padding
+    let mut large_nak = vec![0u8; SRT_CONTROL_HEADER_LEN];
+    large_nak[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
 
     // Create a range that would be 10,000 items if not limited
     let range_start = 1u32 | 0x8000_0000;
