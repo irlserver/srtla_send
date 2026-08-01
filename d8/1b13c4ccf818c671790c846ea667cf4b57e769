@@ -1,0 +1,30 @@
+src/lib.rs
+  s_5db5347424f3d7::t_9a5f72f0afbded 27
+build.rs
+  s_5db5347424f3d7::t_6d55a5359ef2d5 3-18,20-21,23-28,30-41,43-54
+src/version.rs
+  s_5db5347424f3d7::t_5aeeb9e1ad84d9 1-134
+src/main.rs
+  s_5db5347424f3d7::t_5d5feb0bb9a7d2 21
+  s_5db5347424f3d7::t_bc9ad84f732df8 150
+README.md
+  s_5db5347424f3d7::t_35fade3917f1f1 139-157
+AGENTS.md
+  s_5db5347424f3d7::t_4b82276e5fb7c3 95-99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "d81b13c4ccf818c671790c846ea667cf4b57e769",
+  "prompts": {},
+  "sessions": {
+    "s_5db5347424f3d7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7ad9c9d8-9ab5-437f-af31-e76b533fcf37",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
