@@ -16,6 +16,19 @@ pub enum RegistrationEvent {
     RegErr,
 }
 
+/// Registration control frames carry no authentication, and the uplink sockets
+/// are deliberately unconnected (accept-any-source, for C-reference and NAT
+/// interop), so anything that can reach an uplink's source port can forge one.
+/// The manager therefore accepts a REG3 or a REG_ERR only while the addressed
+/// uplink genuinely has that phase of the handshake in flight; anything else is
+/// counted here and reported to the shell as "not a registration packet"
+/// (`None`), which is a no-op for connection state.
+#[derive(Debug, Default, Clone, Copy)]
+struct OutOfPhaseCounters {
+    reg3: u64,
+    reg_err: u64,
+}
+
 /// Packets the registration driver decided to send this tick, for the shell to
 /// transmit. Keeps the manager sans-IO: `reg_driver_pending_sends` mutates the
 /// handshake state machine and returns *what* to send; the caller owns the
@@ -40,6 +53,21 @@ pub struct SrtlaRegistrationManager {
     probing_state: ProbingState,
     probe_id: [u8; SRTLA_ID_LEN],
     probe_results: SmallVec<ProbeResult, 4>,
+    /// Uplink indices we have queued a REG2 for. A REG3 is honored only for a
+    /// member, and the grant is ONE-SHOT: `handle_reg3` consumes it, so a
+    /// duplicate or replayed REG3 cannot re-fire the "just registered" effects
+    /// (`clear_pre_registration_state`, which wipes a live link's packet log,
+    /// in-flight count, congestion state and batch queue). A legitimate
+    /// reconnect re-arms the gate through [`Self::build_reg2`].
+    ///
+    /// Indices are positional into the shell's connection vector, exactly like
+    /// `pending_reg2_idx` / `reg1_target_idx`.
+    awaiting_reg3: SmallVec<usize, 4>,
+    /// `connected` flags snapshotted by [`Self::update_active_connections`],
+    /// indexed the same way. Used only to keep a REG2 broadcast from re-arming
+    /// the one-shot gate on an already-established, forwarding uplink.
+    connected_snapshot: SmallVec<bool, 4>,
+    out_of_phase: OutOfPhaseCounters,
 }
 
 impl Default for SrtlaRegistrationManager {
@@ -64,7 +92,36 @@ impl SrtlaRegistrationManager {
             probing_state: default_probing_state(),
             probe_id: new_probe_id(),
             probe_results: new_probe_results(),
+            awaiting_reg3: SmallVec::new(),
+            connected_snapshot: SmallVec::new(),
+            out_of_phase: OutOfPhaseCounters::default(),
         }
+    }
+
+    /// Arm the one-shot REG3 grant for `conn_idx`.
+    ///
+    /// Sans-IO caveat: the manager builds packets and the shell transmits them,
+    /// so the grant is armed when a REG2 is *queued*, not when it provably left
+    /// the host (the fork this is ported from can gate on the send result). A
+    /// REG2 the kernel then drops therefore leaves a grant armed for one
+    /// handshake window — deliberately the liveness-safe direction: over-arming
+    /// can only admit a REG3 for an uplink we did try to register, whereas
+    /// under-arming would silently refuse a legitimate registration.
+    fn arm_reg3_grant(&mut self, conn_idx: usize) {
+        if !self.awaiting_reg3.contains(&conn_idx) {
+            self.awaiting_reg3.push(conn_idx);
+        }
+    }
+
+    fn revoke_reg3_grant(&mut self, conn_idx: usize) {
+        self.awaiting_reg3.retain(|&idx| idx != conn_idx);
+    }
+
+    fn is_connected_snapshot(&self, conn_idx: usize) -> bool {
+        self.connected_snapshot
+            .get(conn_idx)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Build a REG1 packet for `conn_idx` and advance into the "awaiting REG2"
@@ -83,12 +140,18 @@ impl SrtlaRegistrationManager {
         pkt
     }
 
-    /// Build a REG2 packet from the current SRTLA id. Pure and stateless; the
-    /// caller transmits it on the uplink.
-    pub fn build_reg2(&self, conn_idx: usize) -> [u8; SRTLA_TYPE_REG2_LEN] {
+    /// Build a REG2 packet from the current SRTLA id and arm this uplink's
+    /// one-shot REG3 grant. The caller transmits it on the uplink.
+    ///
+    /// This is the per-uplink *reconnect* resend, so it arms unconditionally:
+    /// a link that reached this path has been reset (`connected == false`) and
+    /// must be able to complete a fresh handshake. Only the broadcast in
+    /// [`Self::reg_driver_pending_sends`] skips established links.
+    pub fn build_reg2(&mut self, conn_idx: usize) -> [u8; SRTLA_TYPE_REG2_LEN] {
         let pkt = create_reg2_packet(&self.srtla_id);
         debug!("queueing REG2 for uplink #{}", conn_idx);
         info!("REG2 → uplink #{} ({} bytes)", conn_idx, pkt.len());
+        self.arm_reg3_grant(conn_idx);
         pkt
     }
 
@@ -109,15 +172,22 @@ impl SrtlaRegistrationManager {
                 self.handle_reg2(conn_idx, buf, now_ms);
                 Some(RegistrationEvent::Reg2)
             }
+            // An out-of-phase REG3/REG_ERR reports `None`: the shell's
+            // registration effects are keyed on the returned event, and "no
+            // event" is the only way to say "consumed, change nothing" without
+            // widening `RegistrationEvent` (its match in the sender shell is
+            // exhaustive). The shell then treats the frame as an unrecognized
+            // datagram, which is exactly what it already does for any other
+            // spoofable junk that reaches an uplink's source port.
             Some(SRTLA_TYPE_REG3) => {
                 debug!("REG3 from uplink #{}", conn_idx);
-                self.handle_reg3(conn_idx);
-                Some(RegistrationEvent::Reg3)
+                self.handle_reg3(conn_idx)
+                    .then_some(RegistrationEvent::Reg3)
             }
             Some(SRTLA_TYPE_REG_ERR) => {
                 debug!("REG_ERR from uplink #{}", conn_idx);
-                self.handle_reg_err(conn_idx, now_ms);
-                Some(RegistrationEvent::RegErr)
+                self.handle_reg_err(conn_idx, now_ms)
+                    .then_some(RegistrationEvent::RegErr)
             }
             _ => None,
         }
@@ -165,6 +235,19 @@ impl SrtlaRegistrationManager {
                 connection_count,
                 pkt.len()
             );
+            for idx in 0..connection_count {
+                // Arming an already-established uplink would re-open the
+                // one-shot gate `handle_reg3` consumed, so the REG3 this
+                // broadcast provokes would wipe a live, forwarding link's
+                // state. The link is already registered; it needs no grant.
+                // (The shell still transmits to it — the receiver re-admits
+                // the address either way — only our bookkeeping abstains.)
+                if self.is_connected_snapshot(idx) {
+                    debug!("REG2 → uplink #{} not re-armed (already connected)", idx);
+                    continue;
+                }
+                self.arm_reg3_grant(idx);
+            }
             sends.broadcast_reg2 = Some(pkt);
             self.broadcast_reg2_pending = false;
         }
@@ -210,24 +293,84 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    fn handle_reg3(&mut self, _conn_idx: usize) {
+    /// Returns `true` only when this REG3 answers a REG2 this uplink actually
+    /// has in flight. The grant is consumed on the way through, so a duplicate
+    /// or replayed REG3 is rejected: without that, every later REG3 on an
+    /// already-connected uplink re-fires the "just registered" effects and
+    /// wipes a live, forwarding link's packet log, in-flight count, congestion
+    /// state and batch queue.
+    ///
+    /// A legitimate receiver only ever emits REG3 in reply to a REG2 from that
+    /// exact source address, so the gate cannot reject a real one — including
+    /// from a NAT-remapped receiver, since the grant is keyed on our uplink,
+    /// not on the receiver's address.
+    fn handle_reg3(&mut self, conn_idx: usize) -> bool {
+        if !self.awaiting_reg3.contains(&conn_idx) {
+            self.out_of_phase.reg3 = self.out_of_phase.reg3.saturating_add(1);
+            self.log_out_of_phase("REG3", conn_idx, self.out_of_phase.reg3);
+            return false;
+        }
+        self.revoke_reg3_grant(conn_idx);
         self.has_connected = true;
+        true
     }
 
-    fn handle_reg_err(&mut self, conn_idx: usize, now_ms: u64) {
-        if self.pending_reg2_idx == Some(conn_idx) {
-            debug!("REG_ERR for uplink #{} while awaiting REG2", conn_idx);
-        } else {
-            debug!("REG_ERR for uplink #{} (no pending REG2)", conn_idx);
+    /// Returns `true` only when this REG_ERR answers a handshake this uplink
+    /// actually has in flight (awaiting REG2, or awaiting REG3).
+    ///
+    /// A forged 2-byte REG_ERR is the cheapest remote DoS against the sender:
+    /// ungated, it force-disconnects an established, forwarding uplink and
+    /// collaterally clears the single-slot global REG1/REG2 fields, aborting an
+    /// *unrelated* uplink's concurrent handshake. Phase-gating is a strictly
+    /// better mitigation than rate-limiting: a real receiver only emits REG_ERR
+    /// as a direct reply to a REG1/REG2 it just received from that address, so
+    /// nothing legitimate is ever discarded, and a flood of forged ones is
+    /// bounded at zero effect rather than "one teardown per rate-limit window".
+    fn handle_reg_err(&mut self, conn_idx: usize, now_ms: u64) -> bool {
+        let awaiting_reg2 = self.pending_reg2_idx == Some(conn_idx);
+        let awaiting_reg3 = self.awaiting_reg3.contains(&conn_idx);
+
+        if !awaiting_reg2 && !awaiting_reg3 {
+            self.out_of_phase.reg_err = self.out_of_phase.reg_err.saturating_add(1);
+            self.log_out_of_phase("REG_ERR", conn_idx, self.out_of_phase.reg_err);
+            return false;
         }
 
-        self.pending_reg2_idx = None;
-        self.pending_timeout_at_ms = 0;
-        self.reg1_target_idx = None;
-        // Wait for a fresh REG_NGP to select the next REG1 target
-        self.reg1_next_send_at_ms = now_ms + REG2_TIMEOUT * 1000;
+        if awaiting_reg2 {
+            debug!("REG_ERR for uplink #{} while awaiting REG2", conn_idx);
+            // Scoped to the uplink that owns the single in-flight REG1/REG2
+            // slot: clearing these for any other index is what let one forged
+            // frame abort a different uplink's handshake.
+            self.pending_reg2_idx = None;
+            self.pending_timeout_at_ms = 0;
+            self.reg1_target_idx = None;
+            // Wait for a fresh REG_NGP to select the next REG1 target
+            self.reg1_next_send_at_ms = now_ms + REG2_TIMEOUT * 1000;
+        } else {
+            debug!("REG_ERR for uplink #{} while awaiting REG3", conn_idx);
+        }
+        // An awaiting-REG3 REG_ERR revokes only its own grant.
+        self.revoke_reg3_grant(conn_idx);
 
         warn!("registration failed for connection {}", conn_idx);
+        true
+    }
+
+    /// Log the first rejection of each kind loudly, then drop to `debug!`: a
+    /// spoofed flood must not turn into a log-amplification DoS of its own.
+    fn log_out_of_phase(&self, kind: &str, conn_idx: usize, count: u64) {
+        if count == 1 {
+            warn!(
+                "{} for uplink #{} ignored: no matching registration in flight (further \
+                 out-of-phase frames logged at debug)",
+                kind, conn_idx
+            );
+        } else {
+            debug!(
+                "{} for uplink #{} ignored: no matching registration in flight ({} so far)",
+                kind, conn_idx, count
+            );
+        }
     }
 
     /// If a REG_NGP just arrived and we should immediately answer this uplink
@@ -266,6 +409,14 @@ impl SrtlaRegistrationManager {
 
         // Reset and recalculate - this is the authoritative count
         self.active_connections = new_count;
+
+        // Snapshot the per-index `connected` flags for the REG2 broadcast's
+        // re-arm decision. Refreshed from the live slice every housekeeping
+        // tick, immediately before `reg_driver_pending_sends` consumes it.
+        self.connected_snapshot.clear();
+        for conn in connections {
+            self.connected_snapshot.push(conn.connected);
+        }
     }
 
     pub fn pending_reg2_idx(&self) -> Option<usize> {
@@ -349,5 +500,25 @@ impl SrtlaRegistrationManager {
 
     pub fn set_broadcast_reg2_pending(&mut self, value: bool) {
         self.broadcast_reg2_pending = value;
+    }
+
+    /// REG3 frames rejected by the phase gate.
+    pub fn out_of_phase_reg3(&self) -> u64 {
+        self.out_of_phase.reg3
+    }
+
+    /// REG_ERR frames rejected by the phase gate.
+    pub fn out_of_phase_reg_err(&self) -> u64 {
+        self.out_of_phase.reg_err
+    }
+
+    pub fn is_awaiting_reg3(&self, conn_idx: usize) -> bool {
+        self.awaiting_reg3.contains(&conn_idx)
+    }
+
+    /// Arm the one-shot REG3 grant without building a REG2, for tests that
+    /// want to start from "a REG2 is in flight on this uplink".
+    pub fn arm_reg3_gate(&mut self, conn_idx: usize) {
+        self.arm_reg3_grant(conn_idx);
     }
 }
