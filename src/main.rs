@@ -101,6 +101,18 @@ struct Cli {
     #[arg(long = "conn-timeout-ms", default_value_t = config::CONN_TIMEOUT_MS)]
     conn_timeout_ms: u64,
 
+    /// Disable whole-bond re-home (on by default). When every uplink has been
+    /// down for longer than the all-links-failed window AND the receiver
+    /// hostname no longer resolves to the address the bond is pinned to, the
+    /// sender moves every uplink together to the newly-resolved address and
+    /// re-registers from scratch over the ordinary REG1/REG2/REG3 flow. It
+    /// never touches a bond with a live uplink, never follows a merely
+    /// reordered DNS answer, and attempts at most one migration per minute.
+    /// Pass this to keep the pre-existing behaviour of staying on the cached
+    /// address until the process is restarted.
+    #[arg(long = "no-rehome")]
+    no_rehome: bool,
+
     /// UDP bind address for the keyframe priority sidecar. The encoder
     /// front-end sends 5-byte datagrams here to open a critical routing
     /// window. Unauthenticated same-device IPC: bind loopback. Omit to
@@ -162,6 +174,7 @@ async fn main() -> Result<()> {
         args.stall_min_in_flight,
         args.stall_ack_stale_ms,
         args.conn_timeout_ms,
+        args.no_rehome,
     );
 
     // Create shared stats for telemetry export

@@ -98,6 +98,46 @@ impl SrtlaRegistrationManager {
         }
     }
 
+    /// Wind the handshake all the way back to its pre-REG1 state so the bond can
+    /// register from scratch — used when the shell has repointed every uplink at
+    /// a different receiver instance (whole-bond re-home).
+    ///
+    /// The receiver-issued half of `srtla_id` is discarded (it only ever meant
+    /// something to the instance that minted it) but the sender's own half — the
+    /// first half, the only part any receiver reads out of a REG1 — is **kept
+    /// deliberately**. Receivers that derive their half deterministically from
+    /// ours (HKDF over the client bytes) then reissue the identical `full_id`,
+    /// so a load balancer tracking the bond by that id sees one continuous group
+    /// across the move instead of a brand-new stream. A receiver that mints its
+    /// half randomly is unaffected: it overwrites those bytes in its REG2
+    /// exactly as it does for a first-time sender.
+    ///
+    /// The discarded half is re-randomized rather than zeroed, so the REG1 that
+    /// follows is byte-for-byte the same *shape* a freshly started sender emits
+    /// — the move must be indistinguishable on the wire from a new sender.
+    ///
+    /// Everything else — pending REG1/REG2 slots, the one-shot REG3 grants, the
+    /// broadcast flag, the connected snapshot and the RTT probing state machine
+    /// — is cleared, so the next housekeeping tick re-probes and re-registers
+    /// over the plain REG1/REG2/REG3 flow. `has_connected` survives: it records
+    /// that this *process* has streamed before, which only drives log wording.
+    pub fn reset_for_rehome(&mut self) {
+        rand::rng().fill_bytes(&mut self.srtla_id[SRTLA_ID_LEN / 2..]);
+        self.pending_reg2_idx = None;
+        self.pending_timeout_at_ms = 0;
+        self.active_connections = 0;
+        self.broadcast_reg2_pending = false;
+        self.reg1_target_idx = None;
+        self.reg1_next_send_at_ms = 0;
+        self.awaiting_reg3.clear();
+        self.connected_snapshot.clear();
+        // A fresh probe id: the probe REG2 is deliberately an id the receiver
+        // cannot know, and the old one was minted against the old instance.
+        self.probing_state = default_probing_state();
+        self.probe_id = new_probe_id();
+        self.probe_results = new_probe_results();
+    }
+
     /// Arm the one-shot REG3 grant for `conn_idx`.
     ///
     /// Sans-IO caveat: the manager builds packets and the shell transmits them,

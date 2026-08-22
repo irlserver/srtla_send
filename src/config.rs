@@ -32,6 +32,13 @@ pub struct DynamicConfig {
     stall_min_in_flight: Arc<AtomicI32>,
     stall_ack_stale_ms: Arc<AtomicU64>,
     conn_timeout_ms: Arc<AtomicU64>,
+    /// Whole-bond re-home on a dead bond whose receiver hostname has moved.
+    ///
+    /// Deliberately absent from [`ConfigSnapshot`]: that snapshot is taken on
+    /// the per-packet hot path and is a published telemetry/config shape, while
+    /// this is read once, at sender startup, to build the re-home gate. See
+    /// `sender::rehome`.
+    rehome_on_failure: Arc<AtomicBool>,
     /// Learned from the wire rather than configured: see
     /// [`DynamicConfig::set_negotiated_latency_ms`].
     negotiated_latency_ms: Arc<AtomicU32>,
@@ -52,6 +59,7 @@ impl DynamicConfig {
             stall_min_in_flight: Arc::new(AtomicI32::new(STALL_MIN_IN_FLIGHT_PACKETS)),
             stall_ack_stale_ms: Arc::new(AtomicU64::new(STALL_ACK_STALE_MS)),
             conn_timeout_ms: Arc::new(AtomicU64::new(CONN_TIMEOUT_MS)),
+            rehome_on_failure: Arc::new(AtomicBool::new(true)),
             negotiated_latency_ms: Arc::new(AtomicU32::new(0)),
         }
     }
@@ -64,6 +72,7 @@ impl DynamicConfig {
         stall_min_in_flight: i32,
         stall_ack_stale_ms: u64,
         conn_timeout_ms: u64,
+        no_rehome: bool,
     ) -> Self {
         Self {
             mode: Arc::new(AtomicU8::new(mode.as_u8())),
@@ -74,8 +83,17 @@ impl DynamicConfig {
             conn_timeout_ms: Arc::new(AtomicU64::new(
                 conn_timeout_ms.clamp(CONN_TIMEOUT_MS_MIN, CONN_TIMEOUT_MS_MAX),
             )),
+            rehome_on_failure: Arc::new(AtomicBool::new(!no_rehome)),
             negotiated_latency_ms: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Whether a bond that has been entirely dead past the all-failed window may
+    /// migrate to a newly-resolved receiver address. On by default: it can only
+    /// fire when the bond is already dead, where the alternative is to stay dead
+    /// until DNS luck changes or the process is restarted.
+    pub fn rehome_on_failure(&self) -> bool {
+        self.rehome_on_failure.load(Ordering::Relaxed)
     }
 
     /// Create a snapshot of current configuration.
@@ -184,6 +202,7 @@ mod tests {
             STALL_MIN_IN_FLIGHT_PACKETS,
             STALL_ACK_STALE_MS,
             CONN_TIMEOUT_MS,
+            false,
         );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);

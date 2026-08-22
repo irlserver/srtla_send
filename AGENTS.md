@@ -152,6 +152,60 @@ The project uses **Rust nightly** with unstable rustfmt features:
 - All formatting must pass `cargo fmt --all -- --check`
 - All code must pass clippy with `-D warnings` (warnings as errors)
 
+## Robustness Behaviors
+
+Recovery behaviors whose *trigger policy* is the load-bearing part. Change the
+mechanism freely; change a trigger only with the reasoning below in hand.
+
+### All-links-failed timeout
+
+`sender::housekeeping` arms `all_failed_at` the first tick on which every uplink
+is timed out, and measures elapsed-time-*since*-failure against
+`GLOBAL_TIMEOUT_MS`. It must never be re-derived from process uptime: that made a
+transient all-down blip trip the timeout the instant uptime exceeded the window.
+
+### Whole-bond re-home (`sender::rehome`, `--no-rehome` to disable)
+
+When the bond is dead and the receiver's hostname has moved, migrate **every**
+uplink to the new address together and re-register from scratch.
+
+- **All-or-nothing, always.** SRTLA registration binds the bond to a
+  receiver-generated connection id, which only means something to the receiver
+  *instance* that minted it. Repointing one uplink splits the bond across two
+  receiver identities. `io.remote` therefore may only change here, and only
+  because it changes for the whole bond in one housekeeping pass. The per-uplink
+  reconnect path in `sender::connections` stays **detect-only** (it warns about
+  DNS drift and never swaps the address).
+- **Trigger — all three, conservatively.** (1) Every uplink timed out *and* the
+  bond has stayed that way past the existing all-failed window above — the same
+  timer, not a parallel one; a bond with any live uplink is never touched.
+  (2) A fresh lookup of the receiver hostname succeeds *and* returns none of the
+  addresses the bond is pinned to. A failed, timed-out, or empty lookup is **not**
+  drift, and neither is a reordered multi-A answer that still lists one of ours —
+  GeoDNS and round-robin must not cause thrash. (3) At most one attempt per
+  `REHOME_MIN_INTERVAL_MS` (60s), process-wide; the limit covers the DNS probe
+  too, since housekeeping ticks every second.
+- **Client id survives.** `SrtlaRegistrationManager::reset_for_rehome` keeps the
+  first half of `srtla_id` (the only part a receiver reads out of a REG1) so a
+  receiver deriving its half deterministically reissues the identical `full_id`
+  and a load balancer keeps tracking one continuous group. The discarded half is
+  re-randomized, not zeroed, so the REG1 is byte-shaped exactly like a fresh
+  sender's.
+- **Wire compatibility.** Standard RTT probe → REG1/REG2/REG3 only. No new packet
+  types and no registration-timing changes: a re-home must be indistinguishable
+  from a fresh sender start to the C reference receiver, BELABOX, and irlserver
+  `srtla_rec`.
+- **Telemetry is log-only.** The decision is logged once per attempt at `warn`.
+  `StatsSnapshot` is a published JSON/Prometheus shape and was deliberately not
+  widened; `rehome_on_failure` is likewise absent from the hot-path
+  `ConfigSnapshot`.
+- **Test gap.** The trigger policy and mechanism are unit-tested through a
+  `ReceiverResolver` seam (`sender::rehome::StubResolver`). There is no netns
+  integration test: `tests/common` starts the sender against `topo.receiver_ip`,
+  an IP literal, so "the receiver address moves" would need a hostname plus a
+  per-namespace resolver whose answer changes mid-test — new harness
+  infrastructure, not a small addition.
+
 ## Development Commands
 
 ### Building

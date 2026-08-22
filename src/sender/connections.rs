@@ -175,6 +175,26 @@ pub async fn reconnect_uplink(
     seq_tracker: &mut SequenceTracker,
     now: u64,
 ) -> Result<()> {
+    rebuild_uplink_socket(conn, io, seq_tracker, now)?;
+    spawn_receiver_dns_drift_check(receiver_host, io.remote, now);
+    Ok(())
+}
+
+/// Re-open this uplink's socket against whatever `io.remote` currently holds and
+/// reset the connection's protocol state.
+///
+/// Shared by the per-uplink reconnect above and the whole-bond re-home in
+/// [`super::rehome`], which repoints `io.remote` for *every* uplink first and
+/// then rebuilds each socket through here. Re-home does not want the drift check
+/// bolted onto `reconnect_uplink`: it has just re-resolved the hostname itself,
+/// so re-asking would be a wasted lookup that could only warn about the address
+/// it deliberately moved to.
+pub(super) fn rebuild_uplink_socket(
+    conn: &mut SrtlaConnection,
+    io: &mut ConnIo,
+    seq_tracker: &mut SequenceTracker,
+    now: u64,
+) -> Result<()> {
     let sock = create_uplink_socket(conn.local_ip)?;
     io.binder.bind(&sock, conn.local_ip)?;
     sock.set_nonblocking(true)?;
@@ -189,8 +209,6 @@ pub async fn reconnect_uplink(
     // Don't reset connection_established_ms for reconnections — only set on REG3.
     conn.mark_reconnect_success();
     conn.reconnection.reset_startup_grace(now);
-
-    spawn_receiver_dns_drift_check(receiver_host, io.remote, now);
     Ok(())
 }
 
@@ -231,6 +249,18 @@ fn dns_drift_detected(cached: SocketAddr, fresh: &[SocketAddr]) -> bool {
     !fresh.is_empty() && !fresh.contains(&cached)
 }
 
+/// Bond-wide form of [`dns_drift_detected`], used by the re-home trigger.
+///
+/// True only when the hostname answered with something and *none* of the
+/// addresses the bond is currently pinned to appear in that answer. Requiring
+/// every uplink to have been dropped from DNS (rather than any one of them) is
+/// the conservative reading: a GeoDNS or round-robin zone that still lists one
+/// of our addresses has not moved the receiver, it has merely reordered its
+/// answer, and re-homing on that would thrash the bond for nothing.
+pub(super) fn receiver_moved(current: &[SocketAddr], fresh: &[SocketAddr]) -> bool {
+    !current.is_empty() && current.iter().all(|c| dns_drift_detected(*c, fresh))
+}
+
 /// Detect-only check that the receiver's hostname still resolves to the address
 /// this uplink is pinned to.
 ///
@@ -241,9 +271,16 @@ fn dns_drift_detected(cached: SocketAddr, fresh: &[SocketAddr]) -> bool {
 /// single uplink at a fresh DNS answer would split the bond across two receiver
 /// identities — the new instance would not know our group, so that link would
 /// end up worse off than it is talking to a stale address, while the rest of the
-/// bond stayed where it was. Migrating the whole bond to a new receiver (tearing
-/// down and re-registering every link together) is a separate future change;
-/// until then the operator gets a warning and decides.
+/// bond stayed where it was.
+///
+/// Migrating the *whole* bond together does exist — see [`super::rehome`] — but
+/// it is deliberately not reachable from here. This check fires on a single
+/// uplink's reconnect, which happens constantly on a healthy bond as individual
+/// modems flap; tearing down a working stream because one link reconnected while
+/// GeoDNS happened to answer differently would be far worse than the stale
+/// address. Re-home only runs once the bond is *entirely* dead, where there is
+/// nothing left to protect. On a healthy bond the operator still just gets this
+/// warning and decides.
 ///
 /// Runs detached so a slow or hanging resolver cannot delay the reconnect it was
 /// triggered by — the reconnect is on the housekeeping tick of the main event

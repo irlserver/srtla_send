@@ -1,6 +1,7 @@
 mod connections;
 mod housekeeping;
 mod packet_handler;
+mod rehome;
 mod reload;
 mod sequence;
 mod status;
@@ -30,6 +31,11 @@ pub(crate) use packet_handler::{attribute_nak, process_connection_events};
 use packet_handler::{
     drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
 };
+// Scripted resolver seam for tests that drive the re-home trigger policy.
+#[cfg(any(test, feature = "test-internals"))]
+pub use rehome::StubResolver;
+#[allow(unused_imports)]
+pub use rehome::{REHOME_MIN_INTERVAL_MS, ReceiverResolver, RehomeGate};
 #[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
@@ -171,6 +177,10 @@ pub async fn run_sender_with_config(
     let mut seq_tracker = SequenceTracker::new();
     let mut last_selected_idx: Option<usize> = None;
     let mut all_failed_at: Option<u64> = None;
+    // Whole-bond re-home: only ever consulted once every uplink has been down
+    // past the all-failed window, and only then to follow the receiver hostname
+    // to a genuinely new address. `--no-rehome` turns it off entirely.
+    let mut rehome = RehomeGate::new(config.rehome_on_failure());
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
     // Enhanced selection as an admission gate.
@@ -198,6 +208,7 @@ pub async fn run_sender_with_config(
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
+            &mut rehome,
         )
         .await
         {
@@ -284,6 +295,7 @@ pub async fn run_sender_with_config(
                             &mut all_failed_at,
                             &mut reader_handles,
                             &packet_tx,
+                            &mut rehome,
                         ).await {
                             warn!("housekeeping failed: {err}");
                         }

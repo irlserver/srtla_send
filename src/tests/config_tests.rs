@@ -22,6 +22,7 @@ mod tests {
             crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             crate::config::STALL_ACK_STALE_MS,
             crate::config::CONN_TIMEOUT_MS,
+            false,
         );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Enhanced);
@@ -35,6 +36,7 @@ mod tests {
             crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             crate::config::STALL_ACK_STALE_MS,
             crate::config::CONN_TIMEOUT_MS,
+            false,
         );
         let snap = config.snapshot();
         assert_eq!(snap.mode, SchedulingMode::Classic);

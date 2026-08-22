@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
 use super::connections::{reconnect_uplink, recover_connection};
+use super::rehome::{RehomeGate, try_rehome};
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
 
@@ -28,6 +29,7 @@ pub async fn handle_housekeeping(
     all_failed_at: &mut Option<u64>,
     reader_handles: &mut HashMap<ConnectionId, ReaderHandle>,
     packet_tx: &UnboundedSender<UplinkPacket>,
+    rehome: &mut RehomeGate,
 ) -> Result<()> {
     // If we're waiting on a REG2 response past the timeout, proactively retry REG1
     let current_ms = now_ms;
@@ -202,6 +204,37 @@ pub async fn handle_housekeeping(
         if let Some(failed_at) = all_failed_at
             && current_ms.saturating_sub(*failed_at) > GLOBAL_TIMEOUT_MS
         {
+            // The bond is genuinely dead: every uplink is timed out and has
+            // stayed that way for a full all-failed window. That, and only
+            // that, is where a whole-bond re-home is allowed to consider
+            // moving to a newly-resolved receiver address — see
+            // `super::rehome` for why it is all-or-nothing and why a bond with
+            // any live uplink is never touched. It also decides for itself
+            // whether DNS actually drifted and whether the rate limit permits
+            // an attempt; `false` means nothing changed and the existing
+            // behaviour below stands.
+            let dead_for_ms = current_ms.saturating_sub(*failed_at);
+            if try_rehome(
+                rehome,
+                connections,
+                conn_io,
+                reg,
+                seq_tracker,
+                reader_handles,
+                packet_tx,
+                receiver_host,
+                dead_for_ms,
+                current_ms,
+            )
+            .await
+            {
+                // The bond now points somewhere new and is re-registering from
+                // REG1. Re-arm the timer so the fresh handshake gets a full
+                // window before the bond is declared unrecoverable again.
+                *all_failed_at = Some(current_ms);
+                return Ok(());
+            }
+
             if reg.has_connected {
                 error!("Failed to re-establish any connections");
                 return Err(anyhow!("Failed to re-establish any connections"));
@@ -222,9 +255,12 @@ pub async fn handle_housekeeping(
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
     use srtla_core::utils::now_ms;
 
     use super::*;
+    use crate::sender::rehome::StubResolver;
     use crate::sender::uplink::{create_uplink_channel, sync_readers};
     use crate::test_helpers::{
         create_test_conn_io_map, create_test_connection, create_test_connections,
@@ -268,6 +304,7 @@ mod tests {
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
+            &mut RehomeGate::new(false),
         )
         .await
         .expect("housekeeping on an active connection must not fail");
@@ -327,6 +364,7 @@ mod tests {
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
+            &mut RehomeGate::new(false),
         )
         .await;
         assert!(armed.is_ok(), "arming the all-failed timer must not error");
@@ -344,6 +382,7 @@ mod tests {
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
+            &mut RehomeGate::new(false),
         )
         .await;
         assert!(
@@ -363,12 +402,258 @@ mod tests {
             &mut all_failed_at,
             &mut reader_handles,
             &packet_tx,
+            &mut RehomeGate::new(false),
         )
         .await;
         assert!(
             fired.is_err(),
             "the all-failed timeout must fire once a full {GLOBAL_TIMEOUT_MS}ms has elapsed since \
              failure"
+        );
+    }
+
+    /// A bond in the shape the re-home trigger cares about: uplinks on
+    /// 127.0.0.1 (so a socket rebuild really binds), all pinned to `remote`.
+    struct RehomeFixture {
+        connections: Vec<SrtlaConnection>,
+        conn_io: ConnIoMap,
+        reg: SrtlaRegistrationManager,
+        seq_tracker: SequenceTracker,
+        reader_handles: HashMap<ConnectionId, ReaderHandle>,
+        all_failed_at: Option<u64>,
+    }
+
+    impl RehomeFixture {
+        async fn new(remote: SocketAddr) -> Self {
+            let connections = vec![
+                create_test_connection().await,
+                create_test_connection().await,
+            ];
+            let mut conn_io = create_test_conn_io_map(&connections);
+            for io in conn_io.values_mut() {
+                io.remote = remote;
+            }
+            let mut reg = SrtlaRegistrationManager::new();
+            // Models a stream that was established and then lost, so the
+            // all-failed branch takes the "re-establish" path.
+            reg.has_connected = true;
+            Self {
+                connections,
+                conn_io,
+                reg,
+                seq_tracker: SequenceTracker::new(),
+                reader_handles: HashMap::new(),
+                all_failed_at: None,
+            }
+        }
+
+        /// Keep every uplink live as of `now` (fresh delivery proof, grace
+        /// window open), so the bond reads as healthy however far the test
+        /// clock has advanced.
+        fn keep_all_uplinks_live(&mut self, now: u64) {
+            for conn in self.connections.iter_mut() {
+                conn.connected = true;
+                conn.last_received = Some(now);
+                conn.reconnection.startup_grace_deadline_ms = now + STARTUP_GRACE_MS;
+            }
+        }
+
+        /// Drop every uplink and pin the reconnect backoff past the test window
+        /// so housekeeping reaches the all-failed branch rather than spending
+        /// the tick on per-link socket reconnections.
+        fn kill_all_uplinks(&mut self, at: u64) {
+            for conn in self.connections.iter_mut() {
+                conn.mark_for_recovery();
+                conn.reconnection.last_reconnect_attempt_ms = at;
+                conn.reconnection.reconnect_failure_count = 5;
+            }
+        }
+
+        async fn tick(&mut self, gate: &mut RehomeGate, now: u64) -> Result<()> {
+            let (packet_tx, _packet_rx) = create_uplink_channel();
+            handle_housekeeping(
+                &mut self.connections,
+                &mut self.conn_io,
+                &mut self.reg,
+                &mut self.seq_tracker,
+                "rec.example.com",
+                false,
+                now,
+                &mut self.all_failed_at,
+                &mut self.reader_handles,
+                &packet_tx,
+                gate,
+            )
+            .await
+        }
+
+        fn remotes(&self) -> Vec<SocketAddr> {
+            let mut remotes: Vec<SocketAddr> = self
+                .connections
+                .iter()
+                .map(|c| self.conn_io.get(&c.conn_id).unwrap().remote)
+                .collect();
+            remotes.sort();
+            remotes.dedup();
+            remotes
+        }
+    }
+
+    fn remote(last: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, last)), 5000)
+    }
+
+    /// The most important half of the policy: a bond with a live uplink is never
+    /// re-homed, however far the receiver's DNS has drifted. The lookup must not
+    /// even happen — GeoDNS answers change constantly on a healthy bond.
+    #[tokio::test]
+    async fn a_healthy_bond_is_never_re_homed_however_much_dns_drifts() {
+        let old = remote(1);
+        let mut fixture = RehomeFixture::new(old).await;
+        let resolver = StubResolver::new(vec![Some(vec![remote(9)])]);
+        let mut gate = RehomeGate::with_resolver(true, resolver.clone());
+
+        // Both uplinks stay live, so the all-failed timer never arms.
+        let t0 = now_ms();
+        for now in [t0, t0 + GLOBAL_TIMEOUT_MS * 3] {
+            fixture.keep_all_uplinks_live(now);
+            fixture
+                .tick(&mut gate, now)
+                .await
+                .expect("a healthy bond must not error");
+        }
+
+        assert_eq!(resolver.calls(), 0, "a live bond must not even re-resolve");
+        assert_eq!(fixture.remotes(), vec![old]);
+        assert_eq!(gate.rehome_count(), 0);
+        assert!(fixture.all_failed_at.is_none());
+    }
+
+    /// A dead bond alone is not enough: the receiver hostname must actually have
+    /// stopped answering with the address we are pinned to. Otherwise the
+    /// ordinary all-failed error path stands and normal reconnects continue.
+    #[tokio::test]
+    async fn a_dead_bond_with_unchanged_dns_is_not_re_homed() {
+        let old = remote(1);
+        let mut fixture = RehomeFixture::new(old).await;
+        // Answer with a reordered multi-A set that still lists our address.
+        let resolver = StubResolver::new(vec![Some(vec![remote(7), old])]);
+        let mut gate = RehomeGate::with_resolver(true, resolver.clone());
+
+        let t0 = now_ms();
+        fixture.kill_all_uplinks(t0);
+        fixture
+            .tick(&mut gate, t0)
+            .await
+            .expect("arming must not error");
+        let fired = fixture
+            .tick(&mut gate, t0 + GLOBAL_TIMEOUT_MS + 1_000)
+            .await;
+
+        assert_eq!(resolver.calls(), 1, "the probe runs, and answers 'no move'");
+        assert_eq!(fixture.remotes(), vec![old], "the bond must stay put");
+        assert_eq!(gate.rehome_count(), 0);
+        assert!(
+            fired.is_err(),
+            "without drift the pre-existing all-failed error must still fire"
+        );
+    }
+
+    /// A dead bond must not be re-homed before the existing all-failed window
+    /// has elapsed — a blip where every modem drops for a second or two is
+    /// exactly what that window exists to absorb.
+    #[tokio::test]
+    async fn a_dead_bond_inside_the_all_failed_window_is_not_probed() {
+        let old = remote(1);
+        let mut fixture = RehomeFixture::new(old).await;
+        let resolver = StubResolver::new(vec![Some(vec![remote(9)])]);
+        let mut gate = RehomeGate::with_resolver(true, resolver.clone());
+
+        let t0 = now_ms();
+        fixture.kill_all_uplinks(t0);
+        fixture
+            .tick(&mut gate, t0)
+            .await
+            .expect("arming must not error");
+        fixture
+            .tick(&mut gate, t0 + GLOBAL_TIMEOUT_MS - 1_000)
+            .await
+            .expect("inside the window nothing fires");
+
+        assert_eq!(resolver.calls(), 0, "no probe inside the all-failed window");
+        assert_eq!(fixture.remotes(), vec![old]);
+    }
+
+    /// The whole trigger, end to end: dead past the window plus real drift moves
+    /// every uplink together, re-arms the all-failed timer instead of erroring,
+    /// and is then rate-limited even though DNS still says the receiver moved.
+    #[tokio::test]
+    async fn a_dead_bond_with_drift_re_homes_once_then_is_rate_limited() {
+        let old = remote(1);
+        let new = remote(9);
+        let mut fixture = RehomeFixture::new(old).await;
+        let resolver = StubResolver::new(vec![Some(vec![new]), Some(vec![new])]);
+        let mut gate = RehomeGate::with_resolver(true, resolver.clone());
+
+        let t0 = now_ms();
+        fixture.kill_all_uplinks(t0);
+        fixture
+            .tick(&mut gate, t0)
+            .await
+            .expect("arming must not error");
+
+        let moved_at = t0 + GLOBAL_TIMEOUT_MS + 1_000;
+        fixture
+            .tick(&mut gate, moved_at)
+            .await
+            .expect("a successful re-home replaces the all-failed error");
+
+        assert_eq!(fixture.remotes(), vec![new], "every uplink moved together");
+        assert_eq!(gate.rehome_count(), 1);
+        assert_eq!(
+            fixture.all_failed_at,
+            Some(moved_at),
+            "the fresh registration gets a full window before the bond is declared unrecoverable \
+             again"
+        );
+        assert!(
+            fixture.reg.is_probing(),
+            "the bond re-registers from scratch, starting with RTT probing"
+        );
+
+        // Still dead and still drifting, but inside the rate-limit window.
+        fixture.kill_all_uplinks(moved_at);
+        let fired = fixture
+            .tick(&mut gate, moved_at + GLOBAL_TIMEOUT_MS + 1_000)
+            .await;
+        assert_eq!(resolver.calls(), 1, "the rate limit gates the lookup too");
+        assert_eq!(gate.rehome_count(), 1);
+        assert!(fired.is_err(), "the all-failed error path stands meanwhile");
+    }
+
+    /// `--no-rehome` restores the pre-existing behaviour exactly.
+    #[tokio::test]
+    async fn the_opt_out_leaves_a_dead_drifted_bond_where_it_is() {
+        let old = remote(1);
+        let mut fixture = RehomeFixture::new(old).await;
+        let resolver = StubResolver::new(vec![Some(vec![remote(9)])]);
+        let mut gate = RehomeGate::with_resolver(false, resolver.clone());
+
+        let t0 = now_ms();
+        fixture.kill_all_uplinks(t0);
+        fixture
+            .tick(&mut gate, t0)
+            .await
+            .expect("arming must not error");
+        let fired = fixture
+            .tick(&mut gate, t0 + GLOBAL_TIMEOUT_MS + 1_000)
+            .await;
+
+        assert_eq!(resolver.calls(), 0);
+        assert_eq!(fixture.remotes(), vec![old]);
+        assert!(
+            fired.is_err(),
+            "the pre-existing all-failed error must fire"
         );
     }
 }

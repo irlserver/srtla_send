@@ -1060,4 +1060,61 @@ mod tests {
             "a fresh link past its startup grace deadline must be timed out"
         );
     }
+
+    /// A whole-bond re-home must hand the new receiver the same client-side id
+    /// half the old one saw — a receiver deriving its half deterministically
+    /// (HKDF over those bytes) then reissues the identical full id, so a load
+    /// balancer keeps tracking one continuous group across the move. Everything
+    /// else must go back to the pre-REG1 state a fresh sender starts in.
+    #[test]
+    fn reset_for_rehome_keeps_our_id_half_and_returns_to_pre_reg1() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let client_half: Vec<u8> = reg.srtla_id()[..SRTLA_ID_LEN / 2].to_vec();
+
+        // Drive it into a fully-registered-then-lost state against the old
+        // receiver: server half filled in, REG3 grant armed, REG1 target picked,
+        // a REG2 broadcast queued and probing already complete.
+        reg.srtla_id[SRTLA_ID_LEN / 2..].fill(0xab);
+        reg.set_pending_reg2_idx(Some(1));
+        reg.set_pending_timeout_at_ms(now_ms() + 5_000);
+        reg.set_reg1_target_idx(Some(1));
+        reg.set_reg1_next_send_at_ms(now_ms() + 1_000);
+        reg.set_broadcast_reg2_pending(true);
+        reg.arm_reg3_gate(0);
+        reg.has_connected = true;
+
+        reg.reset_for_rehome();
+
+        assert_eq!(
+            &reg.srtla_id()[..SRTLA_ID_LEN / 2],
+            &client_half[..],
+            "our half of the SRTLA id must survive the move"
+        );
+        assert_ne!(
+            &reg.srtla_id()[SRTLA_ID_LEN / 2..],
+            &[0xab; SRTLA_ID_LEN / 2][..],
+            "the old receiver's half must be discarded"
+        );
+        assert!(
+            !reg.srtla_id()[SRTLA_ID_LEN / 2..].iter().all(|&b| b == 0),
+            "and re-randomized, not zeroed, so the REG1 looks like a fresh sender's on the wire"
+        );
+
+        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_timeout_at_ms(), 0);
+        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.reg1_next_send_at_ms(), 0);
+        assert!(!reg.broadcast_reg2_pending());
+        assert!(!reg.is_awaiting_reg3(0));
+        assert_eq!(reg.active_connections(), 0);
+        assert!(
+            !reg.is_probing(),
+            "probing is reset to NotStarted, not left mid-flight"
+        );
+        assert!(
+            reg.has_connected(),
+            "has_connected records that this process has streamed before and only drives log \
+             wording; it must survive"
+        );
+    }
 }
