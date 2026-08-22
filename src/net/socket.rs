@@ -6,6 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
+use smallvec::SmallVec;
 use socket2::{Domain, Protocol, Socket, Type};
 use tracing::warn;
 
@@ -96,11 +97,23 @@ pub fn create_uplink_socket(domain_for: IpAddr) -> Result<Socket> {
     Ok(sock)
 }
 
-pub async fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr> {
-    let mut addrs = tokio::net::lookup_host((host, port))
+/// Every address the receiver's hostname currently answers with.
+///
+/// [`resolve_remote`] picks the first of these to dial. The full set matters
+/// only to the reconnect path, which compares the address an uplink is pinned
+/// to against a fresh answer to detect that the receiver's DNS has drifted (see
+/// `sender::connections`).
+pub async fn resolve_remote_all(host: &str, port: u16) -> Result<SmallVec<SocketAddr, 4>> {
+    let addrs = tokio::net::lookup_host((host, port))
         .await
         .context("dns lookup")?;
-    addrs
-        .next()
+    Ok(addrs.collect())
+}
+
+pub async fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr> {
+    resolve_remote_all(host, port)
+        .await?
+        .first()
+        .copied()
         .ok_or_else(|| anyhow::anyhow!("no DNS result for {}", host))
 }

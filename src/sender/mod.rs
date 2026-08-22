@@ -17,6 +17,7 @@ use anyhow::{Context, Result, anyhow};
 #[allow(unused_imports)]
 pub use connections::{
     PendingConnectionChanges, apply_connection_changes, create_connections_from_ips,
+    recover_connection,
 };
 // Re-export public items used by tests
 #[allow(unused_imports)]
@@ -190,6 +191,8 @@ pub async fn run_sender_with_config(
             &mut connections,
             &mut conn_io,
             &mut reg,
+            &mut seq_tracker,
+            receiver_host,
             classic,
             srtla_core::utils::now_ms(),
             &mut all_failed_at,
@@ -274,6 +277,8 @@ pub async fn run_sender_with_config(
                             &mut connections,
                             &mut conn_io,
                             &mut reg,
+                            &mut seq_tracker,
+                            receiver_host,
                             classic,
                             srtla_core::utils::now_ms(),
                             &mut all_failed_at,
@@ -368,7 +373,7 @@ pub async fn run_sender_with_config(
                     }
                     $($sighup_branch)*
                     _ = batch_flush_timer.tick() => {
-                        flush_all_batches(&mut connections, &conn_io).await;
+                        flush_all_batches(&mut connections, &conn_io, &mut seq_tracker).await;
                     }
                 }
             }

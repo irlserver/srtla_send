@@ -589,12 +589,23 @@ impl SrtlaConnection {
 
     /// Drain the batch queue for transmission.
     ///
-    /// Pure builder: registers each tracked packet as in-flight, stamps
-    /// `last_sent`, and returns the queued datagrams. The shell sends them (see
-    /// `net::send_all_datagrams`) and calls [`Self::mark_for_recovery`]
-    /// if the send fails. In-flight registration is optimistic — a failed send
-    /// triggers `mark_for_recovery`, which clears `packet_log` anyway, so the
-    /// registrations never leak. Empty when nothing was queued.
+    /// Pure builder: registers each tracked packet as in-flight and returns the
+    /// queued datagrams. The shell sends them (see `net::send_all_datagrams`)
+    /// and must, on *any* send error, put the link into recovery — the shell
+    /// funnels every flush path through one helper so none can skip it (see
+    /// `sender::packet_handler::flush_connection`).
+    ///
+    /// In-flight registration is deliberately optimistic and covers the whole
+    /// batch, including a suffix a partial send never put on the wire:
+    /// [`Self::mark_for_recovery`] clears `packet_log` and zeroes
+    /// `in_flight_packets` wholesale, so registering the confirmed prefix only
+    /// would buy nothing and would cost a second pass over the batch on the hot
+    /// path. What makes the accounting truthful is the guarantee that a failed
+    /// flush always recovers.
+    ///
+    /// Does **not** stamp `last_sent`: that records when bytes actually reached
+    /// the socket, so the shell stamps it with [`Self::note_sent`] once the I/O
+    /// is confirmed. Empty when nothing was queued.
     pub fn take_batch(&mut self, now: u64) -> SmallVec<DrainedPacket, 32> {
         let batch = self.batch_sender.drain(now);
         if batch.is_empty() {
@@ -605,7 +616,6 @@ impl SrtlaConnection {
                 self.register_packet(*s as i32, *send_time_ms);
             }
         }
-        self.last_sent = Some(now);
         batch
     }
 

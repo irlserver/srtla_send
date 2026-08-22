@@ -9,6 +9,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, trace, warn};
 
+use super::connections::recover_connection;
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, UplinkPacket};
 use crate::config::{ConfigSnapshot, DynamicConfig};
@@ -379,6 +380,7 @@ pub async fn handle_srt_packet(
                         probe_seq,
                         connections,
                         conn_io,
+                        seq_tracker,
                         packet_time_ms,
                     )
                     .await;
@@ -452,13 +454,7 @@ pub async fn forward_via_connection(
     // Flush if batch threshold reached
     if needs_flush && let Some(io) = conn_io.get(&connections[sel_idx].conn_id) {
         let conn = &mut connections[sel_idx];
-        if let Err(e) = send_connection_batch(conn, &io.socket).await {
-            warn!(
-                "{}: batch flush failed, marking for recovery: {}",
-                conn.label, e
-            );
-            conn.mark_for_recovery();
-        }
+        flush_connection(conn, &io.socket, seq_tracker, "batch flush").await;
     }
 }
 
@@ -496,6 +492,7 @@ async fn send_stall_probes(
     probe_seq: u32,
     connections: &mut [SrtlaConnection],
     conn_io: &ConnIoMap,
+    seq_tracker: &mut SequenceTracker,
     packet_time_ms: u64,
 ) {
     for (i, conn) in connections.iter_mut().enumerate() {
@@ -524,15 +521,8 @@ async fn send_stall_probes(
         let mut probe: SmallVec<u8, 1500> = SmallVec::from_slice_copy(pkt);
         srtla_protocol::set_srt_data_retransmit(&mut probe);
         let needs_flush = conn.queue_probe_packet(&probe, probe_seq, packet_time_ms);
-        if needs_flush
-            && let Some(io) = conn_io.get(&conn.conn_id)
-            && let Err(e) = send_connection_batch(conn, &io.socket).await
-        {
-            warn!(
-                "{}: probe batch flush failed, marking for recovery: {}",
-                conn.label, e
-            );
-            conn.mark_for_recovery();
+        if needs_flush && let Some(io) = conn_io.get(&conn.conn_id) {
+            flush_connection(conn, &io.socket, seq_tracker, "probe batch flush").await;
         }
     }
 }
@@ -540,26 +530,62 @@ async fn send_stall_probes(
 /// Drain a connection's batch queue and transmit it on the link's socket.
 ///
 /// The pure `take_batch` half (queue drain + in-flight registration) lives on
-/// `SrtlaConnection`; this is the I/O half. On error the caller marks the link
-/// for recovery, which clears the optimistically-registered in-flight packets.
+/// `SrtlaConnection`; this is the I/O half. `last_sent` is stamped here rather
+/// than in `take_batch` so it only ever records I/O the socket confirmed.
+///
+/// Errors are not handled here — every caller goes through [`flush_connection`],
+/// which owns the recovery arm.
 async fn send_connection_batch(
     conn: &mut SrtlaConnection,
     socket: &crate::net::BatchUdpSocket,
-) -> std::io::Result<()> {
+) -> Result<(), crate::net::BatchSendError> {
     let now = srtla_core::utils::now_ms();
     let batch = conn.take_batch(now);
     if batch.is_empty() {
         return Ok(());
     }
     let bufs: SmallVec<&[u8], 32> = batch.iter().map(|(data, _, _)| data.as_slice()).collect();
-    crate::net::send_all_datagrams(socket, &bufs).await
+    crate::net::send_all_datagrams(socket, &bufs).await?;
+    conn.note_sent(now);
+    Ok(())
+}
+
+/// Flush one link's batch and, if the socket refuses it, put the link into
+/// recovery.
+///
+/// The single place a batch flush may fail. `take_batch` registers the whole
+/// drained batch as in-flight *before* the I/O is attempted, and only
+/// `mark_for_recovery` clears those registrations again — so a flush path that
+/// merely logs its error leaves phantom in-flight packets that quietly crush the
+/// link's score for as long as it stays up. All three flush paths (threshold,
+/// probe, and the periodic timer) funnel through here so none can forget.
+///
+/// The unconfirmed remainder of a partial send is dropped deliberately, not
+/// re-queued: recovery resets the link to `Registering` with a cold window and
+/// an empty queue, so bytes pushed back onto it would be aimed at a path that is
+/// being torn down. SRT's own NAK/retransmit refills the hole over whichever
+/// links are healthy, which is exactly what should carry it.
+async fn flush_connection(
+    conn: &mut SrtlaConnection,
+    socket: &crate::net::BatchUdpSocket,
+    seq_tracker: &mut SequenceTracker,
+    what: &str,
+) {
+    if let Err(e) = send_connection_batch(conn, socket).await {
+        warn!("{}: {what} failed, marking for recovery: {}", conn.label, e);
+        recover_connection(conn, seq_tracker);
+    }
 }
 
 /// Flush all connection batches (called on timer or when needed)
 ///
 /// Optimized with early exit: first check if any connection has queued packets
 /// before iterating. This avoids work on the 15ms timer when traffic is idle.
-pub async fn flush_all_batches(connections: &mut [SrtlaConnection], conn_io: &ConnIoMap) {
+pub async fn flush_all_batches(
+    connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
+    seq_tracker: &mut SequenceTracker,
+) {
     // One monotonic read drives the flush-window check for every connection.
     let now = srtla_core::utils::now_ms();
 
@@ -577,9 +603,100 @@ pub async fn flush_all_batches(connections: &mut [SrtlaConnection], conn_io: &Co
     for conn in connections.iter_mut() {
         if (conn.needs_batch_flush(now) || conn.has_queued_packets())
             && let Some(io) = conn_io.get(&conn.conn_id)
-            && let Err(e) = send_connection_batch(conn, &io.socket).await
         {
-            warn!("{}: periodic batch flush failed: {}", conn.label, e);
+            flush_connection(conn, &io.socket, seq_tracker, "periodic batch flush").await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+    use std::sync::Arc;
+
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    use super::*;
+    use crate::net::{BatchUdpSocket, SourceIpBinder};
+    use crate::sender::uplink::ConnIo;
+    use crate::test_helpers::create_test_connection;
+
+    /// An uplink whose socket can never send: an IPv4 socket pinned to an IPv6
+    /// peer, so `sendmmsg`/`sendto` fails immediately (EAFNOSUPPORT / EINVAL)
+    /// rather than blocking or succeeding. That is the whole fake-socket seam
+    /// this test needs — a real socket that reliably rejects the batch — so no
+    /// mock socket layer has to exist for it.
+    fn unsendable_conn_io() -> ConnIo {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket
+            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+            .unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let remote = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 9);
+        ConnIo {
+            socket: Arc::new(BatchUdpSocket::new(socket, remote).unwrap()),
+            binder: Arc::new(SourceIpBinder),
+            remote,
+        }
+    }
+
+    /// The periodic 15ms flush used to only `warn!` when the socket refused the
+    /// batch, while `take_batch` had already registered every packet in it as
+    /// in-flight. That left phantom in-flight packets crushing the link's score
+    /// (`window / (in_flight + 1)`) for as long as the link stayed up. The timer
+    /// path must take the same recovery arm as the send-loop paths.
+    #[tokio::test]
+    async fn periodic_flush_failure_recovers_the_link() {
+        let mut connections = vec![create_test_connection().await];
+        let conn_id = connections[0].conn_id;
+        let mut conn_io = ConnIoMap::new();
+        conn_io.insert(conn_id, unsendable_conn_io());
+
+        let now = srtla_core::utils::now_ms();
+        let mut seq_tracker = SequenceTracker::new();
+        connections[0].queue_data_packet(&[0u8; 1316], Some(4242), now);
+        seq_tracker.insert(4242, conn_id, now);
+        assert!(connections[0].has_queued_packets());
+        assert!(connections[0].connected);
+
+        flush_all_batches(&mut connections, &conn_io, &mut seq_tracker).await;
+
+        assert_eq!(
+            connections[0].in_flight_packets, 0,
+            "a failed flush must not leave the batch registered as in-flight"
+        );
+        assert!(
+            !connections[0].connected,
+            "a failed flush must put the link into recovery"
+        );
+        assert!(
+            connections[0].last_sent.is_none(),
+            "nothing reached the socket, so the link must not claim a send"
+        );
+        assert!(
+            seq_tracker.get(4242, now).is_none(),
+            "recovery must drop the sequence ownership of the recovered link"
+        );
+    }
+
+    /// The success side of the same seam: a confirmed flush registers the batch
+    /// as in-flight, stamps `last_sent`, and leaves the link alone.
+    #[tokio::test]
+    async fn successful_flush_registers_the_batch_and_stamps_last_sent() {
+        let mut connections = vec![create_test_connection().await];
+        let conn_id = connections[0].conn_id;
+        let conn_io = crate::test_helpers::create_test_conn_io_map(&connections);
+
+        let now = srtla_core::utils::now_ms();
+        let mut seq_tracker = SequenceTracker::new();
+        connections[0].queue_data_packet(&[0u8; 1316], Some(7), now);
+        seq_tracker.insert(7, conn_id, now);
+
+        flush_all_batches(&mut connections, &conn_io, &mut seq_tracker).await;
+
+        assert_eq!(connections[0].in_flight_packets, 1);
+        assert!(connections[0].connected);
+        assert!(connections[0].last_sent.is_some());
+        assert_eq!(seq_tracker.get(7, now), Some(conn_id));
     }
 }

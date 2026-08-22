@@ -6,7 +6,8 @@ use srtla_core::registration::SrtlaRegistrationManager;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
-use super::connections::reconnect_uplink;
+use super::connections::{reconnect_uplink, recover_connection};
+use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
 
 pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
@@ -20,6 +21,8 @@ pub async fn handle_housekeeping(
     connections: &mut [SrtlaConnection],
     conn_io: &mut ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
+    seq_tracker: &mut SequenceTracker,
+    receiver_host: &str,
     classic: bool,
     now_ms: u64,
     all_failed_at: &mut Option<u64>,
@@ -63,17 +66,19 @@ pub async fn handle_housekeeping(
                 // I/O map; the connection itself owns no socket).
                 match conn_io.get_mut(&conn.conn_id) {
                     Some(io) => {
-                        if let Err(e) = reconnect_uplink(conn, io, current_ms).await {
+                        if let Err(e) =
+                            reconnect_uplink(conn, io, receiver_host, seq_tracker, current_ms).await
+                        {
                             warn!("{} failed to reconnect: {}", label, e);
-                            // Fall back to mark_for_recovery if reconnect fails
-                            conn.mark_for_recovery();
+                            // Fall back to recovery if reconnect fails
+                            recover_connection(conn, seq_tracker);
                         } else {
                             restart_reader_for(conn, io.socket.clone(), reader_handles, packet_tx);
                         }
                     }
                     None => {
                         warn!("{} has no I/O entry; marking for recovery", label);
-                        conn.mark_for_recovery();
+                        recover_connection(conn, seq_tracker);
                     }
                 }
 
@@ -232,6 +237,7 @@ mod tests {
         let mut conn_io = create_test_conn_io_map(&connections);
         let mut reg = SrtlaRegistrationManager::new();
         let mut all_failed_at: Option<u64> = None;
+        let mut seq_tracker = SequenceTracker::new();
 
         let (packet_tx, _packet_rx) = create_uplink_channel();
         let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
@@ -255,6 +261,8 @@ mod tests {
             &mut connections,
             &mut conn_io,
             &mut reg,
+            &mut seq_tracker,
+            "127.0.0.1",
             false,
             now_ms(),
             &mut all_failed_at,
@@ -293,6 +301,7 @@ mod tests {
         let mut reader_handles: HashMap<ConnectionId, ReaderHandle> = HashMap::new();
         let (packet_tx, _packet_rx) = tokio::sync::mpsc::unbounded_channel::<UplinkPacket>();
         let mut all_failed_at: Option<u64> = None;
+        let mut seq_tracker = SequenceTracker::new();
 
         let t0 = now_ms();
 
@@ -311,6 +320,8 @@ mod tests {
             &mut connections,
             &mut conn_io,
             &mut reg,
+            &mut seq_tracker,
+            "127.0.0.1",
             false,
             t0,
             &mut all_failed_at,
@@ -326,6 +337,8 @@ mod tests {
             &mut connections,
             &mut conn_io,
             &mut reg,
+            &mut seq_tracker,
+            "127.0.0.1",
             false,
             t0 + GLOBAL_TIMEOUT_MS - 1000,
             &mut all_failed_at,
@@ -343,6 +356,8 @@ mod tests {
             &mut connections,
             &mut conn_io,
             &mut reg,
+            &mut seq_tracker,
+            "127.0.0.1",
             false,
             t0 + GLOBAL_TIMEOUT_MS + 1000,
             &mut all_failed_at,

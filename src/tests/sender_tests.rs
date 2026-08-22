@@ -522,6 +522,44 @@ mod tests {
         assert!(seq_tracker.get(200, now).is_none());
     }
 
+    /// Recovery is not just a connection-local reset: the shell's
+    /// `SequenceTracker` still maps every sequence the link queued to it, so a
+    /// NAK arriving after the reset would penalize a link that has been wiped
+    /// and can no longer be responsible for the loss. `recover_connection` is
+    /// the single seam that keeps the two halves together — every recovery site
+    /// calls it instead of `mark_for_recovery`.
+    #[tokio::test]
+    async fn recover_connection_clears_sequence_ownership() {
+        let mut connections = create_test_connections(2).await;
+        let now = now_ms();
+        let mut seq_tracker = SequenceTracker::new();
+        seq_tracker.insert(100, connections[0].conn_id, now);
+        seq_tracker.insert(101, connections[1].conn_id, now);
+
+        recover_connection(&mut connections[0], &mut seq_tracker);
+
+        assert!(
+            !connections[0].connected,
+            "the link must be marked for recovery"
+        );
+        assert!(
+            seq_tracker.get(100, now).is_none(),
+            "the recovered link must not keep owning the sequences it queued"
+        );
+        assert_eq!(
+            seq_tracker.get(101, now),
+            Some(connections[1].conn_id),
+            "the other link's ownership must be untouched"
+        );
+        // The consequence that matters: a late NAK for a sequence the recovered
+        // link carried no longer attributes to it.
+        assert_eq!(
+            attribute_nak(&mut connections, &seq_tracker, 100, now),
+            None,
+            "a NAK arriving after recovery must not penalize the recovered link"
+        );
+    }
+
     #[test]
     fn test_pending_connection_changes() {
         let changes = PendingConnectionChanges {
