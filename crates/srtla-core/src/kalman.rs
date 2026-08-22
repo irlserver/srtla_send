@@ -2,13 +2,17 @@
 //!
 //! Tracks [value, velocity] to provide smooth RTT estimates that
 //! naturally capture trends without the lag of pure EWMA.
+//!
+//! The state transition has no `dt` term (`x_pred = x + v`), so velocity is
+//! per-sample, not per-second: for RTT it reads as ms/sample, and its meaning
+//! is tied to how often measurements are fed in.
 
 /// Configuration for the Kalman filter.
 #[derive(Debug, Clone)]
 pub struct KalmanConfig {
     /// Process noise for the value state.
     pub q_value: f64,
-    /// Process noise for the velocity state.
+    /// Process noise for the velocity state (per-sample units).
     pub q_velocity: f64,
     /// Measurement noise.
     pub r: f64,
@@ -30,7 +34,7 @@ impl KalmanConfig {
 pub struct KalmanFilter {
     /// Estimated value (e.g., smoothed RTT in ms).
     x: f64,
-    /// Estimated velocity (rate of change per update).
+    /// Estimated velocity (rate of change per sample, e.g. ms/sample for RTT).
     v: f64,
     /// Error covariance matrix [2x2]: [p00, p01, p10, p11].
     p: [f64; 4],
@@ -108,7 +112,8 @@ impl KalmanFilter {
         self.x
     }
 
-    /// Current estimated velocity (trend).
+    /// Current estimated velocity (trend), in units per sample — ms/sample
+    /// when the filter is fed RTT measurements.
     pub fn velocity(&self) -> f64 {
         self.v
     }

@@ -41,7 +41,8 @@ const GRAD_TRIP_FLOOR_FRACTION: f64 = 0.05;
 ///
 /// Uses a 2-state Kalman filter [value, velocity] as the primary smooth RTT
 /// estimator (replaces EWMA). The Kalman filter naturally tracks trends,
-/// providing both a smoothed value and a velocity (rate of change).
+/// providing both a smoothed value (ms) and a velocity (ms/sample — the
+/// filter has no `dt` term, so the trend is per measurement, not per second).
 #[derive(Debug, Clone)]
 pub struct RttTracker {
     pub last_keepalive_sent_ms: u64,
@@ -266,8 +267,8 @@ impl RttTracker {
             if let Some(rtt) = self.record_round_trip(ts, now) {
                 self.waiting_for_keepalive_response = false;
                 debug!(
-                    "{}: RTT from keepalive: {}ms (kalman: {:.1}ms, velocity: {:.2}ms/s, jitter: \
-                     {:.1}ms)",
+                    "{}: RTT from keepalive: {}ms (kalman: {:.1}ms, velocity: {:.2}ms/sample, \
+                     jitter: {:.1}ms)",
                     label,
                     rtt,
                     self.kalman_rtt.value(),

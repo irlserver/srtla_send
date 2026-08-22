@@ -64,6 +64,11 @@ pub fn handle_srtla_ack(
 /// RTT velocity threshold (ms/sample) above which recovery rate is reduced.
 /// Positive velocity means RTT is rising — recovering aggressively during
 /// active congestion would just cause more loss.
+///
+/// The Kalman velocity has no `dt` term, so this is a per-sample rise, not a
+/// per-second one: the value below is calibrated against the keepalive/ACK
+/// sampling cadence and would mean a different rate of RTT growth if that
+/// cadence changed.
 const RTT_VELOCITY_GATE_THRESHOLD: f64 = 2.0;
 
 /// Perform time-based window recovery (enhanced mode only)
@@ -136,7 +141,7 @@ pub fn perform_window_recovery(
         // in-flight during active congestion.
         let velocity_scale = if rtt_velocity > RTT_VELOCITY_GATE_THRESHOLD {
             debug!(
-                "{}: RTT velocity {:.2} ms/s > threshold, halving recovery rate",
+                "{}: RTT velocity {:.2} ms/sample > threshold, halving recovery rate",
                 label, rtt_velocity
             );
             0.5_f64
@@ -171,7 +176,8 @@ pub fn perform_window_recovery(
                 format!("{:.1}s", (time_since_last_nak as f64) / 1000.0)
             };
             debug!(
-                "{}: Time-based window recovery {} → {} (last NAK: {}, fast_mode={}, vel={:.2})",
+                "{}: Time-based window recovery {} → {} (last NAK: {}, fast_mode={}, \
+                 vel={:.2}ms/sample)",
                 label, old_window, *window, time_str, *fast_recovery_mode, rtt_velocity
             );
         }
@@ -378,7 +384,7 @@ mod tests {
             &mut nbs2,
             &mut li2,
             &mut fr2,
-            5.0, // well above 2.0 threshold
+            5.0, // ms/sample, well above the 2.0 ms/sample threshold
             "rising",
             T0,
         );
