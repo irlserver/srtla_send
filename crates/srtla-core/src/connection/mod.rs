@@ -20,6 +20,7 @@ use srtla_protocol::*;
 use tracing::debug;
 
 use crate::selection::classifier::WeakReason;
+use crate::seq::NO_ACK_YET;
 
 pub const STARTUP_GRACE_MS: u64 = 5_000;
 
@@ -270,8 +271,12 @@ pub struct SrtlaConnection {
     pub probe_log: FxHashMap<i32, u64>,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) probe_log: FxHashMap<i32, u64>,
-    /// Highest sequence number that has been cumulatively ACKed.
-    /// Used to optimize cumulative ACK processing by skipping already-ACKed sequences.
+    /// Highest sequence number that has been cumulatively ACKed, or
+    /// [`NO_ACK_YET`] before the first ACK (and after every reset).
+    ///
+    /// Used to optimize cumulative ACK processing by skipping already-ACKed
+    /// sequences. Compare it with the serial helpers in [`crate::seq`], never
+    /// with `<`/`>`: SRT sequences are 31-bit and wrap.
     #[cfg(feature = "test-internals")]
     pub highest_acked_seq: i32,
     #[cfg(not(feature = "test-internals"))]
@@ -461,7 +466,7 @@ impl SrtlaConnection {
             in_flight_packets: 0,
             packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
             probe_log: FxHashMap::default(),
-            highest_acked_seq: i32::MIN,
+            highest_acked_seq: NO_ACK_YET,
             last_received: None,
             last_sent: None,
             last_keepalive_sent: None,
@@ -1220,7 +1225,7 @@ impl SrtlaConnection {
         self.packet_log.clear();
         self.probe_log.clear();
         self.in_flight_packets = 0;
-        self.highest_acked_seq = i32::MIN;
+        self.highest_acked_seq = NO_ACK_YET;
         self.congestion.reset();
         self.batch_sender.reset();
         self.quality_cache = CachedQuality::default();
@@ -1239,7 +1244,7 @@ impl SrtlaConnection {
         self.in_flight_packets = 0;
         self.packet_log.clear();
         self.probe_log.clear();
-        self.highest_acked_seq = i32::MIN;
+        self.highest_acked_seq = NO_ACK_YET;
         self.batch_sender.reset();
         self.phase = LinkPhase::Registering;
         // A reset link has no delivery proof; clear the stall signal so it is

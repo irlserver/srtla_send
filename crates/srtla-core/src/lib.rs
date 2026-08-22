@@ -14,6 +14,8 @@ pub mod priority;
 pub mod registration;
 // Scheduler / link selection. Core logic (mutually dependent with `connection`).
 pub mod selection;
+// Serial (wrap-aware) arithmetic for 31-bit SRT sequence numbers.
+pub mod seq;
 pub mod utils;
 
 // Test helpers (socket-free connection builders + tokio clock seam) - available
