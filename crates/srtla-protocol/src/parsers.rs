@@ -163,6 +163,18 @@ pub fn parse_srt_ack(buf: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]))
 }
 
+/// Marks a loss-list word as the start of a range; also the bit that must be
+/// clear on any word carrying a bare 31-bit SRT sequence number.
+const SRT_NAK_RANGE_FLAG: u32 = 0x8000_0000;
+
+/// Widest loss list this parser will expand a NAK into.
+///
+/// Every id handed back becomes a retransmission upstream, so an unbounded
+/// expansion is an amplification vector: two words on the wire can ask for four
+/// billion resends. The cap is a hard ceiling on that cost. See
+/// [`parse_srt_nak`] for the saturation semantics.
+const SRT_NAK_MAX_LOSS_IDS: usize = 1000;
+
 /// Parse the loss list of an SRT NAK into individual sequence numbers.
 ///
 /// The loss list is the control packet's CIF, so it starts after the full
@@ -172,9 +184,20 @@ pub fn parse_srt_ack(buf: &[u8]) -> Option<u32> {
 /// destination socket id into phantom loss reports.
 ///
 /// An entry with the MSB set opens an inclusive range whose end is the next
-/// word; the start is masked, the end is not. A range whose end sorts below its
-/// masked start yields nothing, matching the reference implementation, which
-/// has no serial-wraparound handling here.
+/// word. Both words are validated as 31-bit sequence numbers: the start is
+/// masked, and the end is *required* to have its MSB already clear. A range
+/// that fails either check — an end word with the MSB set, or an end that sorts
+/// below its masked start — yields nothing and parsing resumes at the following
+/// entry, matching the reference implementation, which has no serial-wraparound
+/// handling here. Rejecting the end word matters because it is attacker- and
+/// corruption-reachable: an unchecked `0xffff_ffff` end would otherwise expand
+/// into a full cap's worth of fabricated loss reports, each one a real
+/// retransmission on the wire.
+///
+/// Expansion is bounded at [`SRT_NAK_MAX_LOSS_IDS`] ids per packet. The cap
+/// saturates silently — this crate is deliberately dependency-free and has no
+/// logger — so a legitimately huge range is truncated rather than reported. A
+/// receiver that still needs those ids will NAK them again.
 #[inline]
 pub fn parse_srt_nak(buf: &[u8]) -> SmallVec<u32, 4> {
     if buf.len() < SRT_CONTROL_HEADER_LEN + 4 {
@@ -183,25 +206,42 @@ pub fn parse_srt_nak(buf: &[u8]) -> SmallVec<u32, 4> {
     if get_packet_type(buf) != Some(SRT_TYPE_NAK) {
         return SmallVec::new();
     }
-    let mut out = SmallVec::new();
+    let mut out: SmallVec<u32, 4> = SmallVec::new();
     let mut i = SRT_CONTROL_HEADER_LEN;
     while i + 3 < buf.len() {
-        let mut id = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+        let id = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
         i += 4;
-        if (id & 0x8000_0000) != 0 {
-            id &= 0x7fff_ffff;
-            if i + 3 >= buf.len() {
+        if (id & SRT_NAK_RANGE_FLAG) == 0 {
+            out.push(id);
+            continue;
+        }
+
+        let start = id & !SRT_NAK_RANGE_FLAG;
+        if i + 3 >= buf.len() {
+            break;
+        }
+        let end = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+        i += 4;
+
+        // The end word is a plain sequence number, so its MSB must be clear;
+        // anything else is corrupt or hostile. Combined with `end >= start`,
+        // this also makes the walk below wrap-safe: `seq` is compared against
+        // `end` *after* the push and before the increment, so it stops at `end`
+        // and can never step past `0x7fff_ffff` into an overflow.
+        if (end & SRT_NAK_RANGE_FLAG) != 0 || end < start {
+            continue;
+        }
+
+        let mut seq = start;
+        loop {
+            if out.len() >= SRT_NAK_MAX_LOSS_IDS {
                 break;
             }
-            let end = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
-            i += 4;
-            let mut seq = id;
-            while seq <= end && out.len() < 1000 {
-                out.push(seq);
-                seq = seq.wrapping_add(1);
+            out.push(seq);
+            if seq == end {
+                break;
             }
-        } else {
-            out.push(id);
+            seq += 1;
         }
     }
     out
@@ -227,4 +267,110 @@ pub fn parse_srtla_ack(buf: &[u8]) -> SmallVec<u32, 4> {
         i += 4;
     }
     out
+}
+
+#[cfg(test)]
+mod nak_tests {
+    use super::*;
+
+    /// Build a NAK frame whose CIF is `words`, laid out after the full 16-byte
+    /// SRT control header.
+    fn nak(words: &[u32]) -> Vec<u8> {
+        let mut buf = vec![0u8; SRT_CONTROL_HEADER_LEN];
+        buf[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
+        for w in words {
+            buf.extend_from_slice(&w.to_be_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn single_entries_are_unchanged() {
+        assert_eq!(parse_srt_nak(&nak(&[7])).as_slice(), &[7]);
+        assert_eq!(
+            parse_srt_nak(&nak(&[500, 501, 9])).as_slice(),
+            &[500, 501, 9]
+        );
+    }
+
+    #[test]
+    fn ranges_are_unchanged() {
+        assert_eq!(
+            parse_srt_nak(&nak(&[100 | SRT_NAK_RANGE_FLAG, 103])).as_slice(),
+            &[100, 101, 102, 103]
+        );
+        // A single-element range: start == end.
+        assert_eq!(
+            parse_srt_nak(&nak(&[42 | SRT_NAK_RANGE_FLAG, 42])).as_slice(),
+            &[42]
+        );
+        // Mixed singles and ranges keep their wire order.
+        assert_eq!(
+            parse_srt_nak(&nak(&[50, 100 | SRT_NAK_RANGE_FLAG, 102, 60])).as_slice(),
+            &[50, 100, 101, 102, 60]
+        );
+    }
+
+    #[test]
+    fn end_word_with_msb_set_emits_nothing() {
+        // 0xffff_ffff is the pathological case: unvalidated, `seq <= end` runs
+        // to the cap and fabricates a thousand retransmission requests.
+        assert!(parse_srt_nak(&nak(&[10 | SRT_NAK_RANGE_FLAG, 0xffff_ffff])).is_empty());
+        // Any MSB-set end is rejected, not merely the all-ones one.
+        assert!(
+            parse_srt_nak(&nak(&[10 | SRT_NAK_RANGE_FLAG, 20 | SRT_NAK_RANGE_FLAG])).is_empty()
+        );
+    }
+
+    #[test]
+    fn invalid_range_does_not_desync_the_rest_of_the_list() {
+        // The bad range is skipped; the entries after it still decode, which
+        // means the two-word consumption stayed aligned.
+        assert_eq!(
+            parse_srt_nak(&nak(&[1, 10 | SRT_NAK_RANGE_FLAG, 0xffff_ffff, 2])).as_slice(),
+            &[1, 2]
+        );
+    }
+
+    #[test]
+    fn end_below_start_yields_nothing() {
+        assert!(parse_srt_nak(&nak(&[100 | SRT_NAK_RANGE_FLAG, 99])).is_empty());
+        assert_eq!(
+            parse_srt_nak(&nak(&[100 | SRT_NAK_RANGE_FLAG, 99, 7])).as_slice(),
+            &[7]
+        );
+    }
+
+    #[test]
+    fn range_ending_at_max_sequence_terminates() {
+        let max = 0x7fff_ffffu32;
+        let out = parse_srt_nak(&nak(&[(max - 3) | SRT_NAK_RANGE_FLAG, max]));
+        assert_eq!(out.as_slice(), &[max - 3, max - 2, max - 1, max]);
+
+        // Start == end == the largest legal sequence number: the walk must stop
+        // on the first push rather than incrementing into an overflow.
+        let out = parse_srt_nak(&nak(&[max | SRT_NAK_RANGE_FLAG, max]));
+        assert_eq!(out.as_slice(), &[max]);
+    }
+
+    #[test]
+    fn oversized_range_saturates_at_the_cap() {
+        let out = parse_srt_nak(&nak(&[1 | SRT_NAK_RANGE_FLAG, 100_000]));
+        assert_eq!(out.len(), SRT_NAK_MAX_LOSS_IDS);
+        assert_eq!(out[0], 1);
+        assert_eq!(out[SRT_NAK_MAX_LOSS_IDS - 1], SRT_NAK_MAX_LOSS_IDS as u32);
+
+        // A range reaching the very top of the sequence space is bounded the
+        // same way and, critically, still terminates.
+        let out = parse_srt_nak(&nak(&[SRT_NAK_RANGE_FLAG, 0x7fff_ffff]));
+        assert_eq!(out.len(), SRT_NAK_MAX_LOSS_IDS);
+    }
+
+    #[test]
+    fn range_start_word_without_an_end_word_is_dropped() {
+        assert_eq!(
+            parse_srt_nak(&nak(&[7, 100 | SRT_NAK_RANGE_FLAG])).as_slice(),
+            &[7]
+        );
+    }
 }
