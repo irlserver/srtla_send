@@ -14,8 +14,10 @@ use srtla_send::{
 };
 use tracing_subscriber::EnvFilter;
 
-// Use mimalloc as the global allocator for the binary (non-Windows only)
-#[cfg(not(windows))]
+// Use mimalloc as the global allocator for the binary (non-Windows only).
+// Gated default-on via the `mimalloc` feature; --no-default-features builds
+// fall back to the system allocator.
+#[cfg(all(not(windows), feature = "mimalloc"))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

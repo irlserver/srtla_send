@@ -43,12 +43,16 @@ smallvec = "=2.0.0-alpha.12"
 mimalloc = { version = "0.1", default-features = false, features = [
 	"secure",
 	"v3",
-] }
+], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [features]
+default = ["mimalloc"]
+# Default-on preserves the shipped binary's allocator; --no-default-features
+# falls back to the system allocator (profiling, allocator-sensitive tooling).
+mimalloc = ["dep:mimalloc"]
 # test_helpers exposes advance_test_clock(), which calls tokio::time::advance —
 # only available with tokio's test-util. Pull it here so the test-internals
 # surface compiles standalone (e.g. `cargo build --all-features`), not just under
