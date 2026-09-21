@@ -192,6 +192,12 @@ pub async fn run_sender_with_config(
     // Prepare SIGHUP stream (Unix only) or a never-completing future (non-Unix)
     #[cfg(unix)]
     let mut sighup = signal(SignalKind::hangup())?;
+    // SIGTERM/SIGINT drive a graceful `Ok(())` return so the process exits 0
+    // under a supervisor instead of dying to the default signal action.
+    #[cfg(unix)]
+    let mut sigterm = signal(SignalKind::terminate())?;
+    #[cfg(unix)]
+    let mut sigint = signal(SignalKind::interrupt())?;
 
     // Main loop - run housekeeping frequently like C version
     // Run housekeeping once before entering the main event loop so we start in a clean state.
@@ -434,6 +440,14 @@ pub async fn run_sender_with_config(
                 &config,
             )
             .await;
+        }
+        _ = sigterm.recv() => {
+            info!("received SIGTERM - shutting down");
+            return Ok(());
+        }
+        _ = sigint.recv() => {
+            info!("received SIGINT - shutting down");
+            return Ok(());
         }
     }
 
