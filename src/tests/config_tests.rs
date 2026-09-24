@@ -22,6 +22,8 @@ mod tests {
             crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             crate::config::STALL_ACK_STALE_MS,
             crate::config::CONN_TIMEOUT_MS,
+            crate::config::RECONNECT_FAST_RETRY_MS,
+            crate::config::RECONNECT_FAST_RETRY_ATTEMPTS,
             false,
         );
         let snap = config.snapshot();
@@ -36,6 +38,8 @@ mod tests {
             crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             crate::config::STALL_ACK_STALE_MS,
             crate::config::CONN_TIMEOUT_MS,
+            crate::config::RECONNECT_FAST_RETRY_MS,
+            crate::config::RECONNECT_FAST_RETRY_ATTEMPTS,
             false,
         );
         let snap = config.snapshot();
@@ -51,6 +55,85 @@ mod tests {
         assert_eq!(config.set_conn_timeout_ms(120_000), 60_000, "ceiling");
         assert_eq!(config.set_conn_timeout_ms(9_000), 9_000);
         assert_eq!(config.snapshot().conn_timeout_ms, 9_000);
+    }
+
+    #[test]
+    fn test_reconnect_fast_retry_defaults_and_clamps() {
+        let config = DynamicConfig::new();
+        let snap = config.snapshot();
+        assert_eq!(snap.reconnect_fast_retry_ms, 1_000);
+        assert_eq!(snap.reconnect_fast_retry_attempts, 4);
+
+        assert_eq!(
+            config.set_reconnect_fast_retry(Some(100), None),
+            (1_000, 4),
+            "floor"
+        );
+        assert_eq!(
+            config.set_reconnect_fast_retry(Some(60_000), None),
+            (5_000, 4),
+            "ceiling"
+        );
+        assert_eq!(
+            config.set_reconnect_fast_retry(None, Some(99)),
+            (5_000, 10),
+            "attempts cap"
+        );
+        assert_eq!(
+            config.set_reconnect_fast_retry(Some(2_000), Some(0)),
+            (2_000, 0),
+            "opt-out"
+        );
+        let snap = config.snapshot();
+        assert_eq!(snap.reconnect_fast_retry_ms, 2_000);
+        assert_eq!(snap.reconnect_fast_retry_attempts, 0);
+
+        let from_cli = DynamicConfig::from_cli(
+            SchedulingMode::Enhanced,
+            false,
+            false,
+            crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
+            crate::config::STALL_ACK_STALE_MS,
+            crate::config::CONN_TIMEOUT_MS,
+            200,
+            50,
+            false,
+        );
+        let snap = from_cli.snapshot();
+        assert_eq!(
+            (
+                snap.reconnect_fast_retry_ms,
+                snap.reconnect_fast_retry_attempts
+            ),
+            (1_000, 10),
+            "CLI values are clamped like conn_timeout_ms"
+        );
+    }
+
+    #[test]
+    fn test_set_reconnect_fast_retry_over_control() {
+        let config = DynamicConfig::new();
+        let resp = crate::control::dispatch(
+            &config,
+            None,
+            None,
+            r#"{"jsonrpc":"2.0","id":1,"method":"set_reconnect_fast_retry","params":{"attempts":0}}"#,
+        )
+        .unwrap()
+        .to_json();
+        assert!(resp.contains(r#""attempts":0"#), "{resp}");
+        assert!(resp.contains(r#""ms":1000"#), "{resp}");
+        assert_eq!(config.snapshot().reconnect_fast_retry_attempts, 0);
+
+        let bad = crate::control::dispatch(
+            &config,
+            None,
+            None,
+            r#"{"jsonrpc":"2.0","id":2,"method":"set_reconnect_fast_retry","params":{}}"#,
+        )
+        .unwrap()
+        .to_json();
+        assert!(bad.contains("-32602"), "{bad}");
     }
 
     #[test]

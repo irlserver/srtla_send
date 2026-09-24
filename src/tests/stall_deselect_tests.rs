@@ -1121,4 +1121,28 @@ mod tests {
             "the scaled liveness window must reach is_timed_out callers"
         );
     }
+
+    #[test]
+    fn reconnect_fast_retry_reaches_the_link() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        assert_eq!(conns[0].reconnection.fast_retry_ms, 1_000);
+        assert_eq!(conns[0].reconnection.fast_retry_attempts, 4);
+
+        let tuned = ConfigSnapshot {
+            reconnect_fast_retry_ms: 2_500,
+            reconnect_fast_retry_attempts: 0,
+            ..enhanced()
+        };
+        let _ = select_connection_idx(&mut conns, None, now, &tuned);
+        assert_eq!(
+            (
+                conns[0].reconnection.fast_retry_ms,
+                conns[0].reconnection.fast_retry_attempts
+            ),
+            (2_500, 0),
+            "the runtime fast-retry window must reach the reconnect logic"
+        );
+    }
 }

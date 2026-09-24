@@ -24,6 +24,12 @@ pub struct TomlConfig {
     pub stall_ack_stale_ms: u64,
     /// Per-link liveness timeout (ms); silence past this re-registers the link.
     pub conn_timeout_ms: u64,
+    /// Reconnect cadence (ms) for an established link's first
+    /// `reconnect_fast_retry_attempts` retries after it times out.
+    pub reconnect_fast_retry_ms: u64,
+    /// Failed reconnects retried at `reconnect_fast_retry_ms` before the
+    /// exponential backoff; `0` = backoff from the first miss.
+    pub reconnect_fast_retry_attempts: u32,
 
     // --- Congestion control ---
     /// RTT velocity threshold (ms/sample) above which window recovery is halved.
@@ -57,6 +63,8 @@ impl Default for TomlConfig {
             stall_min_in_flight: crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
             stall_ack_stale_ms: crate::config::STALL_ACK_STALE_MS,
             conn_timeout_ms: crate::config::CONN_TIMEOUT_MS,
+            reconnect_fast_retry_ms: crate::config::RECONNECT_FAST_RETRY_MS,
+            reconnect_fast_retry_attempts: crate::config::RECONNECT_FAST_RETRY_ATTEMPTS,
             rtt_velocity_gate: 2.0,
             warming_rtt_probes: 2,
             warming_timeout_ms: 5_000,
@@ -130,10 +138,14 @@ mod tests {
             cooldown_duration_ms = 8000
             min_switch_interval_ms = 30
             switch_hysteresis = 1.20
+            reconnect_fast_retry_ms = 2000
+            reconnect_fast_retry_attempts = 0
         "#;
         let cfg: TomlConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.mode, "classic");
         assert!(cfg.no_quality);
         assert_eq!(cfg.warming_rtt_probes, 3);
+        assert_eq!(cfg.reconnect_fast_retry_ms, 2000);
+        assert_eq!(cfg.reconnect_fast_retry_attempts, 0);
     }
 }

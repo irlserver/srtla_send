@@ -343,12 +343,12 @@ mod tests {
         let t0 = now_ms();
 
         // Drop all uplinks. Pin the reconnect backoff well past the whole test
-        // window (max failure count -> 120s backoff) so housekeeping reaches the
+        // window (4 fast retries + 5 ladder steps -> 120s cap) so housekeeping reaches the
         // timeout branch instead of attempting a socket reconnection.
         for conn in connections.iter_mut() {
             conn.mark_for_recovery();
             conn.reconnection.last_reconnect_attempt_ms = t0;
-            conn.reconnection.reconnect_failure_count = 5;
+            conn.reconnection.reconnect_failure_count = 9;
         }
 
         // Arm: first all-down pass. Uptime is irrelevant (only now - failed_at
@@ -465,7 +465,7 @@ mod tests {
             for conn in self.connections.iter_mut() {
                 conn.mark_for_recovery();
                 conn.reconnection.last_reconnect_attempt_ms = at;
-                conn.reconnection.reconnect_failure_count = 5;
+                conn.reconnection.reconnect_failure_count = 9;
             }
         }
 

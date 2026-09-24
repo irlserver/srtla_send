@@ -100,6 +100,23 @@ struct Cli {
     /// 1000..=60000.
     #[arg(long = "conn-timeout-ms", default_value_t = config::CONN_TIMEOUT_MS)]
     conn_timeout_ms: u64,
+    /// Reconnect cadence (ms) for an uplink that was established and has
+    /// timed out, for its first `--reconnect-fast-retry-attempts` retries
+    /// (the C reference retries on every 1 s housekeeping pass). A short
+    /// modem/tether blip is then re-registered inside the SRT peer-idle
+    /// timeout. Also settable at runtime (`set_reconnect_fast_retry`).
+    /// Clamped to 1000..=5000.
+    #[arg(long = "reconnect-fast-retry-ms", default_value_t = config::RECONNECT_FAST_RETRY_MS)]
+    reconnect_fast_retry_ms: u64,
+    /// Failed reconnect attempts retried at `--reconnect-fast-retry-ms` before
+    /// the exponential backoff (5 s doubling, 120 s cap) takes over. `0`
+    /// restores the previous behaviour: backoff from the first miss.
+    /// Clamped to 0..=10.
+    #[arg(
+        long = "reconnect-fast-retry-attempts",
+        default_value_t = config::RECONNECT_FAST_RETRY_ATTEMPTS
+    )]
+    reconnect_fast_retry_attempts: u32,
 
     /// Disable whole-bond re-home (on by default). When every uplink has been
     /// down for longer than the all-links-failed window AND the receiver
@@ -174,8 +191,20 @@ async fn main() -> Result<()> {
         args.stall_min_in_flight,
         args.stall_ack_stale_ms,
         args.conn_timeout_ms,
+        args.reconnect_fast_retry_ms,
+        args.reconnect_fast_retry_attempts,
         args.no_rehome,
     );
+    {
+        let snap = config.snapshot();
+        tracing::info!(
+            "link liveness: conn_timeout_ms={} reconnect_fast_retry_ms={} \
+             reconnect_fast_retry_attempts={}",
+            snap.conn_timeout_ms,
+            snap.reconnect_fast_retry_ms,
+            snap.reconnect_fast_retry_attempts
+        );
+    }
 
     // Create shared stats for telemetry export
     let shared_stats = stats::SharedStats::new();

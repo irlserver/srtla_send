@@ -10,6 +10,8 @@
 //! - `set_quality { enabled: bool }`
 //! - `set_stall_deselect { enabled: bool }`
 //! - `set_conn_timeout { ms: u64 }` (clamped; response echoes the applied value)
+//! - `set_reconnect_fast_retry { ms?: u64, attempts?: u32 }` (either or both;
+//!   clamped; response echoes the applied pair; `attempts: 0` = plain backoff)
 //! - `get_status` → current `ConfigSnapshot`
 //! - `get_stats` → per-link telemetry
 //!
@@ -332,6 +334,29 @@ fn handle_method(
             Ok(json!({ "ms": applied }))
         }
 
+        "set_reconnect_fast_retry" => {
+            let ms = params.get("ms").map(Value::as_u64);
+            let attempts = params
+                .get("attempts")
+                .map(|v| v.as_u64().map(|n| u32::try_from(n).unwrap_or(u32::MAX)));
+            if matches!(ms, Some(None)) || matches!(attempts, Some(None)) {
+                return Err(ErrorObject::new(
+                    INVALID_PARAMS,
+                    "expected params.ms: u64 and/or params.attempts: u32",
+                ));
+            }
+            let (ms, attempts) = (ms.flatten(), attempts.flatten());
+            if ms.is_none() && attempts.is_none() {
+                return Err(ErrorObject::new(
+                    INVALID_PARAMS,
+                    "expected params.ms: u64 and/or params.attempts: u32",
+                ));
+            }
+            // Clamped, so echo what was applied (as set_conn_timeout does).
+            let (ms, attempts) = config.set_reconnect_fast_retry(ms, attempts);
+            Ok(json!({ "ms": ms, "attempts": attempts }))
+        }
+
         "get_status" => {
             let snap = config.snapshot();
             let (windows_received, malformed) = critical_window
@@ -344,6 +369,8 @@ fn handle_method(
                 "stall_min_in_flight": snap.stall_min_in_flight,
                 "stall_ack_stale_ms": snap.stall_ack_stale_ms,
                 "conn_timeout_ms": snap.conn_timeout_ms,
+                "reconnect_fast_retry_ms": snap.reconnect_fast_retry_ms,
+                "reconnect_fast_retry_attempts": snap.reconnect_fast_retry_attempts,
                 "critical_windows_received": windows_received,
                 "critical_malformed_datagrams": malformed,
             }))

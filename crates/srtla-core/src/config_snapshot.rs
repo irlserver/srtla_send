@@ -109,6 +109,23 @@ pub const CONN_TIMEOUT_MS: u64 = srtla_protocol::CONN_TIMEOUT * 1000;
 pub const CONN_TIMEOUT_MS_MIN: u64 = 1_000;
 pub const CONN_TIMEOUT_MS_MAX: u64 = 60_000;
 
+/// Default reconnect cadence (ms) for an uplink that WAS established and has
+/// timed out, during its fast-retry window. Matches the C reference
+/// (`connection_housekeeping` re-opens the socket on every 1 s pass), so a
+/// short interface blip is re-registered inside the SRT peer-idle timeout.
+pub const RECONNECT_FAST_RETRY_MS: u64 = 1_000;
+/// Clamp bounds for the fast-retry cadence. Housekeeping runs once a second,
+/// so nothing below that is observable; above the exponential ladder's base
+/// (5 s) the "fast" window would be slower than the ladder it precedes.
+pub const RECONNECT_FAST_RETRY_MS_MIN: u64 = 1_000;
+pub const RECONNECT_FAST_RETRY_MS_MAX: u64 = 5_000;
+/// Default number of failed reconnect attempts retried at
+/// [`RECONNECT_FAST_RETRY_MS`] before the exponential backoff ladder
+/// (5 s doubling, 120 s cap) takes over. `0` disables the window: the ladder
+/// applies from the first miss (the previous behaviour).
+pub const RECONNECT_FAST_RETRY_ATTEMPTS: u32 = 4;
+pub const RECONNECT_FAST_RETRY_ATTEMPTS_MAX: u32 = 10;
+
 /// Snapshot of configuration for efficient hot-path access.
 /// Call `DynamicConfig::snapshot()` once per select iteration to avoid
 /// multiple atomic loads per packet in the hot path.
@@ -130,6 +147,13 @@ pub struct ConfigSnapshot {
     /// Per-link liveness timeout in ms (default [`CONN_TIMEOUT_MS`]). Silence
     /// past this tears the link down and re-registers it.
     pub conn_timeout_ms: u64,
+    /// Reconnect cadence (ms) during an established link's fast-retry window
+    /// (default [`RECONNECT_FAST_RETRY_MS`]).
+    pub reconnect_fast_retry_ms: u64,
+    /// Failed reconnect attempts retried at `reconnect_fast_retry_ms` before
+    /// the exponential ladder (default [`RECONNECT_FAST_RETRY_ATTEMPTS`];
+    /// `0` = ladder from the first miss).
+    pub reconnect_fast_retry_attempts: u32,
     /// One-way delivery budget in ms: the TSBPD receive delay the far-end SRT
     /// listener declared in its handshake response, so the deadline a packet on
     /// any link has to beat. Zero until the handshake crosses (and on a peer
@@ -147,6 +171,8 @@ impl Default for ConfigSnapshot {
             stall_min_in_flight: STALL_MIN_IN_FLIGHT_PACKETS,
             stall_ack_stale_ms: STALL_ACK_STALE_MS,
             conn_timeout_ms: CONN_TIMEOUT_MS,
+            reconnect_fast_retry_ms: RECONNECT_FAST_RETRY_MS,
+            reconnect_fast_retry_attempts: RECONNECT_FAST_RETRY_ATTEMPTS,
             negotiated_latency_ms: 0,
         }
     }

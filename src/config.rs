@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, O
 // here so the existing `crate::config::{ConfigSnapshot, STALL_*}` paths keep
 // resolving across the codebase.
 pub use srtla_core::config_snapshot::{
-    CONN_TIMEOUT_MS, CONN_TIMEOUT_MS_MAX, CONN_TIMEOUT_MS_MIN, ConfigSnapshot, STALL_ACK_STALE_MS,
+    CONN_TIMEOUT_MS, CONN_TIMEOUT_MS_MAX, CONN_TIMEOUT_MS_MIN, ConfigSnapshot,
+    RECONNECT_FAST_RETRY_ATTEMPTS, RECONNECT_FAST_RETRY_ATTEMPTS_MAX, RECONNECT_FAST_RETRY_MS,
+    RECONNECT_FAST_RETRY_MS_MAX, RECONNECT_FAST_RETRY_MS_MIN, STALL_ACK_STALE_MS,
     STALL_MIN_IN_FLIGHT_PACKETS,
 };
 use srtla_core::mode::SchedulingMode;
@@ -32,6 +34,8 @@ pub struct DynamicConfig {
     stall_min_in_flight: Arc<AtomicI32>,
     stall_ack_stale_ms: Arc<AtomicU64>,
     conn_timeout_ms: Arc<AtomicU64>,
+    reconnect_fast_retry_ms: Arc<AtomicU64>,
+    reconnect_fast_retry_attempts: Arc<AtomicU32>,
     /// Whole-bond re-home on a dead bond whose receiver hostname has moved.
     ///
     /// Deliberately absent from [`ConfigSnapshot`]: that snapshot is taken on
@@ -59,12 +63,15 @@ impl DynamicConfig {
             stall_min_in_flight: Arc::new(AtomicI32::new(STALL_MIN_IN_FLIGHT_PACKETS)),
             stall_ack_stale_ms: Arc::new(AtomicU64::new(STALL_ACK_STALE_MS)),
             conn_timeout_ms: Arc::new(AtomicU64::new(CONN_TIMEOUT_MS)),
+            reconnect_fast_retry_ms: Arc::new(AtomicU64::new(RECONNECT_FAST_RETRY_MS)),
+            reconnect_fast_retry_attempts: Arc::new(AtomicU32::new(RECONNECT_FAST_RETRY_ATTEMPTS)),
             rehome_on_failure: Arc::new(AtomicBool::new(true)),
             negotiated_latency_ms: Arc::new(AtomicU32::new(0)),
         }
     }
 
     /// Create config from CLI arguments.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_cli(
         mode: SchedulingMode,
         no_quality: bool,
@@ -72,6 +79,8 @@ impl DynamicConfig {
         stall_min_in_flight: i32,
         stall_ack_stale_ms: u64,
         conn_timeout_ms: u64,
+        reconnect_fast_retry_ms: u64,
+        reconnect_fast_retry_attempts: u32,
         no_rehome: bool,
     ) -> Self {
         Self {
@@ -83,6 +92,12 @@ impl DynamicConfig {
             conn_timeout_ms: Arc::new(AtomicU64::new(
                 conn_timeout_ms.clamp(CONN_TIMEOUT_MS_MIN, CONN_TIMEOUT_MS_MAX),
             )),
+            reconnect_fast_retry_ms: Arc::new(AtomicU64::new(clamp_fast_retry_ms(
+                reconnect_fast_retry_ms,
+            ))),
+            reconnect_fast_retry_attempts: Arc::new(AtomicU32::new(clamp_fast_retry_attempts(
+                reconnect_fast_retry_attempts,
+            ))),
             rehome_on_failure: Arc::new(AtomicBool::new(!no_rehome)),
             negotiated_latency_ms: Arc::new(AtomicU32::new(0)),
         }
@@ -108,6 +123,10 @@ impl DynamicConfig {
             stall_min_in_flight: self.stall_min_in_flight.load(Ordering::Relaxed),
             stall_ack_stale_ms: self.stall_ack_stale_ms.load(Ordering::Relaxed),
             conn_timeout_ms: self.conn_timeout_ms.load(Ordering::Relaxed),
+            reconnect_fast_retry_ms: self.reconnect_fast_retry_ms.load(Ordering::Relaxed),
+            reconnect_fast_retry_attempts: self
+                .reconnect_fast_retry_attempts
+                .load(Ordering::Relaxed),
             negotiated_latency_ms: self.negotiated_latency_ms.load(Ordering::Relaxed),
         }
     }
@@ -158,6 +177,34 @@ impl DynamicConfig {
         self.conn_timeout_ms.store(applied, Ordering::Relaxed);
         applied
     }
+
+    /// Set the reconnect fast-retry window at runtime: the cadence (clamped to
+    /// [`RECONNECT_FAST_RETRY_MS_MIN`], [`RECONNECT_FAST_RETRY_MS_MAX`]) and/or
+    /// the attempt count (clamped to `0..=`[`RECONNECT_FAST_RETRY_ATTEMPTS_MAX`];
+    /// `0` = exponential ladder from the first miss). `None` leaves a value
+    /// unchanged. Returns the applied `(ms, attempts)`.
+    pub fn set_reconnect_fast_retry(&self, ms: Option<u64>, attempts: Option<u32>) -> (u64, u32) {
+        if let Some(ms) = ms {
+            self.reconnect_fast_retry_ms
+                .store(clamp_fast_retry_ms(ms), Ordering::Relaxed);
+        }
+        if let Some(attempts) = attempts {
+            self.reconnect_fast_retry_attempts
+                .store(clamp_fast_retry_attempts(attempts), Ordering::Relaxed);
+        }
+        (
+            self.reconnect_fast_retry_ms.load(Ordering::Relaxed),
+            self.reconnect_fast_retry_attempts.load(Ordering::Relaxed),
+        )
+    }
+}
+
+fn clamp_fast_retry_ms(ms: u64) -> u64 {
+    ms.clamp(RECONNECT_FAST_RETRY_MS_MIN, RECONNECT_FAST_RETRY_MS_MAX)
+}
+
+fn clamp_fast_retry_attempts(attempts: u32) -> u32 {
+    attempts.min(RECONNECT_FAST_RETRY_ATTEMPTS_MAX)
 }
 
 /// Spawn the stdin command reader in a std::thread. Stdin on Linux
@@ -202,6 +249,8 @@ mod tests {
             STALL_MIN_IN_FLIGHT_PACKETS,
             STALL_ACK_STALE_MS,
             CONN_TIMEOUT_MS,
+            RECONNECT_FAST_RETRY_MS,
+            RECONNECT_FAST_RETRY_ATTEMPTS,
             false,
         );
         let snap = config.snapshot();
