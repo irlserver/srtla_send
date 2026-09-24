@@ -57,60 +57,64 @@ The sender supports two mutually exclusive scheduling modes:
 
 This tool assumes that data is streamed from a SRT _sender_ in _caller_ mode to a SRT _receiver_ in _listener_ mode. To get any benefit over using SRT directly, the _sender_ should have 2 or more network links to the SRT listener (in the typical application, these would be internet-connected 4G modems). The sender needs to have [source routing](https://tldp.org/HOWTO/Adv-Routing-HOWTO/lartc.rpdb.simple.html) configured, as srtla uses `bind()` to map UDP sockets to a given connection.
 
+## Install
+
+Each [release](https://github.com/irlserver/srtla_send/releases) ships a `.deb` for `amd64` and `arm64`. It runs on any Linux distribution with glibc 2.27 or newer (Ubuntu 18.04, Debian 10 and later):
+
+```bash
+sudo dpkg -i srtla_*_arm64.deb
+```
+
+On other platforms, build from source.
+
 ## Requirements
 
-- **Rust nightly toolchain** and Cargo
+- Rust and Cargo. `rust-toolchain.toml` pins the stable toolchain, and rustup installs it on the first `cargo` command. The minimum supported version is the `rust-version` in `Cargo.toml`.
+- Rust nightly, only to format code: `rustfmt.toml` uses unstable options.
 - Unix (Linux/macOS) or Windows
   - Note: SIGHUP-based IP reload is Unix-only; Windows runs without that arm
-
-**Important:** This project requires Rust nightly due to advanced rustfmt configuration options used in the codebase.
 
 ## Build
 
 ```bash
 cd srtla_send
-rustup install nightly
-rustup default nightly  # Set nightly as default for this project
 cargo build --release
 # binary at target/release/srtla_send
 ```
 
-Alternatively, you can use nightly for individual commands:
-
-```bash
-cargo +nightly build --release
-cargo +nightly fmt
-cargo +nightly test
-```
-
 ## Testing
 
-The project includes comprehensive test suites covering unit tests, integration tests, and end-to-end tests.
+The project includes test suites covering unit tests, integration tests, and end-to-end tests.
 
 ### Run Tests Locally
 
+The `xlint` and `xtest` aliases in `.cargo/config.toml` run the same commands as CI, across every crate in the workspace.
+
 ```bash
-# Run all tests (requires nightly)
-cargo test
+# Run all tests in the workspace, as CI does
+cargo xtest
 
-# Run with verbose output
-cargo test --verbose
+# Run clippy, as CI does
+cargo xlint
 
-# Run specific test
+# Run a specific test
 cargo test test_connection_score
 
-# Check formatting (requires nightly)
-cargo fmt --all -- --check
+# Format code (nightly)
+cargo +nightly fmt --all
 ```
 
 ### CI/CD
 
-The project uses GitHub Actions for continuous integration with automated testing on every push and pull request, including:
+GitHub Actions runs on every push and pull request:
 
-- Multi-platform testing (Linux, Windows, macOS)
-- Code formatting and linting checks
-- Security vulnerability scanning
-- Build verification across multiple Rust versions
+- Formatting, clippy and a spell check
+- Tests on Linux, Windows and macOS, plus Rust beta and a build on the minimum supported Rust version
+- Miri over the unsafe batch-receive code
+- Supply chain checks with cargo-deny
+- The release debs, built against glibc 2.27
+
+Pushing a `vX.Y.Z` tag creates a draft release. See [RELEASING.md](RELEASING.md).
 
 ## Usage
 

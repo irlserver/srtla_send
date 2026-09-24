@@ -1,0 +1,76 @@
+name: Release
+
+# Pushing a vX.Y.Z tag builds the debs and creates a draft release. Nothing is
+# public until a maintainer tests the artifacts and publishes the draft by
+# hand. See RELEASING.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify tag matches the Cargo.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(scripts/version.sh)"
+          echo "tag: ${tag_version}  Cargo.toml: ${cargo_version}"
+          if [ "${tag_version}" != "${cargo_version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match version = \"${cargo_version}\" in Cargo.toml. Bump the version, commit, then move the tag."
+            exit 1
+          fi
+
+  build:
+    needs: check-version
+    uses: ./.github/workflows/build.yml
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # The changelog covers the commits since the previous tag, so this job
+      # needs full history and every tag.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: srtla-deb-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -- *.deb >sha256sums.txt)
+          ls -l dist
+
+      - name: Build release notes
+        run: |
+          set -euo pipefail
+          {
+            cat .github/release-notes-header.md
+            echo "## What's changed"
+            echo
+            scripts/changelog.sh "${GITHUB_REF_NAME}"
+          } >notes.md
+          cat notes.md
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --draft \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md
