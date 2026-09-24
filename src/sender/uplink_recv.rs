@@ -56,7 +56,7 @@ pub async fn process_uplink_packet(
                     if conn.reconnection.connection_established_ms == 0 {
                         conn.reconnection.connection_established_ms = now;
                     }
-                    conn.reconnection.mark_success(&conn.label);
+                    conn.mark_reconnect_success();
                 }
                 RegistrationEvent::RegErr => {
                     conn.connected = false;
