@@ -67,7 +67,16 @@ pub async fn process_uplink_packet(
             return Ok(incoming);
         }
 
-        conn.last_received = Some(now);
+        // Liveness only counts for a link that is registered, or has never been
+        // (initial registration keeps its own grace/timeout handling). A link
+        // that WAS established and is in recovery (`connected == false` until
+        // REG3) must stay timed out so housekeeping rebuilds its socket and
+        // re-sends REG2: letting the receiver's ACKs/NAKs and keepalive replies
+        // refresh it here parks it in limbo — alive to the timeout check,
+        // excluded from scheduling, never re-registered.
+        if conn.connected || conn.reconnection.connection_established_ms == 0 {
+            conn.last_received = Some(now);
+        }
 
         if pt == SRT_TYPE_ACK {
             if let Some(ack) = parse_srt_ack(data) {
