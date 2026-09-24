@@ -5,8 +5,9 @@
 // two, and keeps the library's embedder-facing surface (the Android and Apple
 // binders no CLI ever constructs) from reading as dead code here.
 use anyhow::{Context, Result};
-use clap::Parser;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use srtla_core::mode::SchedulingMode;
 use srtla_send::{
     config, control_socket, metrics, net, priority_listener, sender, stats, subscriptions,
@@ -53,7 +54,9 @@ struct Cli {
     #[arg(long = "control-socket")]
     control_socket: Option<String>,
 
-    /// Path to TOML config file (reloaded on SIGHUP)
+    /// Path to a TOML config file, read once at startup. Keys match the long
+    /// flag names with underscores (`conn_timeout_ms`); a flag given on the
+    /// command line wins over the file
     #[arg(long = "config")]
     config_file: Option<String>,
 
@@ -128,6 +131,34 @@ struct Cli {
     metrics_bind: Option<std::net::SocketAddr>,
 }
 
+impl Cli {
+    /// Replace each option the user did not type on the command line with its
+    /// value from the config file. The precedence is command line, then file,
+    /// then the clap default.
+    fn apply_config_file(&mut self, matches: &ArgMatches, file: toml_config::TomlConfig) {
+        let typed = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
+        // The derive names each arg after its field, so one identifier serves
+        // as both the arg id and the field to fill.
+        macro_rules! fill {
+            ($($field:ident),+ $(,)?) => {$(
+                if let Some(value) = file.$field {
+                    if !typed(stringify!($field)) {
+                        self.$field = value;
+                    }
+                }
+            )+};
+        }
+        fill!(
+            mode,
+            no_quality,
+            no_stall_deselect,
+            stall_min_in_flight,
+            stall_ack_stale_ms,
+            conn_timeout_ms,
+        );
+    }
+}
+
 /// Warn when a sidecar is bound to a non-loopback address. These endpoints
 /// are unauthenticated same-device IPC (encoder front-end and local scrapers),
 /// so a routable bind exposes an open control / scrape surface. We warn rather
@@ -150,22 +181,23 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let args = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut args = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if args.print_version {
         println!("{}", version::version_line());
         return Ok(());
+    }
+
+    if let Some(path) = args.config_file.clone() {
+        let file = toml_config::TomlConfig::load(std::path::Path::new(&path))?;
+        tracing::info!("loaded config from {path}");
+        args.apply_config_file(&matches, file);
     }
 
     let local_srt_port = args.local_srt_port.expect("required");
     let receiver_host = args.receiver_host.as_deref().expect("required");
     let receiver_port = args.receiver_port.expect("required");
     let ips_file = args.ips_file.as_deref().expect("required");
-
-    // Load TOML config (if specified), then apply CLI overrides
-    if let Some(ref path) = args.config_file {
-        let toml_cfg = toml_config::TomlConfig::load_or_default(std::path::Path::new(path));
-        tracing::debug!("TOML config loaded: {:?}", toml_cfg);
-    }
 
     let config = config::DynamicConfig::from_cli(
         args.mode,
@@ -243,4 +275,59 @@ async fn main() -> Result<()> {
     )
     .await
     .context("srtla_send failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_with_file(flags: &[&str], file: &str) -> Cli {
+        let argv = ["srtla_send", "5000", "rec.example", "5001", "ips.txt"]
+            .into_iter()
+            .chain(flags.iter().copied());
+        let matches = Cli::command().try_get_matches_from(argv).unwrap();
+        let mut cli = Cli::from_arg_matches(&matches).unwrap();
+        cli.apply_config_file(&matches, toml::from_str(file).unwrap());
+        cli
+    }
+
+    #[test]
+    fn file_overrides_clap_defaults() {
+        let cli = parse_with_file(
+            &[],
+            r#"
+                mode = "classic"
+                no_quality = true
+                no_stall_deselect = true
+                stall_min_in_flight = 64
+                stall_ack_stale_ms = 1500
+                conn_timeout_ms = 8000
+            "#,
+        );
+        assert_eq!(cli.mode, SchedulingMode::Classic);
+        assert!(cli.no_quality);
+        assert!(cli.no_stall_deselect);
+        assert_eq!(cli.stall_min_in_flight, 64);
+        assert_eq!(cli.stall_ack_stale_ms, 1500);
+        assert_eq!(cli.conn_timeout_ms, 8000);
+    }
+
+    #[test]
+    fn typed_flag_overrides_file_even_at_default_value() {
+        let default = config::CONN_TIMEOUT_MS.to_string();
+        let cli = parse_with_file(
+            &["--conn-timeout-ms", &default, "--no-quality"],
+            "conn_timeout_ms = 8000\nno_quality = false",
+        );
+        assert_eq!(cli.conn_timeout_ms, config::CONN_TIMEOUT_MS);
+        assert!(cli.no_quality);
+    }
+
+    #[test]
+    fn absent_file_keys_keep_cli_values() {
+        let cli = parse_with_file(&["--stall-ack-stale-ms", "2000"], "");
+        assert_eq!(cli.mode, SchedulingMode::Enhanced);
+        assert_eq!(cli.stall_ack_stale_ms, 2000);
+        assert_eq!(cli.conn_timeout_ms, config::CONN_TIMEOUT_MS);
+    }
 }
