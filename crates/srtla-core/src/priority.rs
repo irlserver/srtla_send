@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Magic byte identifying a priority-sidecar v1 datagram. Rejecting any
-/// other leading byte lets us re-use the port for future framing later.
+/// other leading byte lets us reuse the port for future framing later.
 pub const PROTO_MAGIC: u8 = 0xc1;
 
 /// Datagram length in bytes: `[magic u8][window_ms u32 big-endian]`.
