@@ -1,94 +1,44 @@
 //! Optional TOML file configuration for srtla_send.
 //!
-//! Loaded at startup via `--config <path>` and reloaded on SIGHUP.
-//! All fields use `#[serde(default)]` so a partial config file is valid.
+//! Loaded once at startup via `--config <path>`. Each key mirrors the CLI flag
+//! of the same name, and a flag typed on the command line wins over the file.
+//! Unknown keys fail the load, so a misspelled or retired key stops startup
+//! instead of silently doing nothing.
 
 use std::path::Path;
 
-use serde::Deserialize;
-use tracing::{info, warn};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Deserializer};
+use srtla_core::mode::SchedulingMode;
 
-/// Top-level TOML configuration.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+/// Values read from the config file. `None` means the key was absent.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TomlConfig {
-    /// Scheduling mode: classic, enhanced.
-    pub mode: String,
-    /// Disable quality scoring.
-    pub no_quality: bool,
-    /// Disable the stalled-link deselect guard (on by default).
-    pub no_stall_deselect: bool,
-    /// In-flight backlog at or above which a link becomes a stall candidate.
-    pub stall_min_in_flight: i32,
-    /// Delivery-proof staleness window (ms) before a stall candidate is deselected.
-    pub stall_ack_stale_ms: u64,
-    /// Per-link liveness timeout (ms); silence past this re-registers the link.
-    pub conn_timeout_ms: u64,
-
-    // --- Congestion control ---
-    /// RTT velocity threshold (ms/sample) above which window recovery is halved.
-    pub rtt_velocity_gate: f64,
-
-    // --- Link lifecycle ---
-    /// RTT probes required during warming phase before going Live.
-    pub warming_rtt_probes: u32,
-    /// Maximum time (ms) in warming phase before auto-promoting.
-    pub warming_timeout_ms: u64,
-    /// Quality threshold below which a Live link becomes Degraded.
-    pub degraded_quality_threshold: f64,
-    /// NAK burst count threshold for degradation.
-    pub degraded_nak_burst_threshold: i32,
-    /// Cooldown duration (ms) before re-entering Live from Degraded.
-    pub cooldown_duration_ms: u64,
-
-    // --- Selection ---
-    /// Minimum time (ms) between connection switches.
-    pub min_switch_interval_ms: u64,
-    /// Switch hysteresis threshold (1.10 = 10% better required).
-    pub switch_hysteresis: f64,
+    #[serde(deserialize_with = "deserialize_mode")]
+    pub mode: Option<SchedulingMode>,
+    pub no_quality: Option<bool>,
+    pub no_stall_deselect: Option<bool>,
+    pub stall_min_in_flight: Option<i32>,
+    pub stall_ack_stale_ms: Option<u64>,
+    pub conn_timeout_ms: Option<u64>,
 }
 
-impl Default for TomlConfig {
-    fn default() -> Self {
-        Self {
-            mode: "enhanced".to_string(),
-            no_quality: false,
-            no_stall_deselect: false,
-            stall_min_in_flight: crate::config::STALL_MIN_IN_FLIGHT_PACKETS,
-            stall_ack_stale_ms: crate::config::STALL_ACK_STALE_MS,
-            conn_timeout_ms: crate::config::CONN_TIMEOUT_MS,
-            rtt_velocity_gate: 2.0,
-            warming_rtt_probes: 2,
-            warming_timeout_ms: 5_000,
-            degraded_quality_threshold: 0.5,
-            degraded_nak_burst_threshold: 5,
-            cooldown_duration_ms: 5_000,
-            min_switch_interval_ms: 15,
-            switch_hysteresis: 1.10,
-        }
-    }
+// `SchedulingMode` is a pure core type with no serde dependency, so the file
+// goes through the same `FromStr` the CLI uses.
+fn deserialize_mode<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SchedulingMode>, D::Error> {
+    String::deserialize(d)?
+        .parse()
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 impl TomlConfig {
-    /// Load config from a TOML file.
-    pub fn load(path: &Path) -> Result<Self, String> {
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("failed to read {path:?}: {e}"))?;
-        toml::from_str(&content).map_err(|e| format!("failed to parse {path:?}: {e}"))
-    }
-
-    /// Load config, logging errors and falling back to defaults.
-    pub fn load_or_default(path: &Path) -> Self {
-        match Self::load(path) {
-            Ok(cfg) => {
-                info!("loaded config from {}", path.display());
-                cfg
-            }
-            Err(e) => {
-                warn!("config load failed: {e}, using defaults");
-                Self::default()
-            }
-        }
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file {}", path.display()))?;
+        toml::from_str(&content)
+            .with_context(|| format!("failed to parse config file {}", path.display()))
     }
 }
 
@@ -97,43 +47,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_defaults() {
-        let cfg = TomlConfig::default();
-        assert_eq!(cfg.mode, "enhanced");
-        assert!(!cfg.no_quality);
-        assert!((cfg.rtt_velocity_gate - 2.0).abs() < f64::EPSILON);
+    fn absent_keys_are_none() {
+        let cfg: TomlConfig = toml::from_str("mode = \"classic\"").unwrap();
+        assert_eq!(cfg.mode, Some(SchedulingMode::Classic));
+        assert_eq!(cfg.no_quality, None);
+        assert_eq!(cfg.conn_timeout_ms, None);
     }
 
     #[test]
-    fn test_partial_toml() {
+    fn full_toml() {
         let toml_str = r#"
-            mode = "classic"
-            rtt_velocity_gate = 3.5
-        "#;
-        let cfg: TomlConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.mode, "classic");
-        assert!((cfg.rtt_velocity_gate - 3.5).abs() < f64::EPSILON);
-        // Defaults for unspecified fields
-        assert!(!cfg.no_quality);
-    }
-
-    #[test]
-    fn test_full_toml() {
-        let toml_str = r#"
-            mode = "classic"
+            mode = "enhanced"
             no_quality = true
-            rtt_velocity_gate = 1.0
-            warming_rtt_probes = 3
-            warming_timeout_ms = 10000
-            degraded_quality_threshold = 0.3
-            degraded_nak_burst_threshold = 10
-            cooldown_duration_ms = 8000
-            min_switch_interval_ms = 30
-            switch_hysteresis = 1.20
+            no_stall_deselect = true
+            stall_min_in_flight = 64
+            stall_ack_stale_ms = 1500
+            conn_timeout_ms = 8000
         "#;
         let cfg: TomlConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.mode, "classic");
-        assert!(cfg.no_quality);
-        assert_eq!(cfg.warming_rtt_probes, 3);
+        assert_eq!(cfg.mode, Some(SchedulingMode::Enhanced));
+        assert_eq!(cfg.no_quality, Some(true));
+        assert_eq!(cfg.no_stall_deselect, Some(true));
+        assert_eq!(cfg.stall_min_in_flight, Some(64));
+        assert_eq!(cfg.stall_ack_stale_ms, Some(1500));
+        assert_eq!(cfg.conn_timeout_ms, Some(8000));
+    }
+
+    #[test]
+    fn unknown_key_is_rejected() {
+        let err = toml::from_str::<TomlConfig>("switch_hysteresis = 1.2").unwrap_err();
+        assert!(err.to_string().contains("switch_hysteresis"), "{err}");
+    }
+
+    #[test]
+    fn invalid_mode_is_rejected() {
+        let err = toml::from_str::<TomlConfig>("mode = \"fastest\"").unwrap_err();
+        assert!(err.to_string().contains("fastest"), "{err}");
     }
 }
