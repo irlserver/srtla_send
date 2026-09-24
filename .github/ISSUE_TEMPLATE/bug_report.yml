@@ -1,0 +1,139 @@
+name: Bug report
+description: srtla_send is not behaving the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. The debug log almost always contains
+        the answer, so reports with one attached get resolved much faster.
+
+  - type: checkboxes
+    id: troubleshooting
+    attributes:
+      label: Before you file
+      description: Please work through these first. They resolve most reports.
+      options:
+        - label: I searched [existing issues](https://github.com/irlserver/srtla_send/issues?q=is%3Aissue) (including closed ones) and this is not already reported.
+          required: true
+        - label: I am on the [latest release](https://github.com/irlserver/srtla_send/releases) and the problem still happens there.
+          required: true
+        - label: I checked the README's [Troubleshooting](https://github.com/irlserver/srtla_send#troubleshooting) section.
+          required: true
+        - label: >-
+            Every uplink can reach the receiver on its own, and source routing is set up so
+            each IP in the IP list leaves through its own interface (see
+            [Assumptions and Prerequisites](https://github.com/irlserver/srtla_send#assumptions-and-prerequisites)).
+          required: false
+        - label: >-
+            If only some links carry traffic, I tried `--mode classic` to find out whether
+            the enhanced scheduler's quality scoring is the cause.
+          required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+      placeholder: |
+        After one modem drops and comes back, it never carries traffic again.
+        I expected the link to rejoin within a few seconds.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: What you did, in order. Include how long it took to show up.
+      placeholder: |
+        1. Start srtla_send with two 4G modems
+        2. Pull the SIM from one modem for 30 seconds
+        3. Put it back; the link re-registers but stays idle
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ## The debug log
+
+        **This is the single most useful thing you can attach.** Run srtla_send with
+        `RUST_LOG=debug`, reproduce the problem, and let it run for at least a minute
+        afterwards:
+
+        ```
+        RUST_LOG=debug srtla_send 6000 receiver.example.com 5000 ./uplinks.txt 2>&1 | tee srtla.log
+        ```
+
+        The log contains your receiver hostname and uplink IPs. Replace anything you would
+        rather not share before posting. If the log is long, attach it as a file instead of
+        pasting it.
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Debug log
+      description: The `RUST_LOG=debug` output around the time the problem happened, or an attached file.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: srtla_send version
+      description: The full output of `srtla_send -v`.
+      placeholder: "4.0.1 (main@df0b393) [srtla_send]"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - .deb from a GitHub release
+        - Built from source
+        - Bundled with a device or distribution
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Device and OS
+      placeholder: "Jetson Nano, Ubuntu 18.04 (arm64)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Stream setup
+      description: >
+        The full srtla_send command line (with the receiver host removed if you prefer), any
+        config file, the uplinks and what they are (4G/5G modem, Starlink, Wi-Fi, Ethernet),
+        the receiver (srtla_rec version or service), and the encoder or SRT sender.
+      placeholder: |
+        srtla_send --control-socket /tmp/srtla.sock 6000 REDACTED 5000 /etc/srtla/ips
+        Uplinks: 2x 4G modem (USB), 1x Starlink via Ethernet
+        Receiver: srtla_rec from irlserver, latest
+        Encoder: belaUI, H.265 1080p30, 6 Mbps, SRT latency 2000 ms
+    validations:
+      required: true
+
+  - type: textarea
+    id: stats
+    attributes:
+      label: Link stats
+      description: >
+        Optional but helpful: the output of `get_stats` over the control socket while the
+        problem is happening (see [Runtime Configuration](https://github.com/irlserver/srtla_send#runtime-configuration)).
+      render: json
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Graphs, metrics, or context that does not fit above.

@@ -1,0 +1,37 @@
+name: Question or help
+description: "\"How do I...\" or \"is this normal?\""
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read the [README](https://github.com/irlserver/srtla_send#readme) first. It covers
+        every option, the scheduling modes, runtime configuration and troubleshooting.
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before you ask
+      options:
+        - label: I searched [existing issues](https://github.com/irlserver/srtla_send/issues?q=is%3Aissue) (including closed ones). The same question may already have an answer.
+          required: true
+        - label: I read the relevant part of the README.
+          required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What you are trying to do, and what is unclear or not behaving the way you expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: If the question is about your stream, include the srtla_send version (`srtla_send -v`), device, uplinks and receiver.
+      placeholder: |
+        srtla_send 4.0.1 on a Jetson Nano, Ubuntu 18.04
+        Uplinks: 2x 4G modem
+        Receiver: srtla_rec from irlserver

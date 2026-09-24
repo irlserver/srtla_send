@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest something srtla_send should do
+labels: ["enhancement"]
+body:
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched [existing issues](https://github.com/irlserver/srtla_send/issues?q=is%3Aissue) (including closed ones) and this is not already suggested.
+          required: true
+        - label: I checked the README to confirm this is not already possible, including through the config file, the control socket or the command line options.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: Describe the situation you hit, not only the feature. The underlying problem often has a better solution than the first one that comes to mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Workarounds, other settings, other tools.
