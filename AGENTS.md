@@ -28,8 +28,8 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 
 ### Tech Stack
 
-- **Language**: Rust (Edition 2024, requires nightly toolchain)
-- **Minimum Rust Version**: 1.87
+- **Language**: Rust (Edition 2024). `rust-toolchain.toml` pins the stable toolchain; nightly is used only for rustfmt
+- **Minimum Rust Version**: the `rust-version` in `Cargo.toml`, checked by the CI MSRV job
 - **Async Runtime**: Tokio (multi-threaded runtime with macros, net, time, io-util, signal)
 - **CLI**: clap with derive features
 - **Logging**: tracing + tracing-subscriber with env-filter
@@ -112,7 +112,7 @@ Tests are located in `src/tests/`:
 
 ### Formatting Configuration (rustfmt.toml)
 
-The project uses **Rust nightly** with unstable rustfmt features:
+rustfmt.toml uses unstable options, so formatting runs on nightly (`cargo +nightly fmt`):
 
 - Edition: 2024
 - `unstable_features = true`
@@ -148,9 +148,8 @@ The project uses **Rust nightly** with unstable rustfmt features:
 
 ### Important Constraints
 
-- **Requires Rust nightly** due to unstable rustfmt features
-- All formatting must pass `cargo fmt --all -- --check`
-- All code must pass clippy with `-D warnings` (warnings as errors)
+- Formatting needs nightly: all code must pass `cargo +nightly fmt --all -- --check`. The pinned stable toolchain installs without rustfmt, so a plain `cargo fmt` fails instead of formatting with stable rules
+- All code must pass `cargo xlint` (clippy over the whole workspace with `-D warnings`)
 
 ## Robustness Behaviors
 
@@ -245,57 +244,44 @@ cargo build --profile release-lto
 
 ### Testing
 
+The root is also a package, so a bare `cargo test` covers srtla_send alone and skips the crates under `crates/`. Use `--workspace`, or the `xtest` alias that CI runs.
+
 ```bash
-# Run all tests (requires nightly, with test-internals)
-cargo test --features test-internals
+# Run all tests in the workspace with all features (what CI runs)
+cargo xtest
 
-# Run with verbose output
-cargo test --features test-internals --verbose
+# Run the workspace tests with default features (verify encapsulation)
+cargo test --workspace
 
-# Run all tests with all features
-cargo test --all-features --verbose
-
-# Run only unit tests (library tests)
-cargo test --lib --verbose
-
-# Run specific test
+# Run a specific test
 cargo test test_connection_score
-
-# Run unit tests without test features (verify encapsulation)
-cargo test --lib
 ```
 
 ### Formatting
 
 ```bash
-# Format code (requires nightly)
-cargo fmt --all
+# Format code (nightly)
+cargo +nightly fmt --all
 
 # Check formatting without modifying
-cargo fmt --all -- --check
+cargo +nightly fmt --all -- --check
 ```
 
 ### Linting
 
 ```bash
-# Run clippy (warnings as errors)
-cargo clippy -- -D warnings
+# Run clippy over the workspace, warnings as errors (what CI runs)
+cargo xlint
 
-# Check compilation
-cargo check
-
-# Check release compilation
-cargo check --release
+# Spell check (config in .codespellrc)
+codespell
 ```
 
 ### Security
 
 ```bash
-# Install cargo-audit (first time only)
-cargo install cargo-audit
-
-# Run security audit
-cargo audit
+# Advisories and crate sources (config in deny.toml)
+cargo deny check advisories sources
 ```
 
 ### Running
@@ -318,41 +304,27 @@ When a coding task is completed, the following steps MUST be performed:
 ### 1. Format Code
 
 ```bash
-cargo fmt --all
-```
-
-Verify it passes with:
-
-```bash
-cargo fmt --all -- --check
+cargo +nightly fmt --all
 ```
 
 ### 2. Run Clippy
 
 ```bash
-cargo clippy -- -D warnings
+cargo xlint
 ```
 
 All clippy warnings must be resolved (treated as errors).
 
-### 3. Check Compilation
+### 3. Run Tests
 
 ```bash
-cargo check
-cargo check --release
+cargo xtest
+
+# Optionally run with default features to verify encapsulation
+cargo test --workspace
 ```
 
-### 4. Run Tests
-
-```bash
-# Run all tests with test-internals feature
-cargo test --features test-internals --verbose
-
-# Optionally run without test features to verify encapsulation
-cargo test --lib --verbose
-```
-
-### 5. Build Verification
+### 4. Build Verification
 
 ```bash
 cargo build --release
@@ -361,7 +333,7 @@ cargo build --release
 ## Style Guide
 
 - Write commit messages using [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
-- Never bump the internal package version in `Cargo.toml`. This is handled automatically by the release process.
+- Never bump the package version in `Cargo.toml`. The maintainer bumps it as part of a release (see RELEASING.md).
 - Rust files use LF line endings.
 
 ### Important Notes
@@ -369,5 +341,5 @@ cargo build --release
 - **NEVER commit changes unless explicitly asked by the user**
 - All steps must pass before considering the task complete
 - Tests require the `test-internals` feature for full coverage
-- The project requires Rust nightly toolchain
+- Formatting requires the nightly toolchain; everything else uses the stable toolchain pinned in `rust-toolchain.toml`
 - Use `RUST_LOG=info` or `RUST_LOG=debug` for runtime debugging
