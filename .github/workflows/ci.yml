@@ -2,70 +2,105 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-    branches: [main, master]
 
+permissions:
+  contents: read
+
+# A new push to a pull request makes the previous run's result irrelevant.
+# Runs on main are kept so every merged commit has a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Every job builds with the toolchain pinned in rust-toolchain.toml unless it
+# names another one with `cargo +<toolchain>`. The lint and test commands are
+# the cargo aliases in .cargo/config.toml, so a local `cargo xlint` / `cargo
+# xtest` gives the same answer as CI.
 jobs:
-  test:
-    name: Test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: nightly
-          components: rustfmt, clippy
+      # Nightly only for rustfmt: rustfmt.toml uses unstable options.
+      - name: Install toolchains
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup toolchain install nightly --profile minimal --component rustfmt
 
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Format
+        run: cargo +nightly fmt --all -- --check
 
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
+      - name: Clippy
+        run: cargo xlint
 
-      - name: Check compilation
-        run: cargo check
+      - name: Spell check
+        run: |
+          pipx install codespell==2.4.3
+          codespell
 
-      - name: Check compilation without test features
-        run: cargo check --release
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
 
-      - name: Run unit tests
-        run: cargo test --lib --verbose
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
 
-      - name: Run unit tests with test-internals (verify encapsulation)
-        run: cargo test --lib --features test-internals --verbose
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Run all tests
-        run: cargo test --features test-internals --verbose
+      # Default features first: the test-internals feature widens visibility,
+      # so this run proves the tests do not lean on it by accident.
+      - name: Test (default features)
+        run: cargo test --workspace --locked
 
-      - name: Run tests with all features
-        run: cargo test --all-features --verbose
+      - name: Test (all features)
+        run: cargo xtest --locked
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
-      - name: Run security audit
-        run: cargo audit
+      # Read from Cargo.toml so the declared rust-version is the one enforced.
+      - name: Install the MSRV toolchain
+        run: |
+          msrv="$(sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n1)"
+          echo "MSRV=${msrv}" >>"${GITHUB_ENV}"
+          rustup toolchain install "${msrv}" --profile minimal
 
-      - name: Install cargo-deny
-        run: cargo install cargo-deny
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Run supply-chain checks (advisories + sources)
-        run: cargo deny check advisories sources
+      - name: Check
+        run: cargo +"${MSRV}" check --workspace --all-targets --all-features --locked
+
+  beta:
+    name: Test (Rust beta)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install beta
+        run: rustup toolchain install beta --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo +beta test --workspace --all-features --locked
 
   # Miri lane over the only unsafe FFI in the tree: the recvmmsg batch-receive
   # path in src/connection/batch_recv.rs. Miri interprets the pure pointer logic
@@ -78,70 +113,28 @@ jobs:
     name: Miri (batch_recv unsafe pointer logic)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: nightly
-          components: miri
+      - name: Install nightly with miri
+        run: rustup toolchain install nightly --profile minimal --component miri,rust-src
 
       - name: Run batch_recv tests under miri
-        run: cargo miri test --lib batch_recv
+        run: cargo +nightly miri test --lib batch_recv
 
-  test-stable:
-    name: Test (Rust stable)
+  # cargo-deny's advisories check reads the same RustSec database as
+  # cargo-audit, so it replaces it, and it honors the ignores in deny.toml.
+  supply-chain:
+    name: Supply chain
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: taiki-e/install-action@v2
         with:
-          toolchain: stable
+          tool: cargo-deny
 
-      - name: Run tests
-        run: cargo test --features test-internals
-
-  test-beta:
-    name: Test (Rust beta)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: beta
-
-      - name: Run tests
-        run: cargo test
-
-  test-windows:
-    name: Test (Windows)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Run tests
-        run: cargo test --features test-internals --verbose
-
-  test-macos:
-    name: Test (macOS)
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Advisories and sources
+        run: cargo deny check advisories sources

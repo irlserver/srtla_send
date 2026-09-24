@@ -1,0 +1,4 @@
+[codespell]
+# Build output, the lockfile and the untracked reference checkouts listed in
+# .gitignore are not ours to spell-check.
+skip = ./.git,./target,./moblin,./bond-bunny-main,./.claude,./.impeccable,Cargo.lock

@@ -1,7 +1,7 @@
 // The CLI is a thin shell over the `srtla_send` library: it parses arguments,
 // starts the optional sidecars, picks an egress binder for the platform, and
 // hands off to `sender::run_sender_with_config`. Consuming the library rather
-// than re-declaring its modules keeps one compilation of the tree instead of
+// than redeclaring its modules keeps one compilation of the tree instead of
 // two, and keeps the library's embedder-facing surface (the Android and Apple
 // binders no CLI ever constructs) from reading as dead code here.
 use anyhow::{Context, Result};

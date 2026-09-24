@@ -1,0 +1,72 @@
+name: Build
+
+# Builds the release .debs on every push and pull request, so packaging breaks
+# on the change that broke it and not on a tag. release.yml calls this same
+# workflow, so a release ships exactly what CI built.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Oldest glibc the shipped binaries may need. 2.27 is Ubuntu 18.04, the
+  # userland on L4T Jetson boards, the oldest devices the debs target. A plain
+  # cargo build links against the runner's glibc (2.39 on ubuntu-24.04);
+  # cargo-zigbuild links against this version's symbol set instead, and
+  # scripts/package-deb.sh refuses a binary that needs anything newer.
+  # Raising it drops support for older distributions.
+  GLIBC_FLOOR: "2.27"
+  ZIG_VERSION: "0.16.0"
+  CARGO_ZIGBUILD_VERSION: "0.23.4"
+
+jobs:
+  deb:
+    name: deb (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      # rust-toolchain.toml pins the channel; this installs it before the cache
+      # action reads the toolchain version for its key.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+
+      - name: Build
+        run: cargo zigbuild --locked --profile release-lto --target ${{ matrix.target }}.${GLIBC_FLOOR}
+
+      - name: Package
+        run: scripts/package-deb.sh target/${{ matrix.target }}/release-lto/srtla_send ${{ matrix.arch }} "${GLIBC_FLOOR}" dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: srtla-deb-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error

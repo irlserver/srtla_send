@@ -1,0 +1,9 @@
+[toolchain]
+# Pinned stable for building, linting and testing. Bump deliberately.
+# Formatting is the one nightly exception: rustfmt.toml uses unstable options,
+# so run `cargo +nightly fmt`. The minimal profile leaves rustfmt out of this
+# toolchain, so a plain `cargo fmt` fails loudly instead of formatting with
+# stable rules that CI then rejects.
+channel = "1.97.1"
+profile = "minimal"
+components = ["clippy"]
