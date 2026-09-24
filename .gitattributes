@@ -1,2 +1,3 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# LF everywhere, including Windows checkouts: the shell scripts under scripts/
+# run in CI and in WSL, and bash fails on CRLF line endings.
+* text=auto eol=lf
