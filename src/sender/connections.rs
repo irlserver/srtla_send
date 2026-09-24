@@ -206,8 +206,6 @@ pub(super) fn rebuild_uplink_socket(
     // problem `recover_connection` exists for, and a full socket reconnection is
     // the harder reset of the two.
     seq_tracker.remove_connection(conn.conn_id);
-    // Don't reset connection_established_ms for reconnections — only set on REG3.
-    conn.mark_reconnect_success();
     conn.reconnection.reset_startup_grace(now);
     Ok(())
 }

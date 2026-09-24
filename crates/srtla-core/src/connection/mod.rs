@@ -1369,9 +1369,8 @@ impl SrtlaConnection {
 
     /// Reset connection state after the shell replaced this link's socket.
     /// Full reset: clears all state including congestion/bitrate stats. `now`
-    /// is the injected clock (was an ambient `now_ms()` read). Socket creation
-    /// and the `mark_reconnect_success`/grace-reset bookkeeping live in the
-    /// shell's `reconnect_uplink`.
+    /// is the injected clock. Socket creation and the grace-reset bookkeeping
+    /// live in the shell's `reconnect_uplink`.
     pub fn reset_for_reconnect(&mut self, now: u64) {
         self.last_received = None;
         self.reset_core_state();
@@ -1381,9 +1380,8 @@ impl SrtlaConnection {
         self.rtt.reset();
         self.bitrate.reset(now);
 
-        // Reset reconnection tracking
+        // The attempt count survives: only REG3 proves the link is back.
         self.reconnection.last_reconnect_attempt_ms = now;
-        self.reconnection.reconnect_failure_count = 0;
     }
 }
 

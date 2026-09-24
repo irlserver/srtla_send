@@ -262,6 +262,24 @@ mod tests {
     }
 
     #[test]
+    fn socket_rebuild_keeps_the_retry_count() {
+        // A rebuilt socket only proves the local bind worked. If it restarted
+        // the fast attempts, a link whose path stays dead would retry every
+        // second forever.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        conn.reconnection.connection_established_ms = 1;
+        let now = now_ms();
+        for i in 0..3 {
+            conn.record_reconnect_attempt(now + i);
+        }
+
+        conn.reset_for_reconnect(now + 3);
+
+        assert_eq!(conn.reconnection.reconnect_failure_count, 3);
+    }
+
+    #[test]
     fn test_srtla_ack_handling() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());

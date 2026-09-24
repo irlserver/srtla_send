@@ -164,6 +164,25 @@ is timed out, and measures elapsed-time-*since*-failure against
 `GLOBAL_TIMEOUT_MS`. It must never be re-derived from process uptime: that made a
 transient all-down blip trip the timeout the instant uptime exceeded the window.
 
+### Reconnect pacing for an established link
+
+`ReconnectionState` in `srtla-core` paces the socket rebuild and REG2 that
+housekeeping sends for a timed-out link that has registered before.
+
+- **4 attempts at 1 s, then 5 s per attempt.** SRT drops the session after 5 s
+  of silence, so a sub-second blip must be retried on the next housekeeping
+  tick. Once the fast attempts are spent, the 5 s cadence gives a recovering
+  modem with a multi-second RTT time to answer: each retry rebuilds the socket,
+  which drops any reply still in flight. There is no exponential backoff,
+  because a link that comes back after minutes of outage must not wait minutes
+  more.
+- **Only REG3 resets the count.** A successful socket rebuild only proves the
+  local bind worked. If the rebuild reset the count, a link whose path stays
+  dead would stay in the fast attempts forever.
+- **Half a tick of slack.** Attempts are stamped with the time their tick was
+  serviced, so a strict `>= 1000` check misses by a few ms whenever one tick
+  runs late. The retry then slips a whole tick.
+
 ### Whole-bond re-home (`sender::rehome`, `--no-rehome` to disable)
 
 When the bond is dead and the receiver's hostname has moved, migrate **every**
