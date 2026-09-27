@@ -8,6 +8,8 @@ use srtla_protocol::*;
 use tokio::net::UdpSocket;
 use tracing::debug;
 
+use super::client_dedup::ClientDedup;
+
 /// Process one received uplink datagram.
 ///
 /// Updates the connection's protocol state and accumulates the receive-side
@@ -15,6 +17,8 @@ use tracing::debug;
 /// deferred immediate-REG1 send) into a [`SrtlaIncoming`]. The one piece of
 /// inline I/O it keeps is the latency-critical ACK fast-path: forwarding an SRT
 /// ACK straight to the downstream client rather than paying a channel hop.
+/// `client_dedup` decides which ACK and NAK copies reach the client at all;
+/// the ACK/NAK sequence numbers are reported for every copy regardless.
 ///
 /// This used to be an inherent `impl SrtlaConnection` method; it lives in the
 /// shell now so the connection type owns no receive-side socket. It still takes
@@ -28,6 +32,7 @@ pub async fn process_uplink_packet(
     local_listener: &UdpSocket,
     instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
     client_addr: Option<SocketAddr>,
+    client_dedup: &mut ClientDedup,
     data: &[u8],
 ) -> Result<SrtlaIncoming> {
     let mut incoming = SrtlaIncoming {
@@ -82,20 +87,22 @@ pub async fn process_uplink_packet(
             if let Some(ack) = parse_srt_ack(data) {
                 incoming.ack_numbers.push(ack);
             }
-            let ack_packet = SmallVec::from_slice_copy(data);
-            // Try synchronous send first (avoids task context switch)
-            // Only fall back to channel if socket would block
-            if let Some(addr) = client_addr {
-                match local_listener.try_send_to(&ack_packet, addr) {
-                    Ok(_) => {} // Fast path: sent directly
+            // The ACK goes to the client here only, never through
+            // `forward_to_client`: libsrt answers each ACK it reads with an
+            // ACKACK on the bonded uplinks. Try a synchronous send first
+            // (avoids a task context switch) and fall back to the channel only
+            // if the socket would block.
+            if let Some(addr) = client_addr
+                && client_dedup.should_forward_ack(data, now)
+            {
+                match local_listener.try_send_to(data, addr) {
+                    Ok(_) => {}
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        // Slow path: socket busy, use channel
-                        let _ = instant_forwarder.send((addr, ack_packet.clone()));
+                        let _ = instant_forwarder.send((addr, SmallVec::from_slice_copy(data)));
                     }
-                    Err(_) => {} // Other errors: drop silently (same as before)
+                    Err(_) => {}
                 }
             }
-            incoming.forward_to_client.push(ack_packet);
         } else if pt == SRT_TYPE_NAK {
             let nak_list = parse_srt_nak(data);
             if !nak_list.is_empty() {
@@ -108,9 +115,11 @@ pub async fn process_uplink_packet(
                     incoming.nak_numbers.push(seq);
                 }
             }
-            incoming
-                .forward_to_client
-                .push(SmallVec::from_slice_copy(data));
+            if client_addr.is_some() && client_dedup.should_forward_nak(data, now) {
+                incoming
+                    .forward_to_client
+                    .push(SmallVec::from_slice_copy(data));
+            }
         } else if pt == SRTLA_TYPE_ACK {
             let ack_list = parse_srtla_ack(data);
             if !ack_list.is_empty() {

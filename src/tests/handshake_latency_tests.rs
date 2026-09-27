@@ -12,7 +12,7 @@ mod tests {
     use srtla_protocol::*;
 
     use crate::config::DynamicConfig;
-    use crate::sender::process_uplink_packet;
+    use crate::sender::{ClientDedup, process_uplink_packet};
 
     const BOTH_TSBPD: u32 = SRT_HS_OPT_TSBPDSND | SRT_HS_OPT_TSBPDRCV;
 
@@ -57,6 +57,7 @@ mod tests {
             &listener,
             &instant_tx,
             None,
+            &mut ClientDedup::new(),
             data,
         )
         .await

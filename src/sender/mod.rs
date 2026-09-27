@@ -1,3 +1,4 @@
+mod client_dedup;
 mod connections;
 mod housekeeping;
 mod packet_handler;
@@ -14,6 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+pub(crate) use client_dedup::ClientDedup;
 // Re-export connection management functions for tests
 #[allow(unused_imports)]
 pub use connections::{
@@ -24,13 +26,13 @@ pub use connections::{
 #[allow(unused_imports)]
 pub use housekeeping::GLOBAL_TIMEOUT_MS;
 use housekeeping::handle_housekeeping;
+// Re-exported so the ACK/NAK forward dedup tests drive the real receive path.
+pub(crate) use packet_handler::handle_uplink_packet;
 // Re-exported for the NAK-attribution conformance tests so they drive the real
 // production path rather than a mirrored copy.
 #[allow(unused_imports)]
 pub(crate) use packet_handler::{attribute_nak, process_connection_events};
-use packet_handler::{
-    drain_packet_queue, flush_all_batches, handle_srt_packet, handle_uplink_packet,
-};
+use packet_handler::{drain_packet_queue, flush_all_batches, handle_srt_packet};
 // Scripted resolver seam for tests that drive the re-home trigger policy.
 #[cfg(any(test, feature = "test-internals"))]
 pub use rehome::StubResolver;
@@ -51,6 +53,8 @@ use tracing::{debug, info, warn};
 #[cfg(any(test, feature = "test-internals"))]
 pub use uplink::ConnIo;
 pub use uplink::ConnIoMap;
+#[cfg(test)]
+pub(crate) use uplink::UplinkPacket;
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 // Re-exported so the handshake-sniffing tests drive the real receive path.
 #[allow(unused_imports)]
@@ -175,6 +179,7 @@ pub async fn run_sender_with_config(
     let mut last_client_addr: Option<SocketAddr> = None;
     // Zero-allocation ring buffer for sequence tracking
     let mut seq_tracker = SequenceTracker::new();
+    let mut client_dedup = ClientDedup::new();
     let mut last_selected_idx: Option<usize> = None;
     let mut all_failed_at: Option<u64> = None;
     // Whole-bond re-home: only ever consulted once every uplink has been down
@@ -249,6 +254,7 @@ pub async fn run_sender_with_config(
                             &conn_io,
                             &mut reg,
                             &instant_tx,
+                            &mut client_dedup,
                             last_client_addr,
                             &local_listener,
                             &seq_tracker,
@@ -266,6 +272,7 @@ pub async fn run_sender_with_config(
                                 &conn_io,
                                 &mut reg,
                                 &instant_tx,
+                                &mut client_dedup,
                                 last_client_addr,
                                 &local_listener,
                                 &seq_tracker,
@@ -278,6 +285,7 @@ pub async fn run_sender_with_config(
                                 &conn_io,
                                 &mut reg,
                                 &instant_tx,
+                                &mut client_dedup,
                                 last_client_addr,
                                 &local_listener,
                                 &seq_tracker,
@@ -381,6 +389,7 @@ pub async fn run_sender_with_config(
                             &conn_io,
                             &mut reg,
                             &instant_tx,
+                            &mut client_dedup,
                             last_client_addr,
                             &local_listener,
                             &seq_tracker,
@@ -433,6 +442,7 @@ pub async fn run_sender_with_config(
                 &conn_io,
                 &mut reg,
                 &instant_tx,
+                &mut client_dedup,
                 last_client_addr,
                 &local_listener,
                 &seq_tracker,

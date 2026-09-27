@@ -9,6 +9,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, trace, warn};
 
+use super::client_dedup::ClientDedup;
 use super::connections::recover_connection;
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, UplinkPacket};
@@ -134,6 +135,7 @@ pub async fn handle_uplink_packet(
     conn_io: &ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     instant_tx: &InstantForwarder,
+    client_dedup: &mut ClientDedup,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
@@ -151,6 +153,7 @@ pub async fn handle_uplink_packet(
             local_listener,
             instant_tx,
             last_client_addr,
+            client_dedup,
             &packet.bytes,
         )
         .await
@@ -213,6 +216,7 @@ pub async fn drain_packet_queue(
     conn_io: &ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     instant_tx: &InstantForwarder,
+    client_dedup: &mut ClientDedup,
     last_client_addr: Option<SocketAddr>,
     local_listener: &UdpSocket,
     seq_tracker: &SequenceTracker,
@@ -231,6 +235,7 @@ pub async fn drain_packet_queue(
                     conn_io,
                     reg,
                     instant_tx,
+                    client_dedup,
                     last_client_addr,
                     local_listener,
                     seq_tracker,

@@ -17,15 +17,24 @@ mod tests {
     use srtla_core::utils::now_ms;
     use srtla_protocol::*;
 
-    use crate::sender::process_uplink_packet;
+    use crate::sender::{ClientDedup, process_uplink_packet};
 
     async fn deliver(conn: &mut srtla_core::connection::SrtlaConnection, data: &[u8]) {
         let mut reg = SrtlaRegistrationManager::new();
         let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (instant_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        process_uplink_packet(conn, 0, &mut reg, &listener, &instant_tx, None, data)
-            .await
-            .unwrap();
+        process_uplink_packet(
+            conn,
+            0,
+            &mut reg,
+            &listener,
+            &instant_tx,
+            None,
+            &mut ClientDedup::new(),
+            data,
+        )
+        .await
+        .unwrap();
     }
 
     fn srt_ack() -> Vec<u8> {
