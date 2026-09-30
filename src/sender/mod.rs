@@ -19,8 +19,8 @@ pub(crate) use client_dedup::ClientDedup;
 // Re-export connection management functions for tests
 #[allow(unused_imports)]
 pub use connections::{
-    PendingConnectionChanges, apply_connection_changes, create_connections_from_ips,
-    recover_connection,
+    PendingConnectionChanges, apply_connection_changes, apply_link_weights,
+    create_connections_from_ips, recover_connection,
 };
 // Re-export public items used by tests
 #[allow(unused_imports)]
@@ -104,14 +104,8 @@ pub async fn run_sender_with_config(
         .context("bind local SRT UDP listener")?;
     info!("listening for SRT on [::]:{}", local_srt_port);
 
-    let ips = read_ip_list(ips_file).await?;
-    debug!(
-        "uplink IPs loaded: {}",
-        ips.iter()
-            .map(|i| i.to_string())
-            .collect::<SmallVec<_, 4>>()
-            .join(", ")
-    );
+    let (ips, weights) = read_weighted_ip_list(ips_file).await?;
+    debug!("uplink IPs loaded: {}", describe_weights(&ips, &weights));
     if ips.is_empty() {
         return Err(anyhow!("no IPs in list: {}", ips_file));
     }
@@ -119,9 +113,15 @@ pub async fn run_sender_with_config(
     // Shell-owned I/O half of every connection, keyed by conn_id (never by
     // index — so no lockstep with the connections vec through add/remove).
     let mut conn_io: ConnIoMap = std::collections::HashMap::new();
-    let mut connections =
-        create_connections_from_ips(&ips, receiver_host, receiver_port, &binder, &mut conn_io)
-            .await;
+    let mut connections = create_connections_from_ips(
+        &ips,
+        &weights,
+        receiver_host,
+        receiver_port,
+        &binder,
+        &mut conn_io,
+    )
+    .await;
     if connections.is_empty() {
         return Err(anyhow!("no uplinks available"));
     }
@@ -365,6 +365,7 @@ pub async fn run_sender_with_config(
                                 &mut connections,
                                 &mut conn_io,
                                 &new_ips,
+                                &changes.new_weights,
                                 &changes.receiver_host,
                                 changes.receiver_port,
                                 &mut last_selected_idx,
@@ -416,18 +417,22 @@ pub async fn run_sender_with_config(
             // up rather than queuing an empty list, which would tear down every
             // connection in apply_connection_changes. Mirrors the C sender.
             match reload::analyze_ip_reload(ips_file) {
-                reload::IpReload::Apply { ips, first_invalid_line } => {
+                reload::IpReload::Apply { ips, weights, first_invalid_line } => {
                     if let Some(line) = first_invalid_line {
                         warn!(
                             "ips file has an invalid entry starting at line {line}; applying valid IPs only"
                         );
                     }
+                    info!(
+                        "uplink IP changes queued for next processing cycle: {}",
+                        describe_weights(&ips, &weights)
+                    );
                     pending_changes = Some(PendingConnectionChanges {
                         new_ips: Some(ips),
+                        new_weights: weights,
                         receiver_host: receiver_host.to_string(),
                         receiver_port,
                     });
-                    info!("uplink IP changes queued for next processing cycle");
                 }
                 reload::IpReload::Refuse(reason) => {
                     warn!(
@@ -466,6 +471,26 @@ pub async fn run_sender_with_config(
 }
 
 pub async fn read_ip_list(path: &str) -> Result<SmallVec<IpAddr, 4>> {
+    Ok(read_weighted_ip_list(path).await?.0)
+}
+
+/// `ip weight` pairs for a log line, e.g. `192.168.0.15 (weight 10), 192.168.0.2
+/// (weight 1)`.
+fn describe_weights(ips: &[IpAddr], weights: &[u8]) -> String {
+    ips.iter()
+        .map(|ip| {
+            format!(
+                "{ip} (weight {})",
+                connections::weight_for(ips, weights, *ip)
+            )
+        })
+        .collect::<SmallVec<_, 4>>()
+        .join(", ")
+}
+
+/// [`read_ip_list`] plus the normalised operator weight of each IP (same
+/// order). An unweighted file yields all 1s.
+pub async fn read_weighted_ip_list(path: &str) -> Result<(SmallVec<IpAddr, 4>, SmallVec<u8, 4>)> {
     let text = std::fs::read_to_string(Path::new(path)).context("read IPs file")?;
     // Shares the SIGHUP reload guard's parser so startup and reload agree on what
     // counts as a valid IP. At startup an empty or all-invalid file is tolerated
@@ -474,13 +499,14 @@ pub async fn read_ip_list(path: &str) -> Result<SmallVec<IpAddr, 4>> {
     match reload::analyze_ip_reload_text(&text) {
         reload::IpReload::Apply {
             ips,
+            weights,
             first_invalid_line,
         } => {
             if let Some(line) = first_invalid_line {
                 warn!("ips file has an invalid entry starting at line {line}; skipping it");
             }
-            Ok(ips)
+            Ok((ips, weights))
         }
-        reload::IpReload::Refuse(_) => Ok(SmallVec::new()),
+        reload::IpReload::Refuse(_) => Ok((SmallVec::new(), SmallVec::new())),
     }
 }

@@ -17,6 +17,9 @@ use crate::net::{
 
 pub struct PendingConnectionChanges {
     pub new_ips: Option<SmallVec<IpAddr, 4>>,
+    /// Normalised operator weight per entry of `new_ips` (same order). Empty =
+    /// every link weight 1.
+    pub new_weights: SmallVec<u8, 4>,
     pub receiver_host: String,
     pub receiver_port: u16,
 }
@@ -26,6 +29,7 @@ pub async fn apply_connection_changes(
     connections: &mut SmallVec<SrtlaConnection, 4>,
     conn_io: &mut ConnIoMap,
     new_ips: &[IpAddr],
+    new_weights: &[u8],
     receiver_host: &str,
     receiver_port: u16,
     last_selected_idx: &mut Option<usize>,
@@ -62,9 +66,12 @@ pub async fn apply_connection_changes(
         }
     }
 
+    // Weight changes on the links that stay (a reload may only re-weight).
+    apply_link_weights(connections, new_ips, new_weights);
+
     // Add new connections
     let mut seen = HashSet::<IpAddr>::new();
-    let new_ips_needed: SmallVec<IpAddr, 4> = new_ips
+    let (new_ips_needed, new_weights_needed): (SmallVec<IpAddr, 4>, SmallVec<u8, 4>) = new_ips
         .iter()
         .copied()
         .filter(|ip| seen.insert(*ip))
@@ -72,11 +79,13 @@ pub async fn apply_connection_changes(
             let label = format!("{}:{} via {}", receiver_host, receiver_port, ip);
             !current_labels.contains(&label)
         })
-        .collect();
+        .map(|ip| (ip, weight_for(new_ips, new_weights, ip)))
+        .unzip();
 
     if !new_ips_needed.is_empty() {
         let mut new_connections = create_connections_from_ips(
             &new_ips_needed,
+            &new_weights_needed,
             receiver_host,
             receiver_port,
             binder,
@@ -97,8 +106,34 @@ pub async fn apply_connection_changes(
     }
 }
 
+/// Operator weight for `ip` from the parallel `ips`/`weights` lists (first
+/// match wins); 1 when the list carries no weight for it.
+pub fn weight_for(ips: &[IpAddr], weights: &[u8], ip: IpAddr) -> u8 {
+    ips.iter()
+        .position(|candidate| *candidate == ip)
+        .and_then(|i| weights.get(i).copied())
+        .unwrap_or(srtla_core::connection::LINK_WEIGHT_MIN)
+}
+
+/// Set every existing connection's operator weight from the parallel
+/// `ips`/`weights` lists, logging each change. A link the lists do not name
+/// goes back to 1.
+pub fn apply_link_weights(connections: &mut [SrtlaConnection], ips: &[IpAddr], weights: &[u8]) {
+    for conn in connections.iter_mut() {
+        let weight = weight_for(ips, weights, conn.local_ip);
+        if conn.link_weight != weight {
+            info!(
+                "uplink {} weight {} -> {}",
+                conn.label, conn.link_weight, weight
+            );
+            conn.link_weight = weight;
+        }
+    }
+}
+
 pub async fn create_connections_from_ips(
     ips: &[IpAddr],
+    weights: &[u8],
     receiver_host: &str,
     receiver_port: u16,
     binder: &Arc<dyn UplinkBinder>,
@@ -107,8 +142,9 @@ pub async fn create_connections_from_ips(
     let mut connections = SmallVec::new();
     for ip in ips {
         match connect_uplink(*ip, receiver_host, receiver_port, binder).await {
-            Ok((conn, io)) => {
-                info!("added uplink {}", conn.label);
+            Ok((mut conn, io)) => {
+                conn.link_weight = weight_for(ips, weights, *ip);
+                info!("added uplink {} (weight {})", conn.label, conn.link_weight);
                 conn_io.insert(conn.conn_id, io);
                 connections.push(conn);
             }
