@@ -503,6 +503,7 @@ mod tests {
             &mut connections,
             &mut conn_io,
             &new_ips,
+            &[],
             "127.0.0.1",
             8080,
             &mut last_selected_idx,
@@ -566,6 +567,7 @@ mod tests {
             new_ips: Some(SmallVec::from_vec(vec![IpAddr::V4(Ipv4Addr::new(
                 192, 168, 1, 100,
             ))])),
+            new_weights: SmallVec::new(),
             receiver_host: "test-host".to_string(),
             receiver_port: 9090,
         };
@@ -598,7 +600,7 @@ mod tests {
             std::sync::Arc::new(crate::net::SourceIpBinder);
         let mut conn_io = ConnIoMap::new();
         let connections =
-            create_connections_from_ips(&ips, "127.0.0.1", 9999, &binder, &mut conn_io).await;
+            create_connections_from_ips(&ips, &[], "127.0.0.1", 9999, &binder, &mut conn_io).await;
 
         // Connections may be empty due to connection failures, which is OK for testing
         assert!(connections.len() <= ips.len());

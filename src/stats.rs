@@ -158,6 +158,9 @@ pub struct LinkStats {
     pub stall_gated: bool,
     /// Cumulative stall-latch engagements since the link was created.
     pub stall_gate_events: u64,
+    /// Normalised operator link weight from the IPs file (1 = unweighted).
+    /// Applies in classic mode only.
+    pub weight: u8,
     /// Cumulative fast silence-pull engagements (a loaded link heard nothing
     /// for ~2 RTTs and was transiently skipped). Ticks on routine cellular
     /// HARQ stalls — rate telemetry, not an alarm; compare against
@@ -383,6 +386,7 @@ impl SharedStats {
                 stall_gated: conn.stall_latched(),
                 stall_gate_events: conn.stall_gate_events(),
                 silence_pulls: conn.silence_pulls(),
+                weight: conn.link_weight,
                 sole_carrier: conn.is_sole_carrier(),
                 sole_carrier_excluded: conn.is_sole_carrier_excluded(),
                 sole_carrier_elections: conn.sole_carrier_elections(),

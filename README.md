@@ -127,7 +127,13 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 - `SRT_LISTEN_PORT`: UDP port on which to receive SRT packets locally
 - `SRTLA_HOST`: hostname or IP of the SRTLA receiver (e.g., srtla_rec)
 - `SRTLA_PORT`: UDP port of the SRTLA receiver
-- `BIND_IPS_FILE`: path to a file with newline-separated local source IPs (uplinks)
+- `BIND_IPS_FILE`: path to a file with newline-separated local source IPs (uplinks). Each line is `<ip>[ <weight>]`: the optional
+  weight (integer 1..10, default 1) is a link priority in the style of Moblin's
+  "connection priorities". Weights are normalised so the lowest link is 1; in
+  classic mode a link's score is multiplied by its weight while its window is
+  above 20 000, the multiplier fades linearly to 1 between 20 000 and 10 000,
+  and is ignored below. Enhanced mode ignores weights. Exported per link as
+  `srtla_send_link_weight`.
 
 ### Options
 

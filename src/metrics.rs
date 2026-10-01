@@ -238,6 +238,22 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
         .ok();
     }
 
+    writeln!(
+        out,
+        "# HELP srtla_send_link_weight operator link weight from the ips file, normalised so the \
+         lowest link is 1 (classic mode only)"
+    )
+    .ok();
+    writeln!(out, "# TYPE srtla_send_link_weight gauge").ok();
+    for link in &snap.links {
+        writeln!(
+            out,
+            r#"srtla_send_link_weight{{ip="{}"}} {}"#,
+            link.ip, link.weight
+        )
+        .ok();
+    }
+
     // Aggregate gauges.
     writeln!(
         out,

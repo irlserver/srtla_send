@@ -33,3 +33,6 @@ pub mod recovery_limbo_tests;
 
 #[cfg(test)]
 pub mod client_forward_dedup_tests;
+
+#[cfg(test)]
+pub mod link_weight_tests;

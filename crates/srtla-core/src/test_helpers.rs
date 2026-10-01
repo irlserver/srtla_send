@@ -75,6 +75,7 @@ fn build_connection(local_ip: IpAddr, label: String) -> SrtlaConnection {
         cc_backing_off: false,
         cc_target_bps: 0,
         loss_degraded: false,
+        link_weight: 1,
     }
 }
 

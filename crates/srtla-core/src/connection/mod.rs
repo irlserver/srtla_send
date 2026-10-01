@@ -125,6 +125,61 @@ impl Default for CachedQuality {
     }
 }
 
+/// Lowest operator link weight (the IPs file's optional second column).
+/// Weights are Moblin's "connection priorities": an integer 1..10.
+pub const LINK_WEIGHT_MIN: u8 = 1;
+/// Highest operator link weight.
+pub const LINK_WEIGHT_MAX: u8 = 10;
+/// Above this window a weighted link gets its full weight (Moblin's
+/// `windowStableMaximum * windowMultiply`, = `WINDOW_DEF * WINDOW_MULT`).
+pub const LINK_WEIGHT_FULL_ABOVE_WINDOW: i32 = 20 * WINDOW_MULT;
+/// At or below this window the weight is ignored (Moblin's
+/// `windowStableMinimum * windowMultiply`).
+pub const LINK_WEIGHT_NONE_AT_OR_BELOW_WINDOW: i32 = 10 * WINDOW_MULT;
+
+/// Score multiplier for a link with operator weight `weight` and congestion
+/// window `window`, copied from Moblin's `RemoteConnection.score()`:
+///
+/// - `window > 20 000` (healthy, room to spare): the full weight;
+/// - `10 000 < window <= 20 000` (the link is shedding): fades linearly from
+///   the weight down to 1;
+/// - `window <= 10 000`: 1 (the weight is ignored, plain capacity balancing).
+///
+/// A weight of 1 (the default for every link) is exactly 1.0 in every band, so
+/// an unweighted IPs file schedules byte-for-byte as before. Used by classic
+/// selection only.
+#[inline]
+pub fn link_weight_multiplier(window: i32, weight: u8) -> f32 {
+    let weight = f32::from(weight.clamp(LINK_WEIGHT_MIN, LINK_WEIGHT_MAX));
+    if window > LINK_WEIGHT_FULL_ABOVE_WINDOW {
+        weight
+    } else if window > LINK_WEIGHT_NONE_AT_OR_BELOW_WINDOW {
+        let factor = (window - LINK_WEIGHT_NONE_AT_OR_BELOW_WINDOW) as f32
+            / (LINK_WEIGHT_FULL_ABOVE_WINDOW - LINK_WEIGHT_NONE_AT_OR_BELOW_WINDOW) as f32;
+        1.0 + (weight - 1.0) * factor
+    } else {
+        1.0
+    }
+}
+
+/// Normalise operator weights so the lowest one is 1, keeping the differences
+/// (Moblin's `updateConnectionPriorities`: `priority - lowest + 1`). Only the
+/// ratio between links matters to the scheduler, and this keeps a file that
+/// says `5`/`5` from behaving any differently from one that says nothing.
+/// Inputs are clamped to `LINK_WEIGHT_MIN..=LINK_WEIGHT_MAX` first, so the
+/// result stays in that range.
+pub fn normalise_link_weights(weights: &mut [u8]) {
+    for w in weights.iter_mut() {
+        *w = (*w).clamp(LINK_WEIGHT_MIN, LINK_WEIGHT_MAX);
+    }
+    let Some(lowest) = weights.iter().copied().min() else {
+        return;
+    };
+    for w in weights.iter_mut() {
+        *w = *w - lowest + 1;
+    }
+}
+
 /// Share of its natural score a link should compete with while ramping back
 /// in after a stall gate, rising linearly from
 /// [`crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR`] to `1.0` over `ramp_ms`.
@@ -447,6 +502,11 @@ pub struct SrtlaConnection {
     /// `is_timed_out`/`CONN_TIMEOUT`); a gated link keeps a trickle of
     /// traffic so the loss EWMA can recover and clear the latch.
     pub loss_degraded: bool,
+    /// Operator link weight from the IPs file (`<ip> <weight>`), normalised so
+    /// the lowest link is 1. Scales this link's classic score through
+    /// [`link_weight_multiplier`]. Survives recovery/reconnect resets: it is
+    /// configuration, not link state; only a reload changes it.
+    pub link_weight: u8,
 }
 
 impl SrtlaConnection {
@@ -505,7 +565,15 @@ impl SrtlaConnection {
             cc_backing_off: false,
             cc_target_bps: 0,
             loss_degraded: false,
+            link_weight: LINK_WEIGHT_MIN,
         }
+    }
+
+    /// Classic-mode score multiplier from this link's operator weight at its
+    /// current window (see [`link_weight_multiplier`]).
+    #[inline(always)]
+    pub fn weight_multiplier(&self) -> f32 {
+        link_weight_multiplier(self.window, self.link_weight)
     }
 
     #[inline(always)]

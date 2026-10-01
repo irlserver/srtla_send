@@ -8,6 +8,10 @@
 //! - No quality awareness (no NAK penalties)
 //! - No RTT consideration
 //! - Simple "pick highest score" algorithm
+//! - Optional operator link weights (Moblin's connection priorities): the score
+//!   is multiplied by [`SrtlaConnection::weight_multiplier`], which is exactly
+//!   1.0 for an unweighted link, so an IPs file without weights schedules as
+//!   the C implementation does.
 
 use crate::connection::SrtlaConnection;
 
@@ -29,7 +33,7 @@ pub fn select_connection(conns: &[SrtlaConnection], now_ms: u64) -> Option<usize
         if c.is_timed_out(now_ms) || !c.is_schedulable() || c.stall_gated {
             continue;
         }
-        let score = c.get_score();
+        let score = weighted_score(c);
         if score > best_score {
             best_score = score;
             best_idx = Some(i);
@@ -37,6 +41,18 @@ pub fn select_connection(conns: &[SrtlaConnection], now_ms: u64) -> Option<usize
     }
 
     best_idx
+}
+
+/// `get_score()` scaled by the link's weight multiplier. Truncated back to an
+/// integer like Moblin's `Int(Float(score) * priority)`. A weight of 1 returns
+/// `get_score()` unchanged (including the `-1` of a disconnected link).
+#[inline(always)]
+pub fn weighted_score(c: &SrtlaConnection) -> i32 {
+    let score = c.get_score();
+    if c.link_weight <= 1 || score <= 0 {
+        return score;
+    }
+    (score as f32 * c.weight_multiplier()) as i32
 }
 
 // Tests are in src/tests/sender_tests.rs
