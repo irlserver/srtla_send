@@ -14,7 +14,9 @@
 //!
 //! The estimate is approximate: when the best sample expires, the next best
 //! may come from a later sub-window and sit slightly above the true windowed
-//! minimum. It never reports a sample older than the window.
+//! minimum. It never reports a sample more than one window older than the
+//! latest update. Expiry happens only on update, so with no new samples the
+//! last estimate stands.
 
 #[derive(Debug, Clone, Copy)]
 struct Sample {
