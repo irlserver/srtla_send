@@ -789,9 +789,13 @@ impl SrtlaConnection {
             return false;
         }
 
+        // A keepalive that slips a tick leaves a 2 s gap in the echoes, which
+        // is also the delivery proof a stall-gated link rejoins on.
         match self.last_keepalive_sent {
             None => true,
-            Some(last) => now_ms.saturating_sub(last) >= IDLE_TIME * 1000,
+            Some(last) => {
+                now_ms.saturating_sub(last) + reconnection::TICK_SLACK_MS >= IDLE_TIME * 1000
+            }
         }
     }
 
@@ -804,6 +808,29 @@ impl SrtlaConnection {
             &self.label,
             now_ms,
         );
+    }
+
+    /// Fold an echoed keepalive into RTT and stall-gate state.
+    ///
+    /// The echo is an RTT sample only when the tracker armed a measurement,
+    /// but it is delivery proof for `stall_deselect` every time. Arming waits
+    /// for 3 s without any RTT sample, which a stall-latched link fed only by
+    /// sparse probe ACKs rarely reaches; tying proof to it would leave the
+    /// latch's rejoin dwell, which needs fresh proof throughout, unable to
+    /// complete. Pairs with the earned-ACK site (see `ack_nak.rs`); together
+    /// they let a recovered link un-gate itself without the scheduler probing
+    /// blindly.
+    pub fn handle_keepalive_echo(&mut self, data: &[u8], now_ms: u64) {
+        if self
+            .rtt
+            .handle_keepalive_response(data, &self.label, now_ms)
+            .is_some()
+        {
+            self.record_rtt_probe();
+        }
+        if rtt::keepalive_echo_rtt_ms(data, now_ms).is_some() {
+            self.last_ack_or_rtt_sample_ms = now_ms;
+        }
     }
 
     /// Record an RTT probe and advance warming → live if enough probes collected.
@@ -978,11 +1005,15 @@ impl SrtlaConnection {
         }
 
         let stale_ms = self.effective_stall_stale_ms(stale_ceiling_ms);
+        // A gated link carries no payload, so its steady proof is the keepalive
+        // echo and freshness is judged on a window that outlasts one keepalive
+        // period (see `STALL_REJOIN_PROOF_FLOOR_MS`).
+        let proof_window_ms = stale_ms.max(crate::config_snapshot::STALL_REJOIN_PROOF_FLOOR_MS);
         // Recent *and* fast enough to matter: see `delivery_proof_is_timely`.
         // Both conditions restart the dwell, so a link only rejoins on a run of
         // proof that a packet of real payload could have ridden.
         let proof_fresh = self.last_ack_or_rtt_sample_ms != 0
-            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) < stale_ms
+            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) < proof_window_ms
             && delivery_proof_is_timely(self.get_smooth_rtt_ms(), self.delay_budget_ms);
         if !proof_fresh {
             self.stall_recovery_since_ms = 0;

@@ -555,6 +555,43 @@ mod tests {
     }
 
     #[test]
+    fn test_keepalive_does_not_slip_a_tick_on_service_jitter() {
+        // Housekeeping stamps the keepalive with the time its 1 s tick was
+        // serviced. The next tick serviced a few ms earlier relative to its
+        // deadline still owes a keepalive, or the echo gap doubles to 2 s.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let now = now_ms();
+
+        conn.last_keepalive_sent = Some(now - IDLE_TIME * 1000 + 3);
+        assert!(conn.needs_keepalive(now));
+        // Half a tick is still too soon.
+        conn.last_keepalive_sent = Some(now - 400);
+        assert!(!conn.needs_keepalive(now));
+    }
+
+    #[test]
+    fn test_unarmed_keepalive_echo_is_still_delivery_proof() {
+        // The RTT probe is armed only after 3 s without a sample; the echo
+        // proves the path either way, and the stall latch rejoins on it.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let now = now_ms();
+
+        conn.rtt.last_rtt_measurement_ms = now;
+        let echo = conn.keepalive_packet(now);
+        assert!(!conn.rtt.waiting_for_keepalive_response);
+
+        conn.handle_keepalive_echo(&echo, now + 20);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, now + 20);
+
+        // A bare echo without our timestamp proves nothing.
+        conn.last_ack_or_rtt_sample_ms = 0;
+        conn.handle_keepalive_echo(&SRTLA_TYPE_KEEPALIVE.to_be_bytes(), now + 40);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 0);
+    }
+
+    #[test]
     fn test_rtt_measurement_needs() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());

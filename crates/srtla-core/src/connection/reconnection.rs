@@ -19,8 +19,9 @@ const SLOW_RETRY_DELAY_MS: u64 = 5000;
 /// in the sender), but each attempt is stamped with the time its tick was
 /// serviced. When one tick is serviced a few ms later than the next, a strict
 /// `elapsed >= 1000` check fails by a hair and the retry slips a whole tick.
-/// Half a tick of slack keeps retries on the tick they are due.
-const TICK_SLACK_MS: u64 = 500;
+/// Half a tick of slack keeps retries on the tick they are due. The keepalive
+/// cadence has the same shape and shares it.
+pub(super) const TICK_SLACK_MS: u64 = 500;
 
 /// Reconnection state and retry pacing
 #[derive(Debug, Clone, Default)]

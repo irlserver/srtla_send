@@ -36,6 +36,19 @@ const GRAD_TRIP_SIGMA: f64 = 3.0;
 /// still needs a meaningful absolute gradient (5% of baseline) to trip.
 const GRAD_TRIP_FLOOR_FRACTION: f64 = 0.05;
 
+fn plausible_round_trip(sent_ms: u64, now_ms: u64) -> Option<u64> {
+    let rtt = now_ms.saturating_sub(sent_ms);
+    (rtt != 0 && rtt <= MAX_PLAUSIBLE_RTT_MS).then_some(rtt)
+}
+
+/// Round trip carried by an echoed keepalive, whether or not a tracker armed
+/// a measurement for it. Every keepalive carries its own send timestamp, so
+/// any echo is a genuine round trip; `None` for a bare or malformed echo, or
+/// one that fails the same plausibility guard as [`RttTracker::record_round_trip`].
+pub fn keepalive_echo_rtt_ms(data: &[u8], now_ms: u64) -> Option<u64> {
+    plausible_round_trip(extract_keepalive_timestamp(data)?, now_ms)
+}
+
 /// RTT measurement and tracking.
 ///
 /// Uses a 2-state Kalman filter [value, velocity] as the primary smooth RTT
@@ -124,10 +137,7 @@ impl RttTracker {
     /// reply or a future timestamp from clock skew would seed `rtt_min_ms`
     /// at zero and make the link look infinitely fast.
     pub fn record_round_trip(&mut self, sent_ms: u64, now_ms: u64) -> Option<u64> {
-        let rtt = now_ms.saturating_sub(sent_ms);
-        if rtt == 0 || rtt > MAX_PLAUSIBLE_RTT_MS {
-            return None;
-        }
+        let rtt = plausible_round_trip(sent_ms, now_ms)?;
         self.update_estimate(rtt, now_ms);
         Some(rtt)
     }

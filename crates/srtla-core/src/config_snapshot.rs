@@ -33,6 +33,17 @@ pub const STALL_STALE_RTT_MULT: u64 = 4;
 /// retransmission pause never gates a link.
 pub const STALL_STALE_FLOOR_MS: u64 = 1000;
 
+/// Floor (ms) on the freshness window a stall-latched link's delivery proof is
+/// judged against while it serves its rejoin dwell. A latched link carries no
+/// payload, so the only proof guaranteed to keep arriving is the keepalive
+/// echo, once per `IDLE_TIME`. The bare staleness floor
+/// ([`STALL_STALE_FLOOR_MS`]) equals that period, so judged on it each echo
+/// lands just after the previous one went stale and a low-RTT link can never
+/// finish its dwell. Half a housekeeping tick of headroom absorbs tick jitter
+/// and RTT variation between consecutive echoes. Engaging the latch still uses
+/// the bare staleness window.
+pub const STALL_REJOIN_PROOF_FLOOR_MS: u64 = srtla_protocol::IDLE_TIME * 1000 + 500;
+
 /// Rejoin dwell as a multiple of the effective staleness window. A gated link
 /// must hold continuous fresh delivery proof this long before it rejoins the
 /// rotation: quick to drop, conservative to rejoin, so a still-marginal link
