@@ -1206,4 +1206,49 @@ mod tests {
             "the duplicate never leaks onto another uplink"
         );
     }
+
+    #[tokio::test]
+    async fn srt_ack_field_is_the_first_sequence_still_owed() {
+        // Issue #25: an SRT ACK carries last-received + 1. That packet is
+        // usually still in flight, so reading the field as delivered took its
+        // few-millisecond age as a round trip (6-8 ms on 70 ms links) and
+        // pruned it from the in-flight count.
+        use srtla_core::connection::SrtlaIncoming;
+
+        use crate::sender::process_connection_events;
+
+        let mut conns = create_test_connections(1).await;
+        let now = now_ms();
+        let conn_id = conns[0].conn_id;
+        let mut seq_tracker = SequenceTracker::new();
+        for (seq, sent) in [(100u32, now - 70), (101, now - 2)] {
+            conns[0].register_packet(seq as i32, sent);
+            seq_tracker.insert(seq, conn_id, sent);
+        }
+
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let incoming = SrtlaIncoming {
+            ack_numbers: smallvec::smallvec![101],
+            read_any: true,
+            ..Default::default()
+        };
+        process_connection_events(
+            0,
+            &mut conns,
+            None,
+            &listener,
+            &seq_tracker,
+            false,
+            incoming,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(conns[0].in_flight_packets, 1, "101 is still owed");
+        let rtt = conns[0].get_smooth_rtt_ms();
+        assert!(
+            (69.0..=80.0).contains(&rtt),
+            "the sample must come from 100, the last acknowledged packet, got {rtt}"
+        );
+    }
 }
