@@ -17,6 +17,8 @@ pub mod selection;
 // Serial (wrap-aware) arithmetic for 31-bit SRT sequence numbers.
 pub mod seq;
 pub mod utils;
+// Time-windowed running minimum (BBR-style), used for the RTT floor.
+pub mod windowed_min;
 
 // Test helpers (socket-free connection builders + tokio clock seam) - available
 // when the test-internals feature is enabled so the parent crate can drive core

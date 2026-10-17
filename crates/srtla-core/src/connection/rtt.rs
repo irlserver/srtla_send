@@ -1,17 +1,16 @@
-use std::collections::VecDeque;
-
 use srtla_protocol::extract_keepalive_timestamp;
 use tracing::debug;
 
 use crate::ewma::Ewma;
 use crate::kalman::{KalmanConfig, KalmanFilter};
+use crate::windowed_min::WindowedMin;
 
-/// Number of samples in the fast sliding window (~3s at 300ms keepalive interval).
-const FAST_WINDOW_SAMPLES: usize = 10;
-/// Number of samples in the slow sliding window (~30s at 300ms keepalive interval).
-const SLOW_WINDOW_SAMPLES: usize = 100;
-/// Number of samples in the min-RTT sample filter.
-const RTT_SAMPLE_FILTER_SIZE: usize = 15;
+/// Span of the fast minimum-RTT window: the recent propagation floor.
+const FAST_WINDOW_MS: u64 = 3_000;
+/// Span of the slow minimum-RTT window: the long-term floor. Long enough that
+/// a link carrying a standing queue still remembers the floor it had before
+/// the queue built, which is what the BDP in-flight cap is sized from.
+const SLOW_WINDOW_MS: u64 = 30_000;
 
 /// Upper bound on a round trip we are willing to believe. Anything longer is
 /// a clock jump or a packet-log entry that outlived its send, not a path
@@ -37,6 +36,19 @@ const GRAD_TRIP_SIGMA: f64 = 3.0;
 /// still needs a meaningful absolute gradient (5% of baseline) to trip.
 const GRAD_TRIP_FLOOR_FRACTION: f64 = 0.05;
 
+fn plausible_round_trip(sent_ms: u64, now_ms: u64) -> Option<u64> {
+    let rtt = now_ms.saturating_sub(sent_ms);
+    (rtt != 0 && rtt <= MAX_PLAUSIBLE_RTT_MS).then_some(rtt)
+}
+
+/// Round trip carried by an echoed keepalive, whether or not a tracker armed
+/// a measurement for it. Every keepalive carries its own send timestamp, so
+/// any echo is a genuine round trip; `None` for a bare or malformed echo, or
+/// one that fails the same plausibility guard as [`RttTracker::record_round_trip`].
+pub fn keepalive_echo_rtt_ms(data: &[u8], now_ms: u64) -> Option<u64> {
+    plausible_round_trip(extract_keepalive_timestamp(data)?, now_ms)
+}
+
 /// RTT measurement and tracking.
 ///
 /// Uses a 2-state Kalman filter [value, velocity] as the primary smooth RTT
@@ -57,20 +69,16 @@ pub struct RttTracker {
     pub rtt_avg_delta: Ewma,
     /// Dual-window minimum RTT baseline. Computed as min(fast_window_min, slow_window_min).
     pub rtt_min_ms: f64,
-    /// Minimum of the fast (~3s) window only. The recent propagation floor.
+    /// Minimum over the last [`FAST_WINDOW_MS`] only. The recent propagation floor.
     pub rtt_min_fast_ms: f64,
-    /// Minimum of the slow (~30s) window only. The long-term floor.
+    /// Minimum over the last [`SLOW_WINDOW_MS`] only. The long-term floor.
     pub rtt_min_slow_ms: f64,
     /// Mean absolute successive difference of RTT (ms): the jitter-immune
     /// queue-build detector compares the floor gradient against it.
     pub rtt_masd_ms: f64,
     pub estimated_rtt_ms: f64,
-    /// Fast sliding window for minimum RTT tracking (~3s).
-    rtt_min_fast_window: VecDeque<f64>,
-    /// Slow sliding window for minimum RTT tracking (~30s).
-    rtt_min_slow_window: VecDeque<f64>,
-    /// 15-sample min filter applied before feeding dual-window baseline.
-    rtt_sample_filter: VecDeque<f64>,
+    rtt_min_fast_window: WindowedMin,
+    rtt_min_slow_window: WindowedMin,
 }
 
 impl Default for RttTracker {
@@ -88,9 +96,8 @@ impl Default for RttTracker {
             rtt_min_slow_ms: 200.0,
             rtt_masd_ms: 0.0,
             estimated_rtt_ms: 0.0,
-            rtt_min_fast_window: VecDeque::with_capacity(FAST_WINDOW_SAMPLES),
-            rtt_min_slow_window: VecDeque::with_capacity(SLOW_WINDOW_SAMPLES),
-            rtt_sample_filter: VecDeque::with_capacity(RTT_SAMPLE_FILTER_SIZE),
+            rtt_min_fast_window: WindowedMin::new(FAST_WINDOW_MS),
+            rtt_min_slow_window: WindowedMin::new(SLOW_WINDOW_MS),
         }
     }
 }
@@ -111,9 +118,8 @@ impl RttTracker {
         self.estimated_rtt_ms = 0.0;
         self.last_keepalive_sent_ms = 0;
         self.waiting_for_keepalive_response = false;
-        self.rtt_min_fast_window.clear();
-        self.rtt_min_slow_window.clear();
-        self.rtt_sample_filter.clear();
+        self.rtt_min_fast_window.reset();
+        self.rtt_min_slow_window.reset();
     }
 
     /// Fold one round trip into the smoothed RTT, rejecting samples that
@@ -131,10 +137,7 @@ impl RttTracker {
     /// reply or a future timestamp from clock skew would seed `rtt_min_ms`
     /// at zero and make the link look infinitely fast.
     pub fn record_round_trip(&mut self, sent_ms: u64, now_ms: u64) -> Option<u64> {
-        let rtt = now_ms.saturating_sub(sent_ms);
-        if rtt == 0 || rtt > MAX_PLAUSIBLE_RTT_MS {
-            return None;
-        }
+        let rtt = plausible_round_trip(sent_ms, now_ms)?;
         self.update_estimate(rtt, now_ms);
         Some(rtt)
     }
@@ -142,28 +145,17 @@ impl RttTracker {
     pub fn update_estimate(&mut self, rtt_ms: u64, now_ms: u64) {
         let current_rtt = rtt_ms as f64;
 
-        // Min-RTT sample filter: smooth jitter before feeding baseline tracker.
-        self.rtt_sample_filter.push_back(current_rtt);
-        while self.rtt_sample_filter.len() > RTT_SAMPLE_FILTER_SIZE {
-            self.rtt_sample_filter.pop_front();
-        }
-        let filtered_rtt = self
-            .rtt_sample_filter
-            .iter()
-            .copied()
-            .fold(f64::MAX, f64::min);
-
         // Initialize on first measurement
         if !self.kalman_rtt.is_initialized() {
             self.kalman_rtt.update(current_rtt);
             self.prev_rtt_ms = current_rtt;
             self.estimated_rtt_ms = current_rtt;
-            self.rtt_min_ms = filtered_rtt;
-            self.rtt_min_fast_ms = filtered_rtt;
-            self.rtt_min_slow_ms = filtered_rtt;
+            self.rtt_min_ms = current_rtt;
+            self.rtt_min_fast_ms = current_rtt;
+            self.rtt_min_slow_ms = current_rtt;
             self.rtt_masd_ms = 0.0;
-            self.rtt_min_fast_window.push_back(filtered_rtt);
-            self.rtt_min_slow_window.push_back(filtered_rtt);
+            self.rtt_min_fast_window.update(now_ms, current_rtt);
+            self.rtt_min_slow_window.update(now_ms, current_rtt);
             self.last_rtt_measurement_ms = now_ms;
             return;
         }
@@ -182,28 +174,13 @@ impl RttTracker {
             self.rtt_masd_ms * (1.0 - RTT_MASD_ALPHA) + delta_rtt.abs() * RTT_MASD_ALPHA;
         self.prev_rtt_ms = current_rtt;
 
-        // Dual-window minimum RTT baseline tracking (fed with filtered RTT).
-        // Fast window (~3s) adapts quickly to cellular handovers.
-        // Slow window (~30s) retains the true floor during stable periods.
+        // Dual-window minimum RTT baseline tracking, windowed by time because
+        // the sample rate follows the link's ACK rate (see `windowed_min`).
+        // Fast window adapts quickly to cellular handovers.
+        // Slow window retains the true floor during stable periods.
         // Baseline = min(fast_min, slow_min).
-        self.rtt_min_fast_window.push_back(filtered_rtt);
-        while self.rtt_min_fast_window.len() > FAST_WINDOW_SAMPLES {
-            self.rtt_min_fast_window.pop_front();
-        }
-        self.rtt_min_slow_window.push_back(filtered_rtt);
-        while self.rtt_min_slow_window.len() > SLOW_WINDOW_SAMPLES {
-            self.rtt_min_slow_window.pop_front();
-        }
-        let fast_min = self
-            .rtt_min_fast_window
-            .iter()
-            .copied()
-            .fold(f64::MAX, f64::min);
-        let slow_min = self
-            .rtt_min_slow_window
-            .iter()
-            .copied()
-            .fold(f64::MAX, f64::min);
+        let fast_min = self.rtt_min_fast_window.update(now_ms, current_rtt);
+        let slow_min = self.rtt_min_slow_window.update(now_ms, current_rtt);
         self.rtt_min_fast_ms = fast_min;
         self.rtt_min_slow_ms = slow_min;
         self.rtt_min_ms = fast_min.min(slow_min);
@@ -306,25 +283,32 @@ mod tests {
     // Fixed virtual clock: injected `now` means these tests read no real clock.
     const T0: u64 = 1_000_000;
 
+    /// Feed `rtt` every `step_ms` for `span_ms`, starting after `t`. Returns
+    /// the clock at the last sample.
+    fn feed(tracker: &mut RttTracker, t: u64, rtt: u64, step_ms: u64, span_ms: u64) -> u64 {
+        let mut now = t;
+        while now < t + span_ms {
+            now += step_ms;
+            tracker.update_estimate(rtt, now);
+        }
+        now
+    }
+
     #[test]
     fn test_dual_window_adapts_to_handover() {
         let mut tracker = RttTracker::default();
 
         // Establish baseline at 50ms
-        for _ in 0..FAST_WINDOW_SAMPLES {
-            tracker.update_estimate(50, T0);
-        }
+        let t = feed(&mut tracker, T0, 50, 100, 1_000);
         assert!(
             (tracker.rtt_min_ms - 50.0).abs() < 1.0,
             "baseline should be ~50ms, got {}",
             tracker.rtt_min_ms
         );
 
-        // Simulate cellular handover: RTT jumps to 120ms.
-        let flush_count = RTT_SAMPLE_FILTER_SIZE + SLOW_WINDOW_SAMPLES;
-        for _ in 0..flush_count {
-            tracker.update_estimate(120, T0);
-        }
+        // Simulate cellular handover: RTT jumps to 120ms for longer than the
+        // slow window.
+        feed(&mut tracker, t, 120, 100, SLOW_WINDOW_MS + 1_000);
 
         assert!(
             (tracker.rtt_min_ms - 120.0).abs() < 1.0,
@@ -338,10 +322,10 @@ mod tests {
         let mut tracker = RttTracker::default();
 
         tracker.update_estimate(100, T0);
-        tracker.update_estimate(80, T0);
-        tracker.update_estimate(60, T0);
-        tracker.update_estimate(90, T0);
-        tracker.update_estimate(70, T0);
+        tracker.update_estimate(80, T0 + 10);
+        tracker.update_estimate(60, T0 + 20);
+        tracker.update_estimate(90, T0 + 30);
+        tracker.update_estimate(70, T0 + 40);
 
         assert!(
             (tracker.rtt_min_ms - 60.0).abs() < 1.0,
@@ -354,16 +338,14 @@ mod tests {
     fn test_dual_window_reset_clears_windows() {
         let mut tracker = RttTracker::default();
 
-        for _ in 0..20 {
-            tracker.update_estimate(50, T0);
-        }
+        let t = feed(&mut tracker, T0, 50, 10, 200);
         assert!((tracker.rtt_min_ms - 50.0).abs() < 1.0);
 
         tracker.reset();
 
         assert!((tracker.rtt_min_ms - 200.0).abs() < f64::EPSILON);
 
-        tracker.update_estimate(80, T0);
+        tracker.update_estimate(80, t + 10);
         assert!(
             (tracker.rtt_min_ms - 80.0).abs() < 1.0,
             "after reset + new measurement, baseline should be 80ms, got {}",
@@ -377,25 +359,47 @@ mod tests {
 
         tracker.update_estimate(20, T0);
 
-        for _ in 0..FAST_WINDOW_SAMPLES {
-            tracker.update_estimate(100, T0);
-        }
+        let t = feed(&mut tracker, T0, 100, 100, FAST_WINDOW_MS + 1_000);
 
+        assert!(
+            (tracker.rtt_min_fast_ms - 100.0).abs() < 1.0,
+            "fast window should have forgotten the 20ms sample, got {}",
+            tracker.rtt_min_fast_ms
+        );
         assert!(
             (tracker.rtt_min_ms - 20.0).abs() < 1.0,
             "slow window should still hold 20ms minimum, got {}",
             tracker.rtt_min_ms
         );
 
-        let flush_count = RTT_SAMPLE_FILTER_SIZE + SLOW_WINDOW_SAMPLES;
-        for _ in 0..flush_count {
-            tracker.update_estimate(100, T0);
-        }
+        feed(&mut tracker, t, 100, 100, SLOW_WINDOW_MS);
 
         assert!(
             (tracker.rtt_min_ms - 100.0).abs() < 1.0,
-            "after both windows filled, baseline should be 100ms, got {}",
+            "after both windows expired, baseline should be 100ms, got {}",
             tracker.rtt_min_ms
+        );
+    }
+
+    #[test]
+    fn test_ack_rate_samples_keep_the_floor_under_a_standing_queue() {
+        // Issue #25: per-packet SRTLA ACKs feed hundreds of samples a second.
+        // A bloated link that settles into a 600ms standing queue must keep
+        // reporting the propagation floor it measured before the queue built,
+        // or the BDP in-flight cap grows with the queue it should be bounding.
+        let mut tracker = RttTracker::default();
+        let t = feed(&mut tracker, T0, 40, 5, 500);
+        feed(&mut tracker, t, 600, 2, 10_000);
+        assert!(
+            (tracker.rtt_min_ms - 40.0).abs() < 1.0,
+            "rtt_min must stay at the 40ms floor, got {}",
+            tracker.rtt_min_ms
+        );
+        assert!(
+            tracker.queue_building_suspected(),
+            "a standing queue at ACK rate must trip the detector (gradient={:.1}, masd={:.1})",
+            tracker.rtt_gradient_ms(),
+            tracker.rtt_masd_ms
         );
     }
 
@@ -405,9 +409,9 @@ mod tests {
         // High-amplitude jitter around a stable floor: both the fast and
         // slow minima sit on the 40ms floor, so the gradient stays ~0
         // even though MASD is large.
-        for i in 0..80 {
+        for i in 0..80u64 {
             let rtt = if i % 2 == 0 { 40 } else { 60 };
-            tracker.update_estimate(rtt, T0);
+            tracker.update_estimate(rtt, T0 + i * 100);
         }
         assert!(
             !tracker.queue_building_suspected(),
@@ -421,9 +425,7 @@ mod tests {
     fn test_queue_building_trips_on_standing_queue() {
         let mut tracker = RttTracker::default();
         // Establish a low long-term floor.
-        for _ in 0..30 {
-            tracker.update_estimate(20, T0);
-        }
+        let mut t = feed(&mut tracker, T0, 20, 100, 3_000);
         assert!(!tracker.queue_building_suspected());
         // Steady ramp (small successive steps -> low MASD) that lifts the
         // recent floor well above the long-term floor still held by the
@@ -431,7 +433,8 @@ mod tests {
         let mut rtt = 20u64;
         for _ in 0..60 {
             rtt += 2;
-            tracker.update_estimate(rtt, T0);
+            t += 100;
+            tracker.update_estimate(rtt, t);
         }
         assert!(
             tracker.queue_building_suspected(),

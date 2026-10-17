@@ -154,19 +154,7 @@ pub async fn process_uplink_packet(
                 .forward_to_client
                 .push(SmallVec::from_slice_copy(data));
         } else if pt == SRTLA_TYPE_KEEPALIVE {
-            if conn
-                .rtt
-                .handle_keepalive_response(data, &conn.label, now)
-                .is_some()
-            {
-                conn.record_rtt_probe();
-                // Delivery proof for `stall_deselect`: a completed keepalive
-                // round-trip proves this link's path is alive even while no
-                // data ACKs are landing. Pairs with the earned-ACK site
-                // (see `ack_nak.rs`); together they let a recovered link
-                // un-gate itself without the scheduler probing blindly.
-                conn.last_ack_or_rtt_sample_ms = now;
-            }
+            conn.handle_keepalive_echo(data, now);
         } else {
             incoming
                 .forward_to_client

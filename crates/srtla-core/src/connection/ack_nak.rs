@@ -26,6 +26,10 @@ impl SrtlaConnection {
 
     /// Handle SRT cumulative ACK - clears all packets at or before `ack`.
     ///
+    /// `ack` is the last sequence the receiver acknowledged, not the ACK's
+    /// wire field, which names the first sequence still owed; convert with
+    /// [`crate::seq::srt_ack_last_acked`].
+    ///
     /// "At or before" is meant in *serial* order (mod 2^31, see [`crate::seq`]):
     /// SRT sequence numbers are 31 bits and wrap from a randomized start, so
     /// numeric comparison would break for one full window every time a stream

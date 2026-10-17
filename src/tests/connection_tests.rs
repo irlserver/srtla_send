@@ -555,6 +555,43 @@ mod tests {
     }
 
     #[test]
+    fn test_keepalive_does_not_slip_a_tick_on_service_jitter() {
+        // Housekeeping stamps the keepalive with the time its 1 s tick was
+        // serviced. The next tick serviced a few ms earlier relative to its
+        // deadline still owes a keepalive, or the echo gap doubles to 2 s.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let now = now_ms();
+
+        conn.last_keepalive_sent = Some(now - IDLE_TIME * 1000 + 3);
+        assert!(conn.needs_keepalive(now));
+        // Half a tick is still too soon.
+        conn.last_keepalive_sent = Some(now - 400);
+        assert!(!conn.needs_keepalive(now));
+    }
+
+    #[test]
+    fn test_unarmed_keepalive_echo_is_still_delivery_proof() {
+        // The RTT probe is armed only after 3 s without a sample; the echo
+        // proves the path either way, and the stall latch rejoins on it.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let now = now_ms();
+
+        conn.rtt.last_rtt_measurement_ms = now;
+        let echo = conn.keepalive_packet(now);
+        assert!(!conn.rtt.waiting_for_keepalive_response);
+
+        conn.handle_keepalive_echo(&echo, now + 20);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, now + 20);
+
+        // A bare echo without our timestamp proves nothing.
+        conn.last_ack_or_rtt_sample_ms = 0;
+        conn.handle_keepalive_echo(&SRTLA_TYPE_KEEPALIVE.to_be_bytes(), now + 40);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 0);
+    }
+
+    #[test]
     fn test_rtt_measurement_needs() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
@@ -1167,6 +1204,51 @@ mod tests {
         assert_eq!(
             connections[1].congestion.nak_count, 0,
             "the duplicate never leaks onto another uplink"
+        );
+    }
+
+    #[tokio::test]
+    async fn srt_ack_field_is_the_first_sequence_still_owed() {
+        // Issue #25: an SRT ACK carries last-received + 1. That packet is
+        // usually still in flight, so reading the field as delivered took its
+        // few-millisecond age as a round trip (6-8 ms on 70 ms links) and
+        // pruned it from the in-flight count.
+        use srtla_core::connection::SrtlaIncoming;
+
+        use crate::sender::process_connection_events;
+
+        let mut conns = create_test_connections(1).await;
+        let now = now_ms();
+        let conn_id = conns[0].conn_id;
+        let mut seq_tracker = SequenceTracker::new();
+        for (seq, sent) in [(100u32, now - 70), (101, now - 2)] {
+            conns[0].register_packet(seq as i32, sent);
+            seq_tracker.insert(seq, conn_id, sent);
+        }
+
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let incoming = SrtlaIncoming {
+            ack_numbers: smallvec::smallvec![101],
+            read_any: true,
+            ..Default::default()
+        };
+        process_connection_events(
+            0,
+            &mut conns,
+            None,
+            &listener,
+            &seq_tracker,
+            false,
+            incoming,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(conns[0].in_flight_packets, 1, "101 is still owed");
+        let rtt = conns[0].get_smooth_rtt_ms();
+        assert!(
+            (69.0..=80.0).contains(&rtt),
+            "the sample must come from 100, the last acknowledged packet, got {rtt}"
         );
     }
 }

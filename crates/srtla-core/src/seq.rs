@@ -76,6 +76,26 @@ pub fn seq_next(seq: i32) -> i32 {
     ((seq as u32).wrapping_add(1) & (SEQ_MASK as u32)) as i32
 }
 
+/// The sequence preceding `seq`, wrapping `0` back to `0x7fff_ffff`.
+#[inline]
+#[must_use]
+pub fn seq_prev(seq: i32) -> i32 {
+    ((seq as u32).wrapping_sub(1) & (SEQ_MASK as u32)) as i32
+}
+
+/// The last sequence an SRT cumulative ACK acknowledges.
+///
+/// The ACK's sequence field is the first sequence the receiver has *not* got
+/// yet (last received + 1), so the packet it names is still owed, and usually
+/// still in flight. Taking it as delivered drops a live packet from the
+/// in-flight count and, worse, turns its few-millisecond age into an RTT
+/// sample far below the path's real round trip.
+#[inline]
+#[must_use]
+pub fn srt_ack_last_acked(ack_field: u32) -> i32 {
+    seq_prev(seq_normalize(ack_field as i32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +163,22 @@ mod tests {
         assert_eq!(seq_next(SEQ_MASK - 1), SEQ_MASK);
         assert_eq!(seq_next(SEQ_MASK), 0);
         assert_eq!(seq_next(seq_next(SEQ_MASK)), 1);
+    }
+
+    #[test]
+    fn prev_never_leaves_the_space() {
+        assert_eq!(seq_prev(1), 0);
+        assert_eq!(seq_prev(0), SEQ_MASK);
+        assert_eq!(seq_prev(seq_next(SEQ_MASK)), SEQ_MASK);
+    }
+
+    #[test]
+    fn srt_ack_field_names_the_first_sequence_still_owed() {
+        assert_eq!(srt_ack_last_acked(101), 100);
+        // The first ACK after the wrap acknowledges the last pre-wrap packet.
+        assert_eq!(srt_ack_last_acked(0), SEQ_MASK);
+        // A corrupt MSB is masked before stepping back.
+        assert_eq!(srt_ack_last_acked(0x8000_0065), 100);
     }
 
     #[test]

@@ -499,6 +499,56 @@ mod tests {
     }
 
     #[test]
+    fn keepalive_echoes_alone_release_a_low_rtt_link() {
+        // Issue #25: a latched link carries no payload, so its steady proof is
+        // one keepalive echo per second. On a 20 ms link the bare staleness
+        // window is its 1 s floor, and each echo used to land just after the
+        // previous one went stale, so the dwell never completed.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        let c = &mut conns[0];
+
+        set_rtt(c, 20.0);
+        let stale = c.effective_stall_stale_ms(STALL_ACK_STALE_MS);
+        assert_eq!(stale, srtla_core::config_snapshot::STALL_STALE_FLOOR_MS);
+        make_stalled(c, now);
+        c.update_stall_latch(now, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+        assert!(c.stall_latched(), "precondition: the latch engaged");
+        c.in_flight_packets = 0;
+
+        let base_dwell = stale * srtla_core::config_snapshot::STALL_REJOIN_DWELL_MULT;
+        let mut next_keepalive = now;
+        let mut pending_echo: Option<([u8; srtla_protocol::SRTLA_KEEPALIVE_EXT_LEN], u64)> = None;
+        let mut k = 0u64;
+        let mut t = now;
+        while t <= now + base_dwell * 3 {
+            t += 1;
+            if t >= next_keepalive {
+                // Each keepalive leaves a few ms after its tick deadline and
+                // each round trip varies by a few ms, as on any real path, so
+                // consecutive echoes are not exactly one period apart.
+                let sent = t + (k % 3) * 4;
+                let rtt = 20 + (k % 2) * 3;
+                pending_echo = Some((c.keepalive_packet(sent), sent + rtt));
+                next_keepalive += 1000;
+                k += 1;
+            }
+            if let Some((echo, at)) = pending_echo
+                && t >= at
+            {
+                c.handle_keepalive_echo(&echo, t);
+                pending_echo = None;
+            }
+            c.update_stall_latch(t, STALL_MIN_IN_FLIGHT_PACKETS, STALL_ACK_STALE_MS);
+            if !c.stall_latched() {
+                return;
+            }
+        }
+        panic!("a link answering every keepalive must rejoin within three dwells");
+    }
+
+    #[test]
     fn proof_from_a_link_slower_than_the_buffer_does_not_count() {
         // 2s round trip is 1s one way. Against a 500ms receive buffer nothing
         // this link delivers can be played, so the fresh proof it keeps
