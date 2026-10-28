@@ -159,6 +159,26 @@ pub fn select_best_quality_idx(
     best_idx
 }
 
+/// The best-path override as the packet handler applies it: the link
+/// [`select_best_quality_idx`] would pick, but only under enhanced scheduling.
+///
+/// Classic mode never consults the quality cache. Only enhanced selection
+/// refreshes it, so in classic mode the multipliers are either the default 1.0
+/// on every link or values left over from before a runtime switch from
+/// enhanced to classic. Ranking on either would override the classic scheduler
+/// (and the operator's link weights) with stale or meaningless data, so in
+/// classic mode this returns `None` and the scheduler's choice stands.
+pub fn select_best_path_override_idx(
+    conns: &[crate::connection::SrtlaConnection],
+    now_ms: u64,
+    mode: crate::mode::SchedulingMode,
+) -> Option<usize> {
+    if mode.is_classic() {
+        return None;
+    }
+    select_best_quality_idx(conns, now_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +275,34 @@ mod tests {
         // whatever its index.
         conns[1].quality_cache.multiplier = 1.1;
         assert_eq!(select_best_quality_idx(&conns, now), Some(1));
+    }
+
+    #[test]
+    fn best_path_override_is_off_in_classic_mode_even_with_stale_multipliers() {
+        use crate::mode::SchedulingMode;
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = crate::utils::now_ms();
+
+        // Multipliers left unequal by enhanced selection before a runtime
+        // switch to classic: no tie, so the quality ranking alone would pick
+        // link 1.
+        conns[0].quality_cache.multiplier = 0.6;
+        conns[1].quality_cache.multiplier = 1.1;
+        assert_eq!(select_best_quality_idx(&conns, now), Some(1));
+
+        // Classic never consults the cache: the scheduler's choice stands.
+        assert_eq!(
+            select_best_path_override_idx(&conns, now, SchedulingMode::Classic),
+            None
+        );
+        // Enhanced still prefers the better link.
+        assert_eq!(
+            select_best_path_override_idx(&conns, now, SchedulingMode::Enhanced),
+            Some(1)
+        );
     }
 
     #[test]
