@@ -353,6 +353,12 @@ pub async fn handle_srt_packet(
             //   routing has mostly moved off it.
             //
             // Only data packets have seq != None (control packets have MSB set).
+            //
+            // `select_best_quality_idx` declines (None) when there is no
+            // quality information to rank by — classic mode, or every link
+            // equally good — so the override only fires when one path is
+            // actually better, and otherwise these packets are scheduled like
+            // any other (window / in-flight, times the link weight).
             if seq.is_some()
                 && (critical_window.is_critical_now(packet_time_ms)
                     || srtla_protocol::is_srt_data_retransmit(pkt))
