@@ -93,9 +93,20 @@ impl CriticalWindow {
 /// Pick the highest-quality connection for a packet that lands inside a
 /// critical window. Among connected, schedulable links that the scheduler has
 /// not held out of the payload rotation, returns the one with the best quality
-/// multiplier; `None` if there is no such link (caller falls back to normal
-/// selection). This is the action taken while
+/// multiplier; `None` if there is no such link, or if there is nothing to rank
+/// by (caller falls back to normal selection). This is the action taken while
 /// [`CriticalWindow::is_critical_now`] is true.
+///
+/// "Nothing to rank by" means two or more eligible links all carry the same
+/// multiplier. That is always the case in classic mode, which never refreshes
+/// the quality cache (only enhanced selection writes it), so every link sits at
+/// the default 1.0. Picking a winner there would be decided by the strict `>`
+/// below, i.e. the lowest index: every retransmit and every keyframe-window
+/// packet would go to link 0 whatever its window, in-flight count or operator
+/// weight. Returning `None` hands those packets to the normal scheduler, which
+/// is what the C srtla_send and Moblin do — a retransmit is scheduled like any
+/// other packet. The same holds in enhanced mode when every link is equally
+/// good: there is no best path to prefer, so the scheduler decides.
 ///
 /// Links the scheduler has gated — stall-gated black holes, and links held out
 /// for being late — are skipped, and that exclusion matters more here than
@@ -116,6 +127,9 @@ pub fn select_best_quality_idx(
 ) -> Option<usize> {
     let mut best_idx = None;
     let mut best_quality = f64::NEG_INFINITY;
+    let mut first_quality: Option<f64> = None;
+    let mut all_equal = true;
+    let mut eligible = 0usize;
 
     for (i, conn) in conns.iter().enumerate() {
         if !conn.connected
@@ -127,13 +141,42 @@ pub fn select_best_quality_idx(
             continue;
         }
         let q = conn.quality_cache.multiplier;
+        eligible += 1;
+        match first_quality {
+            None => first_quality = Some(q),
+            Some(f) if f != q => all_equal = false,
+            Some(_) => {}
+        }
         if q > best_quality {
             best_quality = q;
             best_idx = Some(i);
         }
     }
 
+    if eligible > 1 && all_equal {
+        return None;
+    }
     best_idx
+}
+
+/// The best-path override as the packet handler applies it: the link
+/// [`select_best_quality_idx`] would pick, but only under enhanced scheduling.
+///
+/// Classic mode never consults the quality cache. Only enhanced selection
+/// refreshes it, so in classic mode the multipliers are either the default 1.0
+/// on every link or values left over from before a runtime switch from
+/// enhanced to classic. Ranking on either would override the classic scheduler
+/// (and the operator's link weights) with stale or meaningless data, so in
+/// classic mode this returns `None` and the scheduler's choice stands.
+pub fn select_best_path_override_idx(
+    conns: &[crate::connection::SrtlaConnection],
+    now_ms: u64,
+    mode: crate::mode::SchedulingMode,
+) -> Option<usize> {
+    if mode.is_classic() {
+        return None;
+    }
+    select_best_quality_idx(conns, now_ms)
 }
 
 #[cfg(test)]
@@ -198,6 +241,68 @@ mod tests {
     fn best_quality_idx_empty() {
         let conns: Vec<crate::connection::SrtlaConnection> = vec![];
         assert_eq!(select_best_quality_idx(&conns, 0), None);
+    }
+
+    #[test]
+    fn best_quality_idx_declines_when_every_link_has_the_default_multiplier() {
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let conns = rt.block_on(create_test_connections(3));
+        let now = crate::utils::now_ms();
+
+        // Classic mode never refreshes the quality cache, so every link sits
+        // at the default multiplier. A winner here would be "lowest index",
+        // which overrides the scheduler (and the operator's link weights) for
+        // every retransmit and keyframe-window packet.
+        assert!(conns.iter().all(|c| c.quality_cache.multiplier == 1.0));
+        assert_eq!(select_best_quality_idx(&conns, now), None);
+    }
+
+    #[test]
+    fn best_quality_idx_declines_on_a_tie_but_ranks_one_better_link() {
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = crate::utils::now_ms();
+
+        conns[0].quality_cache.multiplier = 0.9;
+        conns[1].quality_cache.multiplier = 0.9;
+        assert_eq!(select_best_quality_idx(&conns, now), None);
+
+        // Enhanced mode with real quality information: the better link wins,
+        // whatever its index.
+        conns[1].quality_cache.multiplier = 1.1;
+        assert_eq!(select_best_quality_idx(&conns, now), Some(1));
+    }
+
+    #[test]
+    fn best_path_override_is_off_in_classic_mode_even_with_stale_multipliers() {
+        use crate::mode::SchedulingMode;
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = crate::utils::now_ms();
+
+        // Multipliers left unequal by enhanced selection before a runtime
+        // switch to classic: no tie, so the quality ranking alone would pick
+        // link 1.
+        conns[0].quality_cache.multiplier = 0.6;
+        conns[1].quality_cache.multiplier = 1.1;
+        assert_eq!(select_best_quality_idx(&conns, now), Some(1));
+
+        // Classic never consults the cache: the scheduler's choice stands.
+        assert_eq!(
+            select_best_path_override_idx(&conns, now, SchedulingMode::Classic),
+            None
+        );
+        // Enhanced still prefers the better link.
+        assert_eq!(
+            select_best_path_override_idx(&conns, now, SchedulingMode::Enhanced),
+            Some(1)
+        );
     }
 
     #[test]
