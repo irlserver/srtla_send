@@ -353,11 +353,23 @@ pub async fn handle_srt_packet(
             //   routing has mostly moved off it.
             //
             // Only data packets have seq != None (control packets have MSB set).
+            //
+            // The override is enhanced-only: classic mode never consults the
+            // quality cache, which only enhanced selection refreshes (and which
+            // a runtime switch to classic leaves stale). In enhanced mode
+            // `select_best_quality_idx` still declines (None) when every
+            // eligible link is equally good, so the override only fires when
+            // one path is actually better; otherwise these packets are
+            // scheduled like any other (window / in-flight, times the link
+            // weight).
             if seq.is_some()
                 && (critical_window.is_critical_now(packet_time_ms)
                     || srtla_protocol::is_srt_data_retransmit(pkt))
-                && let Some(best_idx) =
-                    srtla_core::priority::select_best_quality_idx(connections, packet_time_ms)
+                && let Some(best_idx) = srtla_core::priority::select_best_path_override_idx(
+                    connections,
+                    packet_time_ms,
+                    config_snap.mode,
+                )
                 && sel_idx != Some(best_idx)
             {
                 trace!(
