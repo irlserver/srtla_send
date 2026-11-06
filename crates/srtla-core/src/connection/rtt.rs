@@ -41,12 +41,19 @@ fn plausible_round_trip(sent_ms: u64, now_ms: u64) -> Option<u64> {
     (rtt != 0 && rtt <= MAX_PLAUSIBLE_RTT_MS).then_some(rtt)
 }
 
-/// Round trip carried by an echoed keepalive, whether or not a tracker armed
-/// a measurement for it. Every keepalive carries its own send timestamp, so
-/// any echo is a genuine round trip; `None` for a bare or malformed echo, or
-/// one that fails the same plausibility guard as [`RttTracker::record_round_trip`].
-pub fn keepalive_echo_rtt_ms(data: &[u8], now_ms: u64) -> Option<u64> {
-    plausible_round_trip(extract_keepalive_timestamp(data)?, now_ms)
+/// Whether an echoed keepalive is genuine *delivery proof*, whether or not a
+/// tracker armed a measurement for it. Every keepalive carries its own send
+/// timestamp; the echo counts when that stamp is not in the future and not
+/// older than the plausibility bound. `false` for a bare or malformed echo.
+/// Deliberately looser than the RTT-sample guard
+/// ([`RttTracker::record_round_trip`]) at the bottom end: an echo that returns inside the same millisecond (LAN, loopback,
+/// veth) is a 0 ms round trip, which the RTT filter rightly refuses as a
+/// sample but which still proves the path delivered. Refusing it as proof
+/// left a stall-latched link on a sub-millisecond path unable to hold fresh
+/// proof between its sparse probe ACKs, so it could never finish its dwell.
+pub fn keepalive_echo_proves_delivery(data: &[u8], now_ms: u64) -> bool {
+    extract_keepalive_timestamp(data)
+        .is_some_and(|sent_ms| sent_ms <= now_ms && now_ms - sent_ms <= MAX_PLAUSIBLE_RTT_MS)
 }
 
 /// RTT measurement and tracking.

@@ -167,6 +167,31 @@ impl SrtlaConnection {
         sent_ms.is_some()
     }
 
+    /// Bookkeeping for an SRTLA ACK that arrived on a *different* link but
+    /// whose sequence this link still logs (the fallback scan in the packet
+    /// handler). O(1) remove.
+    ///
+    /// The receiver answers on the link that delivered the packet, so a
+    /// foreign-arrival ACK proves the *arrival* link, not this one: it must not
+    /// stamp delivery proof, record a round trip, or grow the window here. This
+    /// matters most for a silence-pulled or stall-gated link, whose duplicate
+    /// probe sits in `probe_log` while the unique copy travels the healthy link.
+    /// If that copy's entry is already gone from the arrival link (a cumulative
+    /// SRT ACK cleared it first), crediting the probe here would keep a
+    /// black-holed link's proof fresh forever, so it never latches and can
+    /// falsely complete its rejoin dwell. Only the in-flight accounting moves.
+    #[inline]
+    pub fn handle_srtla_ack_foreign(&mut self, seq: i32) -> bool {
+        if self.probe_log.remove(&seq).is_some() {
+            return true;
+        }
+        if self.packet_log.remove(&seq).is_some() {
+            self.in_flight_packets = self.packet_log.len() as i32;
+            return true;
+        }
+        false
+    }
+
     pub fn handle_srtla_ack_global(&mut self) {
         // Global +1 window increase for connections that have received data (from
         // original implementation)
@@ -319,5 +344,55 @@ mod tests {
         assert_eq!(conn.highest_acked_seq, 30);
         assert!(conn.packet_log.is_empty());
         assert_eq!(conn.rtt.estimated_rtt_ms, 40.0);
+    }
+
+    /// A foreign-arrival SRTLA ACK (fallback scan) clears the owner's log
+    /// entry but must not refresh its delivery proof or take an RTT sample:
+    /// the receiver answered on another link, so this link proved nothing.
+    #[tokio::test]
+    async fn foreign_ack_does_not_stamp_delivery_proof() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        conn.last_ack_or_rtt_sample_ms = 500;
+        let rtt_before = conn.rtt.estimated_rtt_ms;
+
+        assert!(conn.handle_srtla_ack_foreign(10));
+        assert!(!conn.packet_log.contains_key(&10));
+        assert_eq!(conn.in_flight_packets, 0);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 500, "proof must not move");
+        assert_eq!(conn.rtt.estimated_rtt_ms, rtt_before, "no RTT sample");
+    }
+
+    /// The flaky-latch case: a pulled link's duplicate probe sits in its
+    /// probe log while the unique copy goes out on the healthy link. When the
+    /// ACK falls back to the pulled link, the probe entry is cleared without
+    /// crediting the black-holed path.
+    #[tokio::test]
+    async fn foreign_ack_for_a_probe_does_not_stamp_delivery_proof() {
+        let mut conn = create_test_connection().await;
+        conn.probe_log.insert(42, 1_000);
+        conn.last_ack_or_rtt_sample_ms = 500;
+
+        assert!(conn.handle_srtla_ack_foreign(42));
+        assert!(!conn.probe_log.contains_key(&42));
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 500, "proof must not move");
+    }
+
+    /// Unknown sequences are left for the next link in the fallback scan.
+    #[tokio::test]
+    async fn foreign_ack_for_an_unknown_seq_is_not_claimed() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        assert!(!conn.handle_srtla_ack_foreign(99));
+        assert_eq!(conn.in_flight_packets, 1);
+    }
+
+    /// Arrival-link ACKs are unchanged: they still stamp proof.
+    #[tokio::test]
+    async fn arrival_ack_still_stamps_delivery_proof() {
+        let mut conn = create_test_connection().await;
+        conn.probe_log.insert(42, 1_000);
+        assert!(conn.handle_srtla_ack_specific(42, false, 1_040));
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 1_040);
     }
 }
