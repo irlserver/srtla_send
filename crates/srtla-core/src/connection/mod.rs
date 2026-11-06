@@ -828,7 +828,7 @@ impl SrtlaConnection {
         {
             self.record_rtt_probe();
         }
-        if rtt::keepalive_echo_rtt_ms(data, now_ms).is_some() {
+        if rtt::keepalive_echo_proves_delivery(data, now_ms) {
             self.last_ack_or_rtt_sample_ms = now_ms;
         }
     }
