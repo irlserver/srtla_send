@@ -62,10 +62,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Default features first: the test-internals feature widens visibility,
-      # so this run proves the tests do not lean on it by accident.
-      - name: Test (default features)
-        run: cargo test --workspace --locked
+      # srtla_send's dev-dependency turns on srtla-core's test-internals feature
+      # in every workspace test build, so a test run cannot see the pub(crate)
+      # side of the visibility swaps. Library and binary targets do not pull in
+      # dev-dependencies, so checking only those builds every crate with
+      # test-internals off, on every OS in the matrix.
+      - name: Check libraries and binaries without test-internals
+        run: cargo check --workspace --lib --bins --locked
+
+      # The integration tests in tests/ link the srtla_send library without its
+      # own test-internals feature unless it is asked for. This proves they do
+      # not depend on it, without running the suite a second time.
+      - name: Check all targets with default features
+        run: cargo check --workspace --all-targets --locked
 
       - name: Test (all features)
         run: cargo xtest --locked

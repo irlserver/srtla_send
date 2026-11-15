@@ -309,8 +309,10 @@ The netns tests skip when their dependencies are missing, and `NETNS_REQUIRED=1`
 # Run all tests in the workspace with all features (what CI runs)
 cargo xtest
 
-# Run the workspace tests with default features (verify encapsulation)
-cargo test --workspace
+# Compile every crate without test-internals (the pub(crate) visibility side)
+cargo check --workspace --lib --bins
+# Compile the integration tests without the root test-internals feature
+cargo check --workspace --all-targets
 
 # Run a specific test
 cargo test test_connection_score
@@ -379,8 +381,10 @@ All clippy warnings must be resolved (treated as errors).
 ```bash
 cargo xtest
 
-# Optionally run with default features to verify encapsulation
-cargo test --workspace
+# Compile every crate without test-internals (the pub(crate) visibility side)
+cargo check --workspace --lib --bins
+# Compile the integration tests without the root test-internals feature
+cargo check --workspace --all-targets
 ```
 
 ### 4. Build Verification
