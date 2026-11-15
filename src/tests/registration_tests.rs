@@ -935,6 +935,34 @@ mod tests {
         assert!(connections[1].connected);
     }
 
+    /// A reload that removes uplink A shifts B and C down one position. The
+    /// manager never sees the vector, so its positional keys do not follow.
+    #[tokio::test]
+    async fn characterize_reload_shift_moves_the_reg3_grant() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
+
+        let _ = reg.build_reg2(1);
+        connections.remove(0);
+
+        assert!(
+            reg.process_registration_packet(0, &reg3_packet(), now_ms())
+                .is_none(),
+            "B's real REG3 is rejected at its new position"
+        );
+        assert!(
+            matches!(
+                reg.process_registration_packet(1, &reg3_packet(), now_ms()),
+                Some(RegistrationEvent::Reg3)
+            ),
+            "C inherited B's grant"
+        );
+    }
+
     // --- (c) REG_ERR DoS ---------------------------------------------------
 
     /// A forged 2-byte REG_ERR is the cheapest remote DoS: ungated it
