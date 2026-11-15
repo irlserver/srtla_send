@@ -298,12 +298,13 @@ pub struct SrtlaConnection {
     pub connected: bool,
     pub window: i32,
     pub in_flight_packets: i32,
-    /// Packet log: maps sequence number -> send timestamp (ms).
+    /// Packet log: sequence -> send timestamp (ms), or `None` once this link
+    /// sent the sequence again and its ACK no longer identifies a copy.
     /// Uses FxHashMap for O(1) insert/remove instead of O(256) linear scan.
     #[cfg(feature = "test-internals")]
-    pub packet_log: FxHashMap<i32, u64>,
+    pub packet_log: FxHashMap<i32, Option<u64>>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) packet_log: FxHashMap<i32, u64>,
+    pub(crate) packet_log: FxHashMap<i32, Option<u64>>,
     /// Send timestamps of this link's outstanding *duplicate probes*, kept
     /// apart from [`Self::packet_log`] on purpose.
     ///

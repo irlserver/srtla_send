@@ -43,9 +43,7 @@ mod tests {
         conn.register_packet(100, current_time);
 
         assert_eq!(conn.in_flight_packets, initial_in_flight + 1);
-        // packet_log is now a HashMap: seq -> send_time_ms
-        assert!(conn.packet_log.contains_key(&100));
-        assert!(conn.packet_log.get(&100).unwrap() > &0);
+        assert!(conn.packet_log.get(&100).unwrap().unwrap() > 0);
 
         // Test multiple packets
         for i in 1..=5 {

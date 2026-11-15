@@ -20,7 +20,15 @@ impl SrtlaConnection {
     /// Register a packet as in-flight. O(1) insert.
     #[inline]
     pub fn register_packet(&mut self, seq: i32, send_time_ms: u64) {
-        self.packet_log.insert(seq, send_time_ms);
+        // A sequence this link already carries is an SRT retransmit on the same
+        // path. Its ACK cannot say which copy arrived (Karn's ambiguity), and
+        // timing an early copy's ACK against the resend's timestamp reads as a
+        // near-zero RTT that pins the windowed floor. The entry stays for
+        // accounting but stops supplying an RTT sample.
+        self.packet_log
+            .entry(seq)
+            .and_modify(|sent| *sent = None)
+            .or_insert(Some(send_time_ms));
         self.in_flight_packets = self.packet_log.len() as i32;
     }
 
@@ -70,7 +78,7 @@ impl SrtlaConnection {
         }
 
         // Get send time for RTT calculation before removing
-        let ack_send_time_ms = self.packet_log.get(&ack).copied();
+        let ack_send_time_ms = self.packet_log.get(&ack).copied().flatten();
 
         self.highest_acked_seq = ack;
 
@@ -132,8 +140,8 @@ impl SrtlaConnection {
             return true;
         }
 
-        let sent_ms = self.packet_log.remove(&seq);
-        if let Some(sent_ms) = sent_ms {
+        let logged = self.packet_log.remove(&seq);
+        if let Some(sent_ms) = logged {
             self.in_flight_packets = self.packet_log.len() as i32;
 
             // Delivery proof for `stall_deselect`: this link OWNED the acked seq,
@@ -145,8 +153,10 @@ impl SrtlaConnection {
             // ...and the same ACK is a per-link round trip: we sent this exact
             // sequence on this exact socket and the receiver acknowledged it
             // back on it. Dropping the send timestamp here used to throw that
-            // sample away.
-            self.rtt.record_round_trip(sent_ms, now_ms);
+            // sample away. A same-link resend has no unambiguous send time.
+            if let Some(sent_ms) = sent_ms {
+                self.rtt.record_round_trip(sent_ms, now_ms);
+            }
 
             if classic_mode {
                 self.congestion.handle_srtla_ack_specific_classic(
@@ -164,7 +174,7 @@ impl SrtlaConnection {
                 );
             }
         }
-        sent_ms.is_some()
+        logged.is_some()
     }
 
     /// Bookkeeping for an SRTLA ACK that arrived on a *different* link but
@@ -213,6 +223,31 @@ mod tests {
     /// Sequences around a wrap: the last two before `0x7fff_ffff` rolls over,
     /// then the first three of the new cycle.
     const ACROSS_WRAP: [i32; 5] = [SEQ_MASK - 1, SEQ_MASK, 0, 1, 2];
+
+    #[tokio::test]
+    async fn same_link_resend_ack_keeps_rtt_and_still_accounts() {
+        for srtla_ack in [false, true] {
+            let mut conn = create_test_connection().await;
+            conn.rtt.update_estimate(50, 950);
+            conn.register_packet(30, 1_000);
+            conn.register_packet(30, 1_029);
+            conn.register_packet(31, 1_030);
+
+            // The first copy's ACK lands 2 ms after the resend, faster than the
+            // 50 ms path could carry the resend.
+            if srtla_ack {
+                assert!(conn.handle_srtla_ack_specific(30, false, 1_031));
+                assert_eq!(conn.last_ack_or_rtt_sample_ms, 1_031);
+            } else {
+                conn.handle_srt_ack(30, 1_031, true);
+            }
+
+            assert!(!conn.packet_log.contains_key(&30));
+            assert_eq!(conn.in_flight_packets, 1);
+            assert_eq!(conn.get_rtt_min_ms(), 50.0);
+            assert_eq!(conn.get_smooth_rtt_ms(), 50.0);
+        }
+    }
 
     #[tokio::test]
     async fn first_ack_after_sentinel_is_accepted() {
