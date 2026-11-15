@@ -360,14 +360,10 @@ fn handle_method(
             })
         }
 
-        // Reserved for the future streaming API. A subscription-capable
-        // control plane will replace these returning METHOD_NOT_FOUND with
-        // a persistent-connection impl. Reserving the names now so clients
-        // written against the current protocol don't collide with built-in
-        // methods when the streaming upgrade lands.
+        // Subscriptions need a persistent connection, so only the socket serves them (see dispatch_async).
         "subscribe" | "unsubscribe" => Err(ErrorObject::new(
             METHOD_NOT_FOUND,
-            format!("{method} is reserved for a future streaming protocol, not yet implemented"),
+            format!("{method} is only available on the Unix control socket (--control-socket)"),
         )),
 
         other => Err(ErrorObject::new(

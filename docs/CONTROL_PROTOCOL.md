@@ -50,6 +50,18 @@ Toggle quality scoring (enhanced mode).
 
 Params: `{ "enabled": bool }`. Result: `{ "enabled": bool }`.
 
+### `set_stall_deselect`
+
+Toggle the stalled-link deselect guard.
+
+Params: `{ "enabled": bool }`. Result: `{ "enabled": bool }`.
+
+### `set_conn_timeout`
+
+Set the per-link liveness timeout in milliseconds.
+
+Params: `{ "ms": u64 }`. Result: `{ "ms": <applied> }`. The value is clamped to 1000..=60000, and the response carries the applied value, so a client should trust the response rather than its input.
+
 ### `get_status`
 
 Return the full runtime configuration plus priority-sidecar telemetry.
@@ -60,6 +72,10 @@ Result:
 {
   "mode": "enhanced",
   "quality_enabled": true,
+  "stall_deselect": true,
+  "stall_min_in_flight": 32,
+  "stall_ack_stale_ms": 3000,
+  "conn_timeout_ms": 5000,
   "critical_windows_received": 142,
   "critical_malformed_datagrams": 0
 }
