@@ -41,6 +41,10 @@ pub const SRT_HS_VERSION_5: u32 = 5;
 /// rejection codes all fail this check.
 pub const SRT_HS_REQTYPE_CONCLUSION: i32 = -1;
 
+/// `URQ_INDUCTION`: the first handshake phase. A caller sends it to open every
+/// new connection, so seeing one from the local encoder means a new session.
+pub const SRT_HS_REQTYPE_INDUCTION: i32 = 1;
+
 /// `CHandShake::HS_EXT_HSREQ` — bit in the handshake's extension field saying
 /// an HSREQ/HSRSP block is present.
 pub const SRT_HS_EXT_FLAG_HSREQ: u32 = 1 << 0;

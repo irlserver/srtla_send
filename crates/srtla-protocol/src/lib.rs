@@ -22,7 +22,7 @@ pub use constants::*;
 #[allow(unused_imports)]
 pub use parsers::{
     extract_keepalive_conn_info, extract_keepalive_timestamp, parse_srt_ack,
-    parse_srt_handshake_latency, parse_srt_nak, parse_srtla_ack,
+    parse_srt_handshake_latency, parse_srt_nak, parse_srt_session_start, parse_srtla_ack,
 };
 // Types and helpers
 #[allow(unused_imports)]
@@ -356,5 +356,64 @@ mod tests {
             pkt.extend_from_slice(&(0xdead_0000u32.wrapping_add(i)).to_be_bytes());
         }
         let _ = parse_srt_handshake_latency(&pkt);
+    }
+
+    /// Write `isn` into the handshake body's ISN word.
+    fn with_isn(mut pkt: Vec<u8>, isn: u32) -> Vec<u8> {
+        pkt[SRT_CONTROL_HEADER_LEN + 8..SRT_CONTROL_HEADER_LEN + 12]
+            .copy_from_slice(&isn.to_be_bytes());
+        pkt
+    }
+
+    /// A caller induction as libsrt sends it: version 4 even for an HSv5
+    /// caller, `UDT_DGRAM` type word, no extension blocks.
+    fn caller_induction(isn: u32) -> Vec<u8> {
+        with_isn(handshake(4, SRT_HS_REQTYPE_INDUCTION, 2, &[]), isn)
+    }
+
+    #[test]
+    fn session_start_reads_the_isn_of_a_caller_induction() {
+        assert_eq!(
+            parse_srt_session_start(&caller_induction(0x1234_5678)),
+            Some(0x1234_5678)
+        );
+    }
+
+    #[test]
+    fn session_start_ignores_a_conclusion() {
+        let pkt = with_isn(
+            handshake(
+                SRT_HS_VERSION_5,
+                SRT_HS_REQTYPE_CONCLUSION,
+                SRT_HS_EXT_FLAG_HSREQ,
+                &[],
+            ),
+            0x1234_5678,
+        );
+        assert!(parse_srt_session_start(&pkt).is_none());
+    }
+
+    #[test]
+    fn session_start_rejects_a_truncated_handshake() {
+        let pkt = caller_induction(0x1234_5678);
+        assert!(parse_srt_session_start(&pkt[..SRT_CONTROL_HEADER_LEN + 20]).is_none());
+    }
+
+    #[test]
+    fn session_start_ignores_data_and_acks() {
+        let data = vec![0u8; 64];
+        assert!(parse_srt_session_start(&data).is_none());
+
+        let mut ack = vec![0u8; 64];
+        ack[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
+        assert!(parse_srt_session_start(&ack).is_none());
+    }
+
+    #[test]
+    fn session_start_masks_the_isn_to_31_bits() {
+        assert_eq!(
+            parse_srt_session_start(&caller_induction(0x8000_0042)),
+            Some(0x42)
+        );
     }
 }

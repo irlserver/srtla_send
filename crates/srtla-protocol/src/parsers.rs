@@ -92,6 +92,26 @@ pub fn parse_srt_handshake_latency(buf: &[u8]) -> Option<SrtHandshakeLatency> {
     None
 }
 
+/// The initial sequence number of a new SRT session, when `buf` is the
+/// caller's induction handshake that opens it.
+///
+/// The version word is not checked because an HSv5 caller still sends its
+/// induction as version 4. The ISN is masked to the 31 bits SRT sequences use.
+pub fn parse_srt_session_start(buf: &[u8]) -> Option<u32> {
+    if get_packet_type(buf)? != SRT_TYPE_HANDSHAKE {
+        return None;
+    }
+    let body = buf.get(SRT_CONTROL_HEADER_LEN..)?;
+    if body.len() < SRT_HANDSHAKE_CIF_LEN {
+        return None;
+    }
+    // Word 5 is the request type, word 2 the ISN.
+    if be32(body, 20)? as i32 != SRT_HS_REQTYPE_INDUCTION {
+        return None;
+    }
+    Some(be32(body, 8)? & 0x7fff_ffff)
+}
+
 pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
     if buf.len() < 10 {
         return None;
