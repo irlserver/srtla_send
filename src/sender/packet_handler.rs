@@ -12,6 +12,7 @@ use tracing::{debug, info, trace, warn};
 
 use super::client_dedup::ClientDedup;
 use super::connections::recover_connection;
+use super::no_link_log::{NoLinkLog, log_event};
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, UplinkPacket};
 use crate::config::{ConfigSnapshot, DynamicConfig};
@@ -299,6 +300,7 @@ pub async fn handle_srt_packet(
     last_selected_idx: &mut Option<usize>,
     seq_tracker: &mut SequenceTracker,
     last_client_addr: &mut Option<SocketAddr>,
+    no_link_log: &mut NoLinkLog,
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
     critical_window: &srtla_core::priority::CriticalWindow,
@@ -383,6 +385,9 @@ pub async fn handle_srt_packet(
             }
 
             if let Some(sel_idx) = sel_idx {
+                if let Some(event) = no_link_log.on_forwarded(packet_time_ms) {
+                    log_event(event, src);
+                }
                 forward_via_connection(
                     sel_idx,
                     pkt,
@@ -406,8 +411,8 @@ pub async fn handle_srt_packet(
                     )
                     .await;
                 }
-            } else {
-                warn!("no available connection to forward packet from {}", src);
+            } else if let Some(event) = no_link_log.on_dropped(packet_time_ms) {
+                log_event(event, src);
             }
             *last_client_addr = Some(src);
         }

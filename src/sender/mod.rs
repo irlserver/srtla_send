@@ -1,6 +1,7 @@
 mod client_dedup;
 mod connections;
 mod housekeeping;
+mod no_link_log;
 mod packet_handler;
 mod rehome;
 mod reload;
@@ -26,6 +27,7 @@ pub use connections::{
 #[allow(unused_imports)]
 pub use housekeeping::GLOBAL_TIMEOUT_MS;
 use housekeeping::handle_housekeeping;
+use no_link_log::NoLinkLog;
 // Re-exported so the ACK/NAK forward dedup tests drive the real receive path.
 pub(crate) use packet_handler::handle_uplink_packet;
 // Re-exported for the NAK-attribution conformance tests so they drive the real
@@ -183,6 +185,7 @@ pub async fn run_sender_with_config(
 
     let mut status_elapsed_ms: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
+    let mut no_link_log = NoLinkLog::default();
     // Zero-allocation ring buffer for sequence tracking
     let mut seq_tracker = SequenceTracker::new();
     let mut client_dedup = ClientDedup::new();
@@ -250,6 +253,7 @@ pub async fn run_sender_with_config(
                             &mut last_selected_idx,
                             &mut seq_tracker,
                             &mut last_client_addr,
+                            &mut no_link_log,
                             reg.has_connected,
                             &config_snap,
                             &critical_window,
