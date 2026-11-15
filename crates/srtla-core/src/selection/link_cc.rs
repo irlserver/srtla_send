@@ -306,6 +306,11 @@ pub struct LinkCongestionState {
     /// Active climb sub-mode. Only meaningful when `state == Climbing`.
     pub climb_mode: ClimbMode,
     pub target_bps: u64,
+    /// Whether `target_bps` has been seeded from observed throughput
+    /// since the last bootstrap. Kept apart from the target value because
+    /// backoff and drain can legitimately clamp the target to
+    /// `MIN_TARGET_BPS`, and that floor must not read as unseeded.
+    seeded: bool,
     /// Power-of-2 age-bucketed EWMA of RTT (ms).
     rtt_ewma_ms: f64,
     /// Variance proxy: EWMA of `|sample - rtt_ewma|` with weight 1:3.
@@ -370,6 +375,7 @@ impl Default for LinkCongestionState {
             state: CcState::Bootstrap,
             climb_mode: ClimbMode::Normal,
             target_bps: MIN_TARGET_BPS,
+            seeded: false,
             rtt_ewma_ms: 0.0,
             rtt_var_ms: 0.0,
             rtt_min_ms: f64::INFINITY,
@@ -596,6 +602,7 @@ impl LinkCongestionState {
             self.state = CcState::Bootstrap;
             self.climb_mode = ClimbMode::Normal;
             self.target_bps = MIN_TARGET_BPS;
+            self.seeded = false;
             return;
         }
 
@@ -618,9 +625,10 @@ impl LinkCongestionState {
 
         // First non-bootstrap tick: seed the target from observed throughput
         // (or a conservative floor if no traffic yet).
-        if self.target_bps == MIN_TARGET_BPS {
+        if !self.seeded {
             let seed = sane_observed.max(INITIAL_TARGET_BPS);
             self.target_bps = seed.clamp(MIN_TARGET_BPS, MAX_TARGET_BPS);
+            self.seeded = true;
         }
 
         // Is this loss ours? Two independent things have to hold.
@@ -1179,6 +1187,50 @@ mod tests {
         cc.tick(2_000_000, 100);
         assert_eq!(cc.state, CcState::BackingOff);
         assert!(cc.target_bps < before);
+    }
+
+    /// A weak link that backoff or drain pushed down to `MIN_TARGET_BPS`
+    /// has already been seeded. The next tick must climb from the floor
+    /// against what the link delivers, not reseed to `INITIAL_TARGET_BPS`
+    /// and hand the worst link in the bond a tenfold larger cap.
+    #[test]
+    fn a_target_backed_off_to_the_floor_is_not_reseeded() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(2_000_000, 0);
+        assert!(cc.seeded);
+
+        cc.target_bps = MIN_TARGET_BPS;
+        cc.record_rtt(50.0, 1_000);
+        cc.tick(60_000, 1_000);
+        assert!(
+            cc.target_bps < INITIAL_TARGET_BPS,
+            "floor was reseeded to {}",
+            cc.target_bps
+        );
+    }
+
+    /// Falling back to `Bootstrap` drops the seed, so the first tick
+    /// with an RTT again seeds from observed throughput.
+    #[test]
+    fn bootstrap_clears_the_seed() {
+        let mut cc = LinkCongestionState::default();
+        cc.record_rtt(50.0, 0);
+        cc.tick(2_000_000, 0);
+        assert!(cc.seeded);
+
+        // No production path zeroes the RTT EWMA after a sample, so force
+        // the Bootstrap branch directly.
+        cc.rtt_ewma_ms = 0.0;
+        cc.tick(0, 1_000);
+        assert!(!cc.seeded);
+        assert_eq!(cc.state, CcState::Bootstrap);
+        assert_eq!(cc.target_bps, MIN_TARGET_BPS);
+
+        cc.record_rtt(50.0, 2_000);
+        cc.tick(3_000_000, 2_000);
+        assert!(cc.seeded);
+        assert!(cc.target_bps >= INITIAL_TARGET_BPS);
     }
 
     #[test]
