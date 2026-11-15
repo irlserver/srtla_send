@@ -81,30 +81,31 @@ The magic number `0xC01F` serves as a format identifier for extended keepalives:
 
 ### Sender (Rust)
 
-The sender **always** sends extended keepalives:
+The sender **always** sends extended keepalives. `SrtlaConnection::keepalive_packet` builds them like this:
 
 ```rust
-use srtla_send::protocol::{create_keepalive_packet_ext, ConnectionInfo};
+use srtla_protocol::{create_keepalive_packet_ext, ConnectionInfo};
 
 let info = ConnectionInfo {
-    conn_id: connection.conn_id as u32,
-    window: connection.window,
-    in_flight: connection.in_flight_packets,
-    rtt_ms: connection.rtt.smooth_rtt_ms as u32,
-    nak_count: connection.congestion.nak_count as u32,
-    bitrate_bytes_per_sec: (connection.bitrate.current_bitrate_bps / 8.0) as u32,
+    conn_id: self.conn_id as u32,
+    window: self.window,
+    in_flight: self.in_flight_packets,
+    rtt_ms: self.rtt.kalman_rtt.value() as u32,
+    nak_count: self.congestion.nak_count as u32,
+    bitrate_bytes_per_sec: (self.bitrate.current_bitrate_bps / 8.0) as u32,
 };
 
-let packet = create_keepalive_packet_ext(info);
-socket.send(&packet).await?;
+let pkt = create_keepalive_packet_ext(info, now);
 ```
+
+The builder does no I/O. The shell sends the returned bytes on the link's socket.
 
 ### Receiver (Rust)
 
 The receiver detects and parses extended keepalives:
 
 ```rust
-use srtla_send::protocol::{extract_keepalive_timestamp, extract_keepalive_conn_info};
+use srtla_protocol::{extract_keepalive_timestamp, extract_keepalive_conn_info};
 
 // Always extract timestamp (works for both standard and extended)
 if let Some(timestamp) = extract_keepalive_timestamp(&packet) {
@@ -186,16 +187,16 @@ if (packet_type == SRTLA_TYPE_KEEPALIVE) {
 Unique identifier for this connection. Allows receivers to track statistics per uplink.
 
 ### window (i32)
-Current congestion window size. Indicates the connection's estimated capacity in packets.
+Current congestion window, in packets times 1000 (`WINDOW_MULT`). Indicates the connection's estimated capacity.
 
 ### in_flight (i32)
 Number of packets currently in flight (sent but not acknowledged). Used for load calculation.
 
 ### rtt_ms (u32)
-Smoothed round-trip time in milliseconds. Calculated from keepalive timestamps.
+Kalman-smoothed round-trip time in milliseconds. Every RTT source feeds it: keepalive echoes, SRTLA ACKs and SRT ACKs.
 
 ### nak_count (u32)
-Total number of NAKs received on this connection since startup. Indicates packet loss.
+Number of NAKs received on this connection since it last registered. It resets on REG3 and on reconnect. Indicates packet loss.
 
 ### bitrate_bytes_per_sec (u32)
 Current bitrate in bytes per second. Measured over recent send activity.
@@ -250,7 +251,7 @@ The implementation includes comprehensive tests:
 cargo test
 
 # Run protocol tests specifically
-cargo test protocol::tests
+cargo test -p srtla-protocol
 ```
 
 Tests verify:
@@ -263,8 +264,8 @@ Tests verify:
 ## References
 
 - [SRTLA Protocol](https://github.com/BELABOX/srtla)
-- [Implementation: src/protocol.rs](../src/protocol.rs)
-- [Usage: src/connection/mod.rs](../src/connection/mod.rs)
+- [Implementation: crates/srtla-protocol/src/builders.rs](../crates/srtla-protocol/src/builders.rs)
+- [Usage: crates/srtla-core/src/connection/mod.rs](../crates/srtla-core/src/connection/mod.rs)
 
 ## License
 
