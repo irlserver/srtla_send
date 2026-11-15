@@ -39,11 +39,11 @@
 //!
 //! Re-home rebuilds whatever uplinks the bond currently has, so it always runs
 //! against the local-IP set that the last accepted reload installed. In the
-//! other direction, a reload that lands *after* a re-home dials any newly added
-//! uplink through [`crate::net::resolve_remote_for_source`], which picks the
-//! first answer in the uplink's address family — the same deterministic pick
-//! this module makes — so the added link joins the bond at the address the bond
-//! just moved to. Neither order can leave uplinks split across two receivers.
+//! other direction, a reload dials each added uplink at the address the bond
+//! already uses in that uplink's family, with no lookup. Only a family the bond
+//! has no address in takes a fresh lookup, once per reload. A reload therefore
+//! never splits the bond, and a reload after a re-home joins the address the
+//! bond moved to. Neither order can leave uplinks split across two receivers.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -58,7 +58,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Duration;
 use tracing::{debug, warn};
 
-use super::connections::{rebuild_uplink_socket, receiver_moved, recover_connection};
+use super::connections::{
+    pinned_remotes, rebuild_uplink_socket, receiver_moved, recover_connection,
+};
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
 use crate::net::{resolve_remote_all, select_remote_for_source};
@@ -69,10 +71,11 @@ use crate::net::{resolve_remote_all, select_remote_for_source};
 /// the outage lasts.
 pub const REHOME_MIN_INTERVAL_MS: u64 = 60_000;
 
-/// Ceiling on the re-home lookup. Housekeeping is the main event loop's tick, so
-/// a resolver that hangs must not hang the sender with it. The bond is already
-/// dead here, which is why blocking the tick at all is acceptable — but only
-/// briefly.
+/// Ceiling on a receiver lookup made from housekeeping. Housekeeping is the main
+/// event loop's tick, so a resolver that hangs must not hang the sender with it.
+/// Blocking the tick briefly is acceptable for both callers. Re-home only looks
+/// up a bond that is already dead. A reload only reaches DNS when it adds an
+/// uplink in an address family the bond has no receiver address for.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Addresses a receiver hostname currently answers with.
@@ -99,16 +102,16 @@ impl ReceiverResolver for DnsResolver {
             match tokio::time::timeout(RESOLVE_TIMEOUT, resolve_remote_all(&host, port)).await {
                 Ok(Ok(addrs)) if !addrs.is_empty() => Some(addrs),
                 Ok(Ok(_)) => {
-                    debug!("re-home lookup of {host} returned no addresses; staying put");
+                    debug!("receiver lookup of {host} returned no addresses; staying put");
                     None
                 }
                 Ok(Err(e)) => {
-                    debug!("re-home lookup of {host} failed ({e}); staying put");
+                    debug!("receiver lookup of {host} failed ({e}); staying put");
                     None
                 }
                 Err(_) => {
                     warn!(
-                        "re-home lookup of {host} timed out after {:?}; staying put",
+                        "receiver lookup of {host} timed out after {:?}; staying put",
                         RESOLVE_TIMEOUT
                     );
                     None
@@ -239,17 +242,10 @@ pub(super) async fn try_rehome(
     dead_for_ms: u64,
     now: u64,
 ) -> bool {
-    // Every address the bond is currently pinned to, deduplicated. Uplinks
-    // resolve the hostname independently when they are first dialed, so in
-    // principle they can sit on different answers.
-    let mut current: ResolvedAddrs = SmallVec::new();
-    for conn in connections.iter() {
-        if let Some(io) = conn_io.get(&conn.conn_id)
-            && !current.contains(&io.remote)
-        {
-            current.push(io.remote);
-        }
-    }
+    // Every address the bond is currently pinned to. Startup dials every uplink
+    // from one answer and a reload reuses the bond's address per family, so
+    // this normally holds at most one address per family.
+    let current: ResolvedAddrs = pinned_remotes(connections, conn_io);
     let Some(&pinned) = current.first() else {
         return false;
     };
@@ -670,6 +666,7 @@ mod tests {
         let added = create_connections_from_ips(
             &[IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)],
             &[],
+            &["[::1]:5000".parse().unwrap()],
             "::1",
             5000,
             &binder,

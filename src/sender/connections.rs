@@ -9,11 +9,12 @@ use srtla_core::connection::SrtlaConnection;
 use srtla_core::utils::now_ms;
 use tracing::{debug, info, warn};
 
+use super::rehome::ReceiverResolver;
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIo, ConnIoMap};
 use crate::net::{
     BatchUdpSocket, UplinkBinder, create_uplink_socket, resolve_remote_all,
-    resolve_remote_for_source,
+    select_remote_for_source,
 };
 
 pub struct PendingConnectionChanges {
@@ -36,7 +37,11 @@ pub async fn apply_connection_changes(
     last_selected_idx: &mut Option<usize>,
     seq_tracker: &mut SequenceTracker,
     binder: &Arc<dyn UplinkBinder>,
+    resolver: &dyn ReceiverResolver,
 ) {
+    // Taken before stale links are removed, so a reload that replaces every IP
+    // still dials the receiver instance the bond is registered with.
+    let pinned = pinned_remotes(connections, conn_io);
     let current_labels: HashSet<String> = connections.iter().map(|c| c.label.clone()).collect();
     let desired_labels: HashSet<String> = new_ips
         .iter()
@@ -84,9 +89,18 @@ pub async fn apply_connection_changes(
         .unzip();
 
     if !new_ips_needed.is_empty() {
+        let answers = reload_answers(
+            &pinned,
+            &new_ips_needed,
+            resolver,
+            receiver_host,
+            receiver_port,
+        )
+        .await;
         let mut new_connections = create_connections_from_ips(
             &new_ips_needed,
             &new_weights_needed,
+            &answers,
             receiver_host,
             receiver_port,
             binder,
@@ -105,6 +119,40 @@ pub async fn apply_connection_changes(
             );
         }
     }
+}
+
+/// Receiver addresses for the uplinks a reload adds.
+///
+/// An added uplink joins the bond at the address the bond already uses in its
+/// family, because registration ties the bond to one receiver instance. Only a
+/// family the bond has no address in costs a lookup, at most one per reload.
+/// A fresh answer contributes only addresses in such families. If the lookup
+/// fails, those uplinks are not dialed.
+async fn reload_answers(
+    pinned: &[SocketAddr],
+    added: &[IpAddr],
+    resolver: &dyn ReceiverResolver,
+    receiver_host: &str,
+    receiver_port: u16,
+) -> SmallVec<SocketAddr, 4> {
+    let mut answers: SmallVec<SocketAddr, 4> = pinned.iter().copied().collect();
+    if added
+        .iter()
+        .all(|ip| select_remote_for_source(pinned, *ip).is_ok())
+    {
+        return answers;
+    }
+    if let Some(fresh) = resolver
+        .resolve(receiver_host.to_string(), receiver_port)
+        .await
+    {
+        answers.extend(
+            fresh
+                .into_iter()
+                .filter(|addr| select_remote_for_source(pinned, addr.ip()).is_err()),
+        );
+    }
+    answers
 }
 
 /// Operator weight for `ip` from the parallel `ips`/`weights` lists (first
@@ -135,6 +183,7 @@ pub fn apply_link_weights(connections: &mut [SrtlaConnection], ips: &[IpAddr], w
 pub async fn create_connections_from_ips(
     ips: &[IpAddr],
     weights: &[u8],
+    answers: &[SocketAddr],
     receiver_host: &str,
     receiver_port: u16,
     binder: &Arc<dyn UplinkBinder>,
@@ -142,7 +191,11 @@ pub async fn create_connections_from_ips(
 ) -> SmallVec<SrtlaConnection, 4> {
     let mut connections = SmallVec::new();
     for ip in ips {
-        match connect_uplink(*ip, receiver_host, receiver_port, binder).await {
+        let dialed = match select_remote_for_source(answers, *ip) {
+            Ok(remote) => connect_uplink(*ip, remote, receiver_host, receiver_port, binder).await,
+            Err(e) => Err(e),
+        };
+        match dialed {
             Ok((mut conn, io)) => {
                 conn.link_weight = weight_for(ips, weights, *ip);
                 info!("added uplink {} (weight {})", conn.label, conn.link_weight);
@@ -163,13 +216,13 @@ pub async fn create_connections_from_ips(
 /// [`ConnIo`] share a `conn_id` so the shell can key the I/O map by it.
 async fn connect_uplink(
     ip: IpAddr,
+    remote: SocketAddr,
     receiver_host: &str,
     receiver_port: u16,
     binder: &Arc<dyn UplinkBinder>,
 ) -> Result<(SrtlaConnection, ConnIo)> {
     use rand::RngCore;
 
-    let remote = resolve_remote_for_source(receiver_host, receiver_port, ip).await?;
     let sock = create_uplink_socket(ip)?;
     binder.bind(&sock, ip)?;
     sock.set_nonblocking(true)?;
@@ -284,6 +337,23 @@ fn dns_drift_detected(cached: SocketAddr, fresh: &[SocketAddr]) -> bool {
     !fresh.is_empty() && !fresh.contains(&cached)
 }
 
+/// Every receiver address the bond's uplinks currently send to, deduplicated,
+/// in connection order.
+pub(super) fn pinned_remotes(
+    connections: &[SrtlaConnection],
+    conn_io: &ConnIoMap,
+) -> SmallVec<SocketAddr, 4> {
+    let mut pinned = SmallVec::new();
+    for conn in connections {
+        if let Some(io) = conn_io.get(&conn.conn_id)
+            && !pinned.contains(&io.remote)
+        {
+            pinned.push(io.remote);
+        }
+    }
+    pinned
+}
+
 /// Bond-wide form of [`dns_drift_detected`], used by the re-home trigger.
 ///
 /// True only when the hostname answered with something and *none* of the
@@ -366,6 +436,20 @@ mod tests {
         assert!(!dns_drift_detected(addr(1), &[]));
     }
 
+    #[tokio::test]
+    async fn pinned_remotes_dedups_in_connection_order() {
+        let connections = crate::test_helpers::create_test_connections(3).await;
+        let mut conn_io = crate::test_helpers::create_test_conn_io_map(&connections);
+        for (conn, remote) in connections.iter().zip([addr(2), addr(1), addr(2)]) {
+            conn_io.get_mut(&conn.conn_id).unwrap().remote = remote;
+        }
+
+        assert_eq!(
+            pinned_remotes(&connections, &conn_io).as_slice(),
+            &[addr(2), addr(1)]
+        );
+    }
+
     #[test]
     fn dns_drift_warning_is_rate_limited_across_the_process() {
         // The static is process-wide, so drive it from a base far past any
@@ -405,6 +489,155 @@ mod tests {
         assert!(crate::net::select_remote_for_source(&[], v4a.ip()).is_err());
     }
 
+    const RELOAD_HOST: &str = "rec.example.com";
+    const RELOAD_PORT: u16 = 5000;
+
+    fn bond_remote() -> SocketAddr {
+        "127.0.0.1:7001".parse().unwrap()
+    }
+
+    /// Two IPv4 links pinned to [`bond_remote`], labelled so a reload against
+    /// [`RELOAD_HOST`] keeps them.
+    async fn pinned_bond() -> (SmallVec<SrtlaConnection, 4>, ConnIoMap) {
+        let mut connections = crate::test_helpers::create_test_connections(2).await;
+        let mut conn_io = crate::test_helpers::create_test_conn_io_map(&connections);
+        for conn in connections.iter_mut() {
+            conn.label = format!("{RELOAD_HOST}:{RELOAD_PORT} via {}", conn.local_ip);
+            conn_io.get_mut(&conn.conn_id).unwrap().remote = bond_remote();
+        }
+        (connections, conn_io)
+    }
+
+    async fn reload(
+        connections: &mut SmallVec<SrtlaConnection, 4>,
+        conn_io: &mut ConnIoMap,
+        new_ips: &[IpAddr],
+        resolver: &dyn ReceiverResolver,
+    ) {
+        use crate::net::SourceIpBinder;
+
+        let binder: Arc<dyn UplinkBinder> = Arc::new(SourceIpBinder);
+        apply_connection_changes(
+            connections,
+            conn_io,
+            new_ips,
+            &[],
+            RELOAD_HOST,
+            RELOAD_PORT,
+            &mut None,
+            &mut SequenceTracker::new(),
+            &binder,
+            resolver,
+        )
+        .await;
+    }
+
+    fn remote_via(
+        connections: &[SrtlaConnection],
+        conn_io: &ConnIoMap,
+        ip: IpAddr,
+    ) -> Option<SocketAddr> {
+        connections
+            .iter()
+            .find(|c| c.local_ip == ip)
+            .map(|c| conn_io[&c.conn_id].remote)
+    }
+
+    #[tokio::test]
+    async fn reload_pin_dials_an_added_uplink_at_the_pinned_address() {
+        let (mut connections, mut conn_io) = pinned_bond().await;
+        let added: IpAddr = "127.0.0.1".parse().unwrap();
+        let new_ips = [connections[0].local_ip, connections[1].local_ip, added];
+        let resolver = super::super::rehome::StubResolver::new(vec![Some(vec![
+            "127.0.0.1:9999".parse().unwrap(),
+        ])]);
+
+        reload(&mut connections, &mut conn_io, &new_ips, &*resolver).await;
+
+        assert_eq!(connections.len(), 3);
+        assert_eq!(
+            remote_via(&connections, &conn_io, added),
+            Some(bond_remote())
+        );
+        assert_eq!(resolver.calls(), 0, "a family the bond has needs no lookup");
+    }
+
+    #[tokio::test]
+    async fn reload_pin_replacing_every_ip_stays_on_the_bond_receiver() {
+        let (mut connections, mut conn_io) = pinned_bond().await;
+        let added: IpAddr = "127.0.0.1".parse().unwrap();
+        let resolver = super::super::rehome::StubResolver::new(vec![Some(vec![
+            "127.0.0.1:9999".parse().unwrap(),
+        ])]);
+
+        reload(&mut connections, &mut conn_io, &[added], &*resolver).await;
+
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].local_ip, added);
+        assert_eq!(conn_io[&connections[0].conn_id].remote, bond_remote());
+        assert_eq!(resolver.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn reload_pin_looks_up_a_family_new_to_the_bond_once() {
+        let (mut connections, mut conn_io) = pinned_bond().await;
+        let kept = [connections[0].local_ip, connections[1].local_ip];
+        let added: IpAddr = "::1".parse().unwrap();
+        let resolver = super::super::rehome::StubResolver::new(vec![Some(vec![
+            "127.0.0.1:9999".parse().unwrap(),
+            "[::1]:9999".parse().unwrap(),
+        ])]);
+
+        reload(
+            &mut connections,
+            &mut conn_io,
+            &[kept[0], kept[1], added],
+            &*resolver,
+        )
+        .await;
+
+        assert_eq!(connections.len(), 3);
+        assert_eq!(
+            remote_via(&connections, &conn_io, added),
+            Some("[::1]:9999".parse().unwrap())
+        );
+        for ip in kept {
+            assert_eq!(
+                remote_via(&connections, &conn_io, ip),
+                Some(bond_remote()),
+                "the fresh IPv4 answer must not move the bond"
+            );
+        }
+        assert_eq!(resolver.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn reload_pin_skips_a_new_family_when_the_lookup_fails() {
+        let (mut connections, mut conn_io) = pinned_bond().await;
+        let kept_ids: Vec<u64> = connections.iter().map(|c| c.conn_id).collect();
+        let kept = [connections[0].local_ip, connections[1].local_ip];
+        let added: IpAddr = "::1".parse().unwrap();
+        let resolver = super::super::rehome::StubResolver::new(vec![None]);
+
+        reload(
+            &mut connections,
+            &mut conn_io,
+            &[kept[0], kept[1], added],
+            &*resolver,
+        )
+        .await;
+
+        assert_eq!(
+            connections.iter().map(|c| c.conn_id).collect::<Vec<_>>(),
+            kept_ids
+        );
+        assert_eq!(remote_via(&connections, &conn_io, added), None);
+        for ip in kept {
+            assert_eq!(remote_via(&connections, &conn_io, ip), Some(bond_remote()));
+        }
+        assert_eq!(resolver.calls(), 1);
+    }
+
     #[tokio::test]
     async fn startup_dials_only_sources_the_receiver_has_a_family_for() {
         use crate::net::SourceIpBinder;
@@ -413,8 +646,17 @@ mod tests {
         let sources: [IpAddr; 2] = ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()];
         for receiver in ["127.0.0.1", "::1"] {
             let mut io = ConnIoMap::new();
-            let connections =
-                create_connections_from_ips(&sources, &[], receiver, 9000, &binder, &mut io).await;
+            let answers = [SocketAddr::new(receiver.parse().unwrap(), 9000)];
+            let connections = create_connections_from_ips(
+                &sources,
+                &[],
+                &answers,
+                receiver,
+                9000,
+                &binder,
+                &mut io,
+            )
+            .await;
             assert_eq!(connections.len(), 1);
             assert_eq!(connections[0].local_ip, receiver.parse::<IpAddr>().unwrap());
             let remote = io[&connections[0].conn_id].remote;

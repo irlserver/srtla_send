@@ -99,10 +99,10 @@ pub fn create_uplink_socket(domain_for: IpAddr) -> Result<Socket> {
 
 /// Every address the receiver's hostname currently answers with.
 ///
-/// [`resolve_remote_for_source`] picks one of these to dial. The full set also
-/// feeds the reconnect and re-home paths, which compare the addresses the bond
-/// is pinned to against a fresh answer to detect receiver DNS drift (see
-/// `sender::connections` and `sender::rehome`).
+/// [`select_remote_for_source`] picks one of these per uplink family. The full
+/// set also feeds the reconnect and re-home paths, which compare the addresses
+/// the bond is pinned to against a fresh answer to detect receiver DNS drift
+/// (see `sender::connections` and `sender::rehome`).
 pub async fn resolve_remote_all(host: &str, port: u16) -> Result<SmallVec<SocketAddr, 4>> {
     let addrs = tokio::net::lookup_host((host, port))
         .await
@@ -126,12 +126,4 @@ pub fn select_remote_for_source(addrs: &[SocketAddr], source: IpAddr) -> Result<
             let family = if source.is_ipv4() { "IPv4" } else { "IPv6" };
             anyhow::anyhow!("receiver has no {family} address for source {source}")
         })
-}
-
-pub async fn resolve_remote_for_source(
-    host: &str,
-    port: u16,
-    source: IpAddr,
-) -> Result<SocketAddr> {
-    select_remote_for_source(&resolve_remote_all(host, port).await?, source)
 }

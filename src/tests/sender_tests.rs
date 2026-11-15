@@ -509,6 +509,7 @@ mod tests {
             &mut last_selected_idx,
             &mut seq_tracker,
             &binder,
+            &*crate::sender::StubResolver::new(vec![]),
         ));
 
         // Should have removed some connections
@@ -599,8 +600,17 @@ mod tests {
         let binder: std::sync::Arc<dyn crate::net::UplinkBinder> =
             std::sync::Arc::new(crate::net::SourceIpBinder);
         let mut conn_io = ConnIoMap::new();
-        let connections =
-            create_connections_from_ips(&ips, &[], "127.0.0.1", 9999, &binder, &mut conn_io).await;
+        let answers = ["127.0.0.1:9999".parse().unwrap()];
+        let connections = create_connections_from_ips(
+            &ips,
+            &[],
+            &answers,
+            "127.0.0.1",
+            9999,
+            &binder,
+            &mut conn_io,
+        )
+        .await;
 
         // Connections may be empty due to connection failures, which is OK for testing
         assert!(connections.len() <= ips.len());

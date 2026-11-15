@@ -252,9 +252,12 @@ uplink to the new address together and re-register from scratch.
   `REHOME_MIN_INTERVAL_MS` (60s), process-wide; the limit covers the DNS probe
   too, since housekeeping ticks every second.
 - **Per-family pick.** Every uplink dials the first answer in its own address
-  family (`net::select_remote_for_source`), at startup, on reload and on
-  re-home. A dual-stack receiver's A and AAAA records must reach the same
-  receiver group; reachability is not tested. An uplink whose family a re-home
+  family (`net::select_remote_for_source`). Startup resolves the receiver once
+  and every uplink picks from that answer. A reload reuses the address the bond
+  is pinned to in each family and looks up only a family the bond lacks (once
+  per reload, under the re-home timeout). Re-home picks from its fresh answer.
+  A dual-stack receiver's A and AAAA records must reach the same receiver
+  group; reachability is not tested. An uplink whose family a re-home
   answer no longer offers is dropped from the bond until an IP-list reload
   names it again. An answer that no uplink's family can reach is not a move.
 - **Client id survives.** `SrtlaRegistrationManager::reset_for_rehome` keeps the

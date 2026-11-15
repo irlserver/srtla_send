@@ -61,6 +61,7 @@ use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 pub(crate) use uplink_recv::process_uplink_packet;
 
 use crate::config::DynamicConfig;
+use crate::net::resolve_remote_all;
 use crate::stats::SharedStats;
 
 pub const HOUSEKEEPING_INTERVAL_MS: u64 = 1000;
@@ -90,11 +91,10 @@ pub async fn run_sender_with_config(
     // dialing any uplink. An encoder is typically pointed at this port the
     // moment the process is spawned, with no readiness handshake, so every
     // await before the bind is a window where that connect finds a closed port.
-    // Uplink setup is the worst offender: it resolves the receiver and dials
-    // each bonded link sequentially, so with a hostname receiver the window is
-    // one uncached DNS lookup per modem and grows with the size of the bond —
-    // exactly the multi-link case this sender exists for. Binding a UDP port
-    // needs nothing from the uplinks, so it belongs up here.
+    // Uplink setup is the worst offender: it resolves the receiver hostname once
+    // and then dials each bonded link, so with a hostname receiver the window
+    // spans an uncached DNS lookup. Binding a UDP port needs nothing from the
+    // uplinks, so it belongs up here.
     //
     // It also removes a rare startup failure: an uplink's ephemeral source port
     // landing on `local_srt_port` used to make this wildcard bind fail with
@@ -113,9 +113,15 @@ pub async fn run_sender_with_config(
     // Shell-owned I/O half of every connection, keyed by conn_id (never by
     // index — so no lockstep with the connections vec through add/remove).
     let mut conn_io: ConnIoMap = std::collections::HashMap::new();
+    // One answer for the whole bond, so every uplink in a family dials the same
+    // receiver instance.
+    let answers = resolve_remote_all(receiver_host, receiver_port)
+        .await
+        .with_context(|| format!("resolve receiver {receiver_host}"))?;
     let mut connections = create_connections_from_ips(
         &ips,
         &weights,
+        &answers,
         receiver_host,
         receiver_port,
         &binder,
@@ -186,6 +192,7 @@ pub async fn run_sender_with_config(
     // past the all-failed window, and only then to follow the receiver hostname
     // to a genuinely new address. `--no-rehome` turns it off entirely.
     let mut rehome = RehomeGate::new(config.rehome_on_failure());
+    let receiver_resolver = rehome::DnsResolver;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
     // Enhanced selection as an admission gate.
@@ -371,6 +378,7 @@ pub async fn run_sender_with_config(
                                 &mut last_selected_idx,
                                 &mut seq_tracker,
                                 &binder,
+                                &receiver_resolver,
                             ).await;
                             info!("connection changes applied successfully");
                             sync_readers(&connections, &conn_io, &mut reader_handles, &packet_tx);
