@@ -275,6 +275,19 @@ pub(super) async fn try_rehome(
     }
 
     let answers: SmallVec<String, 4> = fresh.iter().map(ToString::to_string).collect();
+    // An answer that no uplink can reach is not somewhere to move. Migrating
+    // would drop every link and leave nothing for a later re-home to repoint.
+    if !connections
+        .iter()
+        .any(|conn| select_remote_for_source(&fresh, conn.local_ip).is_ok())
+    {
+        warn!(
+            "{receiver_host} now resolves to [{}], but no uplink has an address in those \
+             families; not re-homing",
+            answers.join(", ")
+        );
+        return false;
+    }
     warn!(
         "re-homing the whole bond: {receiver_host} no longer resolves to {pinned} and every \
          uplink has been down for {dead_for_ms}ms; moving {} uplink(s) to [{}] and re-registering \
@@ -377,9 +390,6 @@ async fn rehome_bond(
     // everything else back to pre-REG1, including the probing state machine.
     // Re-probing then picks the REG1 target by RTT just like a fresh start.
     reg.reset_for_rehome();
-    if connections.is_empty() {
-        return;
-    }
     let probes = reg.start_probing(connections, now);
     for (idx, pkt) in probes {
         if let Some(conn) = connections.get(idx)
@@ -688,16 +698,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn re_home_with_no_matching_family_leaves_nothing_to_register() {
-        let mut bond = Bond::new(addr(1)).await;
+    async fn an_answer_no_uplink_can_reach_is_not_a_move() {
+        let old = addr(1);
+        let mut bond = Bond::new(old).await;
         let resolver = StubResolver::new(vec![Some(vec![v6(6000)])]);
         let mut gate = RehomeGate::with_resolver(true, resolver);
 
-        assert!(run_try_rehome(&mut bond, &mut gate, now_ms()).await);
-        assert!(bond.connections.is_empty());
-        assert!(bond.conn_io.is_empty());
-        assert!(bond.reader_handles.is_empty());
-        assert!(!bond.reg.is_probing());
-        assert!(bond.reg.reg1_target_idx().is_none());
+        assert!(!run_try_rehome(&mut bond, &mut gate, now_ms()).await);
+        assert_eq!(bond.connections.len(), 2, "the bond must stay whole");
+        assert_eq!(bond.remotes(), vec![old], "the bond must stay put");
+        assert_eq!(gate.rehome_count(), 0);
     }
 }
