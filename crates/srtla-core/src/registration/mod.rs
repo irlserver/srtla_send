@@ -119,8 +119,13 @@ impl SrtlaRegistrationManager {
     /// Everything else — pending REG1/REG2 slots, the one-shot REG3 grants, the
     /// broadcast flag, the connected snapshot and the RTT probing state machine
     /// — is cleared, so the next housekeeping tick re-probes and re-registers
-    /// over the plain REG1/REG2/REG3 flow. `has_connected` survives: it records
-    /// that this *process* has streamed before, which only drives log wording.
+    /// over the plain REG1/REG2/REG3 flow. `has_connected` survives. It records
+    /// that this *process* has registered before, and it selects the shell's
+    /// forwarding path: `handle_srt_packet` uses the pre-registration link
+    /// selection while it is false and the normal scheduler once it is true.
+    /// Housekeeping also reads it to pick its log and error wording. Keeping it
+    /// true across a re-home keeps the normal scheduler in use during the new
+    /// handshake.
     pub fn reset_for_rehome(&mut self) {
         rand::rng().fill_bytes(&mut self.srtla_id[SRTLA_ID_LEN / 2..]);
         self.pending_reg2_idx = None;
