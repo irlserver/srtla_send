@@ -559,6 +559,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reg2_with_a_foreign_id_half_is_ignored() {
+        let mut reg = SrtlaRegistrationManager::new();
+        reg.set_pending_reg2_idx(Some(0));
+        let original = reg.srtla_id;
+        let half = SRTLA_ID_LEN / 2;
+
+        let mut forged = original;
+        for b in forged[..half].iter_mut() {
+            *b ^= 0xff;
+        }
+        forged[half..].fill(0x5a);
+        reg.process_registration_packet(0, &create_reg2_packet(&forged), now_ms());
+
+        assert_eq!(reg.srtla_id, original);
+        assert_eq!(reg.pending_reg2_idx(), Some(0));
+        assert!(!reg.broadcast_reg2_pending());
+        assert_eq!(reg.out_of_phase_reg2(), 1);
+    }
+
+    #[test]
+    fn the_real_reg2_is_still_accepted_after_a_forged_one() {
+        let mut reg = SrtlaRegistrationManager::new();
+        reg.set_pending_reg2_idx(Some(0));
+        let original = reg.srtla_id;
+        let half = SRTLA_ID_LEN / 2;
+
+        let mut forged = original;
+        for b in forged[..half].iter_mut() {
+            *b ^= 0xff;
+        }
+        forged[half..].fill(0x5a);
+        reg.process_registration_packet(0, &create_reg2_packet(&forged), now_ms());
+
+        let mut real = original;
+        real[half..].fill(0x5a);
+        reg.process_registration_packet(0, &create_reg2_packet(&real), now_ms());
+
+        assert_eq!(reg.srtla_id, real);
+        assert!(reg.broadcast_reg2_pending());
+        assert_eq!(reg.pending_reg2_idx(), None);
+    }
+
+    #[test]
+    fn reg2_with_trailing_padding_is_accepted() {
+        let mut reg = SrtlaRegistrationManager::new();
+        reg.set_pending_reg2_idx(Some(0));
+        let mut real = reg.srtla_id;
+        real[SRTLA_ID_LEN / 2..].fill(0x5a);
+
+        let mut buf = create_reg2_packet(&real).to_vec();
+        buf.extend_from_slice(&[0u8; 16]);
+        reg.process_registration_packet(0, &buf, now_ms());
+
+        assert_eq!(reg.srtla_id, real);
+        assert!(reg.broadcast_reg2_pending());
+    }
+
+    #[test]
+    fn reg2_after_rehome_still_matches() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let before = reg.srtla_id;
+        reg.reset_for_rehome();
+        reg.set_pending_reg2_idx(Some(0));
+
+        let mut reply = before;
+        reply[SRTLA_ID_LEN / 2..].fill(0x5a);
+        reg.process_registration_packet(0, &create_reg2_packet(&reply), now_ms());
+
+        assert_eq!(reg.srtla_id, reply);
+        assert_eq!(reg.out_of_phase_reg2(), 0);
+    }
+
     // Registration timing is wall-clock (now_ms == SystemTime), so the timeout is
     // exercised through the production seam clear_pending_if_timed_out with explicit
     // logical now values — never a real sleep; the paused clock keeps it deterministic.

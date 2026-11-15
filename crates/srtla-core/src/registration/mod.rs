@@ -25,6 +25,9 @@ pub enum RegistrationEvent {
 /// (`None`), which is a no-op for connection state.
 #[derive(Debug, Default, Clone, Copy)]
 struct OutOfPhaseCounters {
+    /// REG2 frames whose id does not echo our half. These still return
+    /// `Some(Reg2)`, which the shell ignores.
+    reg2: u64,
     reg3: u64,
     reg_err: u64,
 }
@@ -323,6 +326,20 @@ impl SrtlaRegistrationManager {
             return;
         }
         if self.pending_reg2_idx == Some(conn_idx) {
+            // The first half is the nonce we sent in REG1, and every known
+            // receiver echoes it. The uplink sockets accept any source, so a
+            // REG2 without it is a forgery or a reply meant for another sender.
+            let half = SRTLA_ID_LEN / 2;
+            if buf[2..2 + half] != self.srtla_id[..half] {
+                self.out_of_phase.reg2 = self.out_of_phase.reg2.saturating_add(1);
+                self.log_out_of_phase(
+                    "REG2",
+                    "id does not echo our half",
+                    conn_idx,
+                    self.out_of_phase.reg2,
+                );
+                return;
+            }
             // server returns full id starting at byte 2
             self.srtla_id.copy_from_slice(&buf[2..2 + SRTLA_ID_LEN]);
             debug!(
@@ -352,7 +369,12 @@ impl SrtlaRegistrationManager {
     fn handle_reg3(&mut self, conn_idx: usize) -> bool {
         if !self.awaiting_reg3.contains(&conn_idx) {
             self.out_of_phase.reg3 = self.out_of_phase.reg3.saturating_add(1);
-            self.log_out_of_phase("REG3", conn_idx, self.out_of_phase.reg3);
+            self.log_out_of_phase(
+                "REG3",
+                "no matching registration in flight",
+                conn_idx,
+                self.out_of_phase.reg3,
+            );
             return false;
         }
         self.revoke_reg3_grant(conn_idx);
@@ -377,7 +399,12 @@ impl SrtlaRegistrationManager {
 
         if !awaiting_reg2 && !awaiting_reg3 {
             self.out_of_phase.reg_err = self.out_of_phase.reg_err.saturating_add(1);
-            self.log_out_of_phase("REG_ERR", conn_idx, self.out_of_phase.reg_err);
+            self.log_out_of_phase(
+                "REG_ERR",
+                "no matching registration in flight",
+                conn_idx,
+                self.out_of_phase.reg_err,
+            );
             return false;
         }
 
@@ -403,17 +430,16 @@ impl SrtlaRegistrationManager {
 
     /// Log the first rejection of each kind loudly, then drop to `debug!`: a
     /// spoofed flood must not turn into a log-amplification DoS of its own.
-    fn log_out_of_phase(&self, kind: &str, conn_idx: usize, count: u64) {
+    fn log_out_of_phase(&self, kind: &str, reason: &str, conn_idx: usize, count: u64) {
         if count == 1 {
             warn!(
-                "{} for uplink #{} ignored: no matching registration in flight (further \
-                 out-of-phase frames logged at debug)",
-                kind, conn_idx
+                "{} for uplink #{} ignored: {} (further out-of-phase frames logged at debug)",
+                kind, conn_idx, reason
             );
         } else {
             debug!(
-                "{} for uplink #{} ignored: no matching registration in flight ({} so far)",
-                kind, conn_idx, count
+                "{} for uplink #{} ignored: {} ({} so far)",
+                kind, conn_idx, reason, count
             );
         }
     }
@@ -545,6 +571,11 @@ impl SrtlaRegistrationManager {
 
     pub fn set_broadcast_reg2_pending(&mut self, value: bool) {
         self.broadcast_reg2_pending = value;
+    }
+
+    /// REG2 frames rejected because their id does not echo our half.
+    pub fn out_of_phase_reg2(&self) -> u64 {
+        self.out_of_phase.reg2
     }
 
     /// REG3 frames rejected by the phase gate.
