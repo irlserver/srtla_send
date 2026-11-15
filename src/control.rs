@@ -237,8 +237,13 @@ async fn handle_unsubscribe(
         .ok_or_else(|| {
             ErrorObject::new(INVALID_PARAMS, "expected params.subscription_id: string")
         })?;
+    // Ids are sequential and easy to guess, so a connection may only remove
+    // the subscriptions it created.
+    let Some(pos) = ctx.owned_ids.iter().position(|(x, _)| x == id) else {
+        return Ok(serde_json::json!({ "removed": false }));
+    };
     let removed = ctx.hub.unsubscribe(id).await;
-    ctx.owned_ids.retain(|(x, _)| x != id);
+    ctx.owned_ids.remove(pos);
     Ok(serde_json::json!({ "removed": removed }))
 }
 
@@ -472,5 +477,93 @@ mod tests {
         let result = &v["result"];
         assert!(result["mode"].is_string());
         assert!(result["quality_enabled"].is_boolean());
+    }
+
+    #[cfg(unix)]
+    async fn call(ctx: &mut SubscriptionContext<'_>, req: &str) -> Value {
+        let config = DynamicConfig::new();
+        let resp = dispatch_async(&config, None, None, Some(ctx), req)
+            .await
+            .unwrap();
+        serde_json::from_str(&resp.to_json()).unwrap()
+    }
+
+    #[cfg(unix)]
+    const SUBSCRIBE_STATS: &str =
+        r#"{"jsonrpc":"2.0","id":1,"method":"subscribe","params":{"topic":"stats"}}"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subscribe_twice_to_one_topic_returns_the_same_id() {
+        let hub = SubscriptionHub::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let mut owned: Vec<(String, String)> = Vec::new();
+        let mut ctx = SubscriptionContext {
+            hub: &hub,
+            push_tx: tx.clone(),
+            owned_ids: &mut owned,
+        };
+
+        let first = call(&mut ctx, SUBSCRIBE_STATS).await;
+        let second = call(&mut ctx, SUBSCRIBE_STATS).await;
+        assert!(first["result"]["subscription_id"].is_string());
+        assert_eq!(
+            first["result"]["subscription_id"],
+            second["result"]["subscription_id"]
+        );
+        assert_eq!(hub.len().await, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unsubscribe_ignores_ids_this_connection_does_not_own() {
+        let hub = SubscriptionHub::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+
+        let mut owned_a: Vec<(String, String)> = Vec::new();
+        let mut ctx_a = SubscriptionContext {
+            hub: &hub,
+            push_tx: tx.clone(),
+            owned_ids: &mut owned_a,
+        };
+        let sub = call(&mut ctx_a, SUBSCRIBE_STATS).await;
+        let id = sub["result"]["subscription_id"].as_str().unwrap();
+
+        let mut owned_b: Vec<(String, String)> = Vec::new();
+        let mut ctx_b = SubscriptionContext {
+            hub: &hub,
+            push_tx: tx.clone(),
+            owned_ids: &mut owned_b,
+        };
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "unsubscribe",
+            "params": { "subscription_id": id },
+        })
+        .to_string();
+        let resp = call(&mut ctx_b, &req).await;
+        assert_eq!(resp["result"], json!({ "removed": false }));
+        assert_eq!(hub.len().await, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subscribe_past_the_limit_is_refused() {
+        let hub = SubscriptionHub::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        for _ in 0..crate::subscriptions::MAX_SUBSCRIPTIONS {
+            hub.subscribe("stats", tx.clone()).await.unwrap();
+        }
+
+        let mut owned: Vec<(String, String)> = Vec::new();
+        let mut ctx = SubscriptionContext {
+            hub: &hub,
+            push_tx: tx.clone(),
+            owned_ids: &mut owned,
+        };
+        let resp = call(&mut ctx, SUBSCRIBE_STATS).await;
+        assert_eq!(resp["error"]["code"], -32000);
+        assert!(owned.is_empty());
     }
 }
