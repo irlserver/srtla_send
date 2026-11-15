@@ -30,9 +30,9 @@ mod unix_impl {
     use std::os::unix::io::{AsRawFd, RawFd};
     use std::task::{Context, Poll, ready};
 
-    use socket2::{SockAddr, Socket};
+    use socket2::{SockAddr, SockRef, Socket};
     use tokio::io::Interest;
-    use tokio::io::unix::AsyncFd;
+    use tokio::net::UdpSocket;
 
     use super::{BATCH_RECV_SIZE, BATCH_SEND_SIZE, MTU};
 
@@ -61,15 +61,15 @@ mod unix_impl {
 
     /// Async UDP socket with batch receive support via `recvmmsg`.
     ///
-    /// This wraps a `socket2::Socket` in tokio's `AsyncFd` for proper async
-    /// readability polling, then uses `recvmmsg` to receive multiple packets
-    /// in a single syscall.
+    /// Readiness comes from tokio's `UdpSocket`; the batch syscalls
+    /// (`recvmmsg`, `sendmmsg`) run inside its `try_io`, so a `WouldBlock`
+    /// clears readiness exactly as tokio's own I/O methods do.
     ///
     /// The socket is deliberately **not** connected: `peer` carries the receiver
     /// address explicitly on every send, and the receive path accepts datagrams
     /// from any source. See [`BatchUdpSocket::new`].
     pub struct BatchUdpSocket {
-        inner: AsyncFd<Socket>,
+        inner: UdpSocket,
         peer: SockAddr,
     }
 
@@ -87,14 +87,14 @@ mod unix_impl {
         /// behavior.
         pub fn new(socket: Socket, peer: SocketAddr) -> std::io::Result<Self> {
             Ok(Self {
-                inner: AsyncFd::with_interest(socket, Interest::READABLE | Interest::WRITABLE)?,
+                inner: UdpSocket::from_std(socket.into())?,
                 peer: peer.into(),
             })
         }
 
         /// Get the raw file descriptor.
         pub fn as_raw_fd(&self) -> RawFd {
-            self.inner.get_ref().as_raw_fd()
+            self.inner.as_raw_fd()
         }
 
         /// Poll for readability and receive multiple packets.
@@ -104,19 +104,22 @@ mod unix_impl {
             buffer: &mut RecvMmsgBuffer,
         ) -> Poll<std::io::Result<usize>> {
             loop {
-                let mut guard = ready!(self.inner.poll_read_ready(cx))?;
+                ready!(self.inner.poll_recv_ready(cx))?;
 
-                match buffer.recvmmsg(self.as_raw_fd()) {
+                let fd = self.as_raw_fd();
+                match self
+                    .inner
+                    .try_io(Interest::READABLE, || buffer.recvmmsg(fd))
+                {
                     Ok(count) => return Poll::Ready(Ok(count)),
                     Err(e) => match recv_retry_action(&e) {
                         // EINTR: re-issue without dropping readiness (the fd is
                         // still ready, so the next poll returns immediately). A
                         // signal — e.g. our own SIGHUP — must not kill the reader.
                         RecvAction::Retry => continue,
-                        RecvAction::WouldBlock => {
-                            guard.clear_ready();
-                            continue;
-                        }
+                        // `try_io` already cleared readiness, so the next poll
+                        // parks until the reactor reports the fd readable.
+                        RecvAction::WouldBlock => continue,
                         RecvAction::Hard => return Poll::Ready(Err(e)),
                     },
                 }
@@ -133,18 +136,11 @@ mod unix_impl {
 
         /// Send data to the peer asynchronously.
         pub async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
-            loop {
-                let mut guard = self.inner.ready(Interest::WRITABLE).await?;
-
-                match self.inner.get_ref().send_to(buf, &self.peer) {
-                    Ok(n) => return Ok(n),
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                        guard.clear_ready();
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+            self.inner
+                .async_io(Interest::WRITABLE, || {
+                    SockRef::from(&self.inner).send_to(buf, &self.peer)
+                })
+                .await
         }
 
         /// Try to send data without blocking.
@@ -152,7 +148,9 @@ mod unix_impl {
         /// Returns WouldBlock if the socket is not ready.
         #[allow(dead_code)]
         pub fn try_send(&self, buf: &[u8]) -> std::io::Result<usize> {
-            self.inner.get_ref().send_to(buf, &self.peer)
+            self.inner.try_io(Interest::WRITABLE, || {
+                SockRef::from(&self.inner).send_to(buf, &self.peer)
+            })
         }
 
         /// Send several datagrams to the peer in one `sendmmsg` syscall.
@@ -166,19 +164,17 @@ mod unix_impl {
                 return Ok(0);
             }
             loop {
-                let mut guard = self.inner.ready(Interest::WRITABLE).await?;
-
-                match self.try_send_batch(bufs) {
-                    Ok(n) => return Ok(n),
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                        guard.clear_ready();
-                        continue;
-                    }
+                // `async_io` waits for writability and retries on `WouldBlock`.
+                match self
+                    .inner
+                    .async_io(Interest::WRITABLE, || self.try_send_batch(bufs))
+                    .await
+                {
                     // A signal can interrupt the syscall before any datagram is
                     // queued; that is not a send failure, so retry rather than
                     // tearing the link down.
                     Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
+                    result => return result,
                 }
             }
         }
@@ -235,25 +231,19 @@ mod unix_impl {
         /// Returns WouldBlock if no data is available.
         #[allow(dead_code)]
         pub fn try_recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-            use std::mem::MaybeUninit;
-
-            // Safety: We're using MaybeUninit slice for the socket2 API,
-            // but the recv call will initialize the bytes it writes.
-            let buf_uninit: &mut [MaybeUninit<u8>] =
-                unsafe { &mut *(buf as *mut [u8] as *mut [MaybeUninit<u8>]) };
-            self.inner.get_ref().recv(buf_uninit)
+            self.inner.try_recv(buf)
         }
 
         /// Get a reference to the underlying socket.
         #[allow(dead_code)]
-        pub fn get_ref(&self) -> &Socket {
-            self.inner.get_ref()
+        pub fn get_ref(&self) -> &UdpSocket {
+            &self.inner
         }
     }
 
     impl AsRawFd for BatchUdpSocket {
         fn as_raw_fd(&self) -> RawFd {
-            self.inner.get_ref().as_raw_fd()
+            self.inner.as_raw_fd()
         }
     }
 
@@ -449,8 +439,61 @@ mod unix_impl {
         use srtla_protocol::MTU;
 
         use super::{
-            RecvAction, RecvMmsgBuffer, recv_retry_action, sockaddr_storage_to_socket_addr,
+            BatchUdpSocket, RecvAction, RecvMmsgBuffer, recv_retry_action,
+            sockaddr_storage_to_socket_addr,
         };
+
+        fn loopback_socket() -> socket2::Socket {
+            let sock = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )
+            .unwrap();
+            sock.set_nonblocking(true).unwrap();
+            sock.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())
+                .unwrap();
+            sock
+        }
+
+        fn local_addr(sock: &socket2::Socket) -> SocketAddr {
+            sock.local_addr().unwrap().as_socket().unwrap()
+        }
+
+        // The only test that drives the reactor readiness path end to end:
+        // `sendmmsg` and `send` out of one socket, `recvmmsg` into the other.
+        // Real syscalls, so not under miri.
+        #[tokio::test]
+        #[cfg_attr(miri, ignore)]
+        async fn batch_send_and_recv_round_trip_over_loopback() {
+            let a = loopback_socket();
+            let b = loopback_socket();
+            let (a_addr, b_addr) = (local_addr(&a), local_addr(&b));
+            let a = BatchUdpSocket::new(a, b_addr).unwrap();
+            let b = BatchUdpSocket::new(b, a_addr).unwrap();
+
+            let payloads: [&[u8]; 3] = [b"one", b"two", b"three"];
+            assert_eq!(a.send_batch(&payloads).await.unwrap(), 3);
+            assert_eq!(a.send(b"four").await.unwrap(), 4);
+
+            let mut buffer = RecvMmsgBuffer::new();
+            let mut received = Vec::new();
+            while received.len() < 4 {
+                let n = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    b.recv_batch(&mut buffer),
+                )
+                .await
+                .expect("datagrams should arrive on loopback")
+                .unwrap();
+                assert!(n > 0);
+                for (from, data) in buffer.iter() {
+                    assert_eq!(from, Some(a_addr));
+                    received.push(data.to_vec());
+                }
+            }
+            assert_eq!(received, [&b"one"[..], b"two", b"three", b"four"]);
+        }
 
         // Exercises the unsafe sockaddr_storage → SocketAddr pointer casts with
         // real AF_INET/AF_INET6 payloads (the iterator test only ever feeds

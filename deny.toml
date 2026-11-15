@@ -5,14 +5,6 @@
 [advisories]
 yanked = "deny"
 
-# Exception for pre-existing rand unsoundness (RUSTSEC-2026-0097).
-# The vulnerability requires: log + thread_rng features + custom logger + specific conditions.
-# srtla_send does not use custom loggers or the log crate directly; tracing-subscriber
-# is used instead. This is a low-risk exception for dev-only and transitive deps.
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0097"
-reason = "rand unsoundness requires custom logger + log crate; srtla_send uses tracing-subscriber"
-
 [sources]
 # Enforce crate source integrity.
 unknown-registry = "deny"
