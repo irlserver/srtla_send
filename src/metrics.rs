@@ -13,6 +13,8 @@
 
 use std::fmt::Write;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use srtla_core::mode::SchedulingMode;
 use srtla_core::priority::CriticalWindow;
@@ -22,6 +24,14 @@ use tracing::{debug, info, warn};
 
 use crate::config::DynamicConfig;
 use crate::stats::SharedStats;
+
+/// Longest a scrape may hold its connection, so a client that connects and
+/// sends nothing cannot keep it open forever.
+const SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Most scrapes served at once, so scrapers cannot use up the file
+/// descriptors that uplink socket rebuilds need.
+const MAX_SCRAPE_CONNECTIONS: usize = 16;
 
 /// Render the current state as a Prometheus text-format exposition.
 pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) -> String {
@@ -369,6 +379,7 @@ pub fn spawn_server(
         let local = listener.local_addr().ok();
         info!(?local, "prometheus /metrics endpoint listening");
 
+        let permits = Arc::new(tokio::sync::Semaphore::new(MAX_SCRAPE_CONNECTIONS));
         loop {
             let (stream, peer) = match listener.accept().await {
                 Ok(pair) => pair,
@@ -377,16 +388,33 @@ pub fn spawn_server(
                     continue;
                 }
             };
+            let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                debug!(%peer, "prometheus connection limit reached, closing");
+                continue;
+            };
             let stats = stats.clone();
             let config = config.clone();
             let cw = cw.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve_one(stream, &stats, &config, &cw).await {
-                    debug!(%peer, error = %e, "prometheus scrape error");
-                }
+                serve_bounded(stream, peer, &stats, &config, &cw).await;
+                drop(permit);
             });
         }
     })
+}
+
+async fn serve_bounded(
+    stream: tokio::net::TcpStream,
+    peer: SocketAddr,
+    stats: &SharedStats,
+    config: &DynamicConfig,
+    cw: &CriticalWindow,
+) {
+    match tokio::time::timeout(SCRAPE_TIMEOUT, serve_one(stream, stats, config, cw)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => debug!(%peer, error = %e, "prometheus scrape error"),
+        Err(_) => debug!(%peer, "prometheus scrape timed out"),
+    }
 }
 
 async fn serve_one(
@@ -396,8 +424,9 @@ async fn serve_one(
     cw: &CriticalWindow,
 ) -> std::io::Result<()> {
     // Read until we've seen the end of the request headers. One read
-    // usually suffices for a scraper-originated GET; cap at 4 KiB to
-    // prevent slowloris-style games.
+    // usually suffices for a scraper-originated GET. The 4 KiB cap bounds
+    // memory, and the timeout in `serve_bounded` bounds how long a client
+    // holds the connection.
     let mut buf = [0u8; 4096];
     let mut len = 0;
     loop {
@@ -492,5 +521,24 @@ mod tests {
     fn request_path_rejects_malformed() {
         assert_eq!(request_path(b""), None);
         assert_eq!(request_path(b"not http"), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_scrape_client_is_dropped_after_the_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+
+        // Paused time auto-advances while every task waits, so this returns
+        // after SCRAPE_TIMEOUT without a real five second wait.
+        serve_bounded(
+            server,
+            peer,
+            &SharedStats::new(),
+            &DynamicConfig::new(),
+            &CriticalWindow::new(),
+        )
+        .await;
     }
 }
