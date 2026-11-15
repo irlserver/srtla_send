@@ -298,8 +298,9 @@ pub struct SrtlaConnection {
     pub connected: bool,
     pub window: i32,
     pub in_flight_packets: i32,
-    /// Packet log: sequence -> send timestamp (ms), or `None` once this link
-    /// sent the sequence again and its ACK no longer identifies a copy.
+    /// Packet log: sequence -> send timestamp (ms), or `None` for a resend
+    /// (a repeat on this link or a retransmit-flagged copy), whose ACK may
+    /// belong to an earlier copy and so cannot time a round trip.
     /// Uses FxHashMap for O(1) insert/remove instead of O(256) linear scan.
     #[cfg(feature = "test-internals")]
     pub packet_log: FxHashMap<i32, Option<u64>>,
@@ -680,9 +681,16 @@ impl SrtlaConnection {
         if batch.is_empty() {
             return batch;
         }
-        for (_, seq, send_time_ms) in &batch {
+        for (data, seq, send_time_ms) in &batch {
             if let Some(s) = seq {
-                self.register_packet(*s as i32, *send_time_ms);
+                let seq = *s as i32;
+                self.register_packet(seq, *send_time_ms);
+                // A NAK usually clears the original from the log before SRT
+                // resends it, so the repeat check in `register_packet` cannot
+                // see this copy is a resend. The retransmit flag can.
+                if is_srt_data_retransmit(data) {
+                    self.packet_log.insert(seq, None);
+                }
             }
         }
         batch

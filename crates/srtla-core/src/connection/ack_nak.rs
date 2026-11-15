@@ -250,6 +250,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retransmit_after_nak_ack_keeps_rtt_and_still_accounts() {
+        for srtla_ack in [false, true] {
+            let mut conn = create_test_connection().await;
+            conn.rtt.update_estimate(50, 950);
+            conn.register_packet(30, 1_000);
+            // A reorder NAK clears the original from the log while it is still
+            // in flight; SRT resends it with the retransmit flag set.
+            assert!(conn.handle_nak(30, 1_020));
+            let mut packet = [0u8; 16];
+            packet[..4].copy_from_slice(&30u32.to_be_bytes());
+            srtla_protocol::set_srt_data_retransmit(&mut packet);
+            conn.queue_data_packet(&packet, Some(30), 1_029);
+            assert_eq!(conn.take_batch(1_029).len(), 1);
+            conn.register_packet(31, 1_030);
+
+            // The original's ACK lands 2 ms after the resend.
+            if srtla_ack {
+                assert!(conn.handle_srtla_ack_specific(30, false, 1_031));
+            } else {
+                conn.handle_srt_ack(30, 1_031, true);
+            }
+
+            assert!(!conn.packet_log.contains_key(&30));
+            assert_eq!(conn.in_flight_packets, 1);
+            assert_eq!(conn.get_rtt_min_ms(), 50.0);
+            assert_eq!(conn.get_smooth_rtt_ms(), 50.0);
+        }
+    }
+
+    #[tokio::test]
     async fn first_ack_after_sentinel_is_accepted() {
         let mut conn = create_test_connection().await;
         assert_eq!(conn.highest_acked_seq, NO_ACK_YET);
