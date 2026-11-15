@@ -201,7 +201,7 @@ jobs:
         run: cargo +beta test --workspace --all-features --locked
 
   # Miri lane over the only unsafe FFI in the tree: the recvmmsg batch-receive
-  # path in src/connection/batch_recv.rs. Miri interprets the pure pointer logic
+  # path in src/net/batch_recv.rs. Miri interprets the pure pointer logic
   # (self-referential iovec/mmsghdr setup, msg_len -> MTU clamp, sockaddr_storage
   # decode) and fails the PR on any UB regression there. Hard limit: miri cannot
   # execute the real recvmmsg syscall, so the live-syscall path is not covered.
