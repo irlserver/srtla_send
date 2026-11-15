@@ -303,6 +303,8 @@ cargo build --profile release-lto
 
 The root is also a package, so a bare `cargo test` covers srtla_send alone and skips the crates under `crates/`. Use `--workspace`, or the `xtest` alias that CI runs.
 
+The netns tests skip when their dependencies are missing, and `NETNS_REQUIRED=1` makes a missing dependency fail the test instead (the CI netns job sets it).
+
 ```bash
 # Run all tests in the workspace with all features (what CI runs)
 cargo xtest

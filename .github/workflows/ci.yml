@@ -70,6 +70,95 @@ jobs:
       - name: Test (all features)
         run: cargo xtest --locked
 
+  # The netns suite is the only end-to-end coverage: the real binary against a
+  # real srtla_rec over several namespaced links. It needs root (passwordless
+  # sudo on the runner), sch_netem, srtla_rec and srt-live-transmit, built here
+  # from the irlserver forks the maintainer tests against. NETNS_REQUIRED=1
+  # turns a missing dependency into a failure instead of a green skip.
+  netns:
+    name: Netns integration (Linux)
+    runs-on: ubuntu-latest
+    # A hung namespace process must not hold a runner for the 6 h default.
+    timeout-minutes: 30
+    # Remove once the job has been green on main for two weeks.
+    continue-on-error: true
+    env:
+      SRT_REF: 164d51bb24e258285d1a99c881b55af7e9a94894
+      SRTLA_REF: 877dc16e36d3fef421f9cffd345b54a526020732
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build and network tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libssl-dev pkg-config iproute2
+
+      - name: Load sch_netem
+        run: |
+          sudo modprobe sch_netem || {
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe sch_netem
+          }
+          lsmod | grep sch_netem
+
+      # restore and save are split so the build is cached even while the test
+      # step still fails (actions/cache saves only on job success).
+      - name: Restore receiver-side binaries
+        id: rx-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/rx-root
+          key: netns-rx-${{ runner.os }}-${{ env.SRT_REF }}-${{ env.SRTLA_REF }}
+
+      - name: Build libsrt and srt-live-transmit (irlserver/srt)
+        if: steps.rx-cache.outputs.cache-hit != 'true'
+        run: |
+          cd "$RUNNER_TEMP"
+          git init srt && cd srt
+          git remote add origin https://github.com/irlserver/srt.git
+          git fetch --depth 1 origin "$SRT_REF"
+          git checkout FETCH_HEAD
+          cmake -DCMAKE_INSTALL_PREFIX=/usr .
+          make -j"$(nproc)"
+          make DESTDIR="$RUNNER_TEMP/rx-root" install
+
+      - name: Build srtla_rec (irlserver/srtla)
+        if: steps.rx-cache.outputs.cache-hit != 'true'
+        run: |
+          cd "$RUNNER_TEMP"
+          git init srtla && cd srtla
+          git remote add origin https://github.com/irlserver/srtla.git
+          git fetch --depth 1 origin "$SRTLA_REF"
+          git checkout FETCH_HEAD
+          git submodule update --init --depth 1
+          cmake -B build .
+          cmake --build build -j"$(nproc)"
+          install -D -m 0755 build/srtla_rec "$RUNNER_TEMP/rx-root/usr/local/bin/srtla_rec"
+
+      - name: Save receiver-side binaries
+        if: steps.rx-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/rx-root
+          key: ${{ steps.rx-cache.outputs.cache-primary-key }}
+
+      - name: Install receiver-side binaries
+        run: |
+          sudo cp -a "$RUNNER_TEMP/rx-root/." /
+          sudo ldconfig
+          command -v srtla_rec srt-live-transmit
+          pkg-config --modversion srt
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Netns tests
+        env:
+          NETNS_REQUIRED: "1"
+        run: cargo test --locked --test 'netns_*' -- --test-threads=1
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
