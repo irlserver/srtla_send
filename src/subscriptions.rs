@@ -32,7 +32,7 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
 /// Most subscriptions the hub holds at once. `publish` runs on the same loop
@@ -102,22 +102,27 @@ impl SubscriptionHub {
         let mut to_prune = Vec::new();
         {
             let entries = self.entries.lock().await;
+            if !entries.iter().any(|e| e.topic == topic) {
+                return;
+            }
+            // The payload is the same for every subscriber, so it is
+            // serialized once and only the subscription id differs per line.
+            let Ok(data_json) = serde_json::to_string(&data) else {
+                return;
+            };
+            let Ok(method_json) = serde_json::to_string(&format!("{topic}.update")) else {
+                return;
+            };
             for entry in entries.iter() {
                 if entry.topic != topic {
                     continue;
                 }
-                let envelope = json!({
-                    "jsonrpc": "2.0",
-                    "method": format!("{topic}.update"),
-                    "params": {
-                        "subscription_id": entry.id,
-                        "data": data,
-                    },
-                });
-                let line = match serde_json::to_string(&envelope) {
-                    Ok(s) => s,
-                    Err(_) => continue,
+                let Ok(id_json) = serde_json::to_string(&entry.id) else {
+                    continue;
                 };
+                let line = format!(
+                    r#"{{"jsonrpc":"2.0","method":{method_json},"params":{{"subscription_id":{id_json},"data":{data_json}}}}}"#
+                );
                 match entry.sender.try_send(line) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -153,6 +158,8 @@ impl SubscriptionHub {
 // keep compiling on Windows.
 #[cfg(all(test, unix))]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[tokio::test]
