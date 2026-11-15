@@ -33,7 +33,7 @@ pub(crate) use packet_handler::handle_uplink_packet;
 // Re-exported for the NAK-attribution conformance tests so they drive the real
 // production path rather than a mirrored copy.
 #[allow(unused_imports)]
-pub(crate) use packet_handler::{attribute_nak, process_connection_events};
+pub(crate) use packet_handler::{attribute_nak, note_srt_session_start, process_connection_events};
 use packet_handler::{drain_packet_queue, flush_all_batches, handle_srt_packet};
 // Scripted resolver seam for tests that drive the re-home trigger policy.
 #[cfg(any(test, feature = "test-internals"))]
@@ -185,6 +185,7 @@ pub async fn run_sender_with_config(
 
     let mut status_elapsed_ms: u64 = 0;
     let mut last_client_addr: Option<SocketAddr> = None;
+    let mut last_session_isn: Option<u32> = None;
     let mut no_link_log = NoLinkLog::default();
     // Zero-allocation ring buffer for sequence tracking
     let mut seq_tracker = SequenceTracker::new();
@@ -254,6 +255,7 @@ pub async fn run_sender_with_config(
                             &mut seq_tracker,
                             &mut last_client_addr,
                             &mut no_link_log,
+                            &mut last_session_isn,
                             reg.has_connected,
                             &config_snap,
                             &critical_window,

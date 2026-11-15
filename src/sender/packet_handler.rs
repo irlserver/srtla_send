@@ -286,6 +286,30 @@ fn select_pre_registration_connection(
         .map(|(i, _)| i)
 }
 
+/// Reset every link's cumulative ACK state when the encoder opens a new SRT
+/// session. Returns `true` when `isn` differs from the last session seen,
+/// which is when the caller logs. The encoder resends its induction about
+/// every 250 ms until answered, so the same ISN arrives several times.
+pub(crate) fn note_srt_session_start(
+    isn: u32,
+    connections: &mut [SrtlaConnection],
+    last_session_isn: &mut Option<u32>,
+) -> bool {
+    // A resent induction carries no data, so repeating the reset is harmless.
+    for conn in connections.iter_mut() {
+        conn.reset_srt_session();
+    }
+    if *last_session_isn == Some(isn) {
+        return false;
+    }
+    *last_session_isn = Some(isn);
+    info!(
+        "encoder started a new SRT session (isn {isn}), resetting ACK state on {} links",
+        connections.len()
+    );
+    true
+}
+
 /// Handle incoming SRT packet
 ///
 /// Uses a pre-cached `ConfigSnapshot` to avoid atomic loads per packet.
@@ -304,6 +328,7 @@ pub async fn handle_srt_packet(
     seq_tracker: &mut SequenceTracker,
     last_client_addr: &mut Option<SocketAddr>,
     no_link_log: &mut NoLinkLog,
+    last_session_isn: &mut Option<u32>,
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
     critical_window: &srtla_core::priority::CriticalWindow,
@@ -317,6 +342,10 @@ pub async fn handle_srt_packet(
             let packet_time_ms = srtla_core::utils::now_ms();
 
             let pkt = &recv_buf[..n];
+            let session_isn = srtla_protocol::parse_srt_session_start(pkt);
+            if let Some(isn) = session_isn {
+                note_srt_session_start(isn, connections, last_session_isn);
+            }
             let seq = srtla_protocol::get_srt_sequence_number(pkt);
             if !registration_complete {
                 let sel_idx = select_pre_registration_connection(

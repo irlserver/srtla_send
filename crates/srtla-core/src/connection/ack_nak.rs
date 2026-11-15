@@ -208,6 +208,25 @@ impl SrtlaConnection {
         false
     }
 
+    /// Forget the cumulative ACK state of the previous SRT session.
+    ///
+    /// The shell calls this when the encoder opens a new SRT session while the
+    /// bond stays up. `highest_acked_seq` goes because the new session's random
+    /// ISN can sit behind the old value in serial order, which makes
+    /// `handle_srt_ack` ignore every ACK. `packet_log` goes because its entries
+    /// belong to a session the encoder ended. The new session's ACKs can never
+    /// prune them, so they would count as in flight until an SRTLA ACK happened
+    /// to arrive for each. `probe_log` goes because its keys are sequences of
+    /// the ended session, so a new-session ACK could match one by accident and
+    /// record a false RTT sample. The congestion window, RTT and phase stay,
+    /// because they describe the link, not the session.
+    pub fn reset_srt_session(&mut self) {
+        self.highest_acked_seq = NO_ACK_YET;
+        self.packet_log.clear();
+        self.probe_log.clear();
+        self.in_flight_packets = 0;
+    }
+
     pub fn handle_srtla_ack_global(&mut self) {
         // Global +1 window increase for connections that have received data (from
         // original implementation)
@@ -403,6 +422,52 @@ mod tests {
         assert_eq!(conn.highest_acked_seq, 10);
         assert!(conn.packet_log.contains_key(&20));
         assert_eq!(conn.in_flight_packets, 1);
+    }
+
+    #[tokio::test]
+    async fn reset_srt_session_accepts_an_isn_behind_the_old_ack() {
+        let mut conn = create_test_connection().await;
+        let mut control = create_test_connection().await;
+        for c in [&mut conn, &mut control] {
+            c.register_packet(10, 1_000);
+            c.register_packet(20, 1_000);
+            c.handle_srt_ack(20, 1_040, false);
+            assert_eq!(c.highest_acked_seq, 20);
+        }
+
+        conn.reset_srt_session();
+
+        // More than 2^30 ahead of 20, so serial order reads it as behind the
+        // old session's highest ACK.
+        for c in [&mut conn, &mut control] {
+            c.register_packet(0x4000_0100, 2_000);
+            c.handle_srt_ack(0x4000_0100, 2_040, false);
+        }
+
+        assert_eq!(conn.highest_acked_seq, 0x4000_0100);
+        assert!(conn.packet_log.is_empty());
+        assert_eq!(conn.in_flight_packets, 0);
+
+        assert_eq!(control.highest_acked_seq, 20);
+        assert!(control.packet_log.contains_key(&0x4000_0100));
+    }
+
+    #[tokio::test]
+    async fn reset_srt_session_clears_probe_log_and_keeps_window() {
+        let mut conn = create_test_connection().await;
+        conn.probe_log.insert(
+            42,
+            crate::connection::ProbeRecord {
+                sent_ms: 1_000,
+                ambiguous: false,
+            },
+        );
+        conn.window = 12_345;
+
+        conn.reset_srt_session();
+
+        assert!(conn.probe_log.is_empty());
+        assert_eq!(conn.window, 12_345);
     }
 
     #[tokio::test]
