@@ -8,16 +8,15 @@ mod common;
 use std::thread;
 use std::time::Duration;
 
-use network_sim::{ImpairmentConfig, SrtlaTestStack};
+use network_sim::ImpairmentConfig;
 
 #[test]
 fn test_asymmetric_delay() {
     if common::skip_without_impairment_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("asym", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("asym", 2, &[]).expect("start stack");
 
     // Link 0: low delay, Link 1: high delay
     stack
@@ -62,9 +61,8 @@ fn test_loss_triggers_window_reduction() {
     if common::skip_without_impairment_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("loss", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("loss", 2, &[]).expect("start stack");
 
     // Wait for clean registration first (bounded readiness poll).
     common::wait_until_ready(&stack);
@@ -99,9 +97,8 @@ fn test_tbf_bandwidth_limit() {
     if common::skip_without_impairment_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("tbf", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("tbf", 2, &[]).expect("start stack");
 
     // Link 0: 1 Mbps, Link 1: 5 Mbps
     stack

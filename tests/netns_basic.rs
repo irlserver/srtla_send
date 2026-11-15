@@ -8,16 +8,13 @@ mod common;
 use std::thread;
 use std::time::Duration;
 
-use network_sim::SrtlaTestStack;
-
 #[test]
 fn test_two_link_registration() {
     if common::skip_without_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("reg2", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("reg2", 2, &[]).expect("start stack");
 
     // Wait for registration to complete on both links (bounded readiness poll).
     common::wait_until_ready(&stack);
@@ -41,9 +38,8 @@ fn test_data_forwarding() {
     if common::skip_without_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("fwd", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("fwd", 2, &[]).expect("start stack");
 
     // Wait for registration to complete (bounded readiness poll).
     common::wait_until_ready(&stack);

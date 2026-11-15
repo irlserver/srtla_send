@@ -38,7 +38,7 @@ mod common;
 use std::thread;
 use std::time::Duration;
 
-use network_sim::{ImpairmentConfig, SrtlaTestStack};
+use network_sim::ImpairmentConfig;
 
 /// Both links are the same generous size. Each is far above the share it
 /// ends up carrying, so the lossy link stays uncongested and its 2% loss
@@ -70,12 +70,11 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
         eprintln!("Skipping: {reason}");
         return;
     }
-    common::build_srtla_send();
     let sender_bin = network_sim::build_adaptive_sender().expect("build adaptive SRT sender");
 
     let sock = format!("/tmp/srtla-wireloss-{}.sock", std::process::id());
     let mut stack =
-        SrtlaTestStack::start("wireloss", 2, &["--control-socket", &sock]).expect("start stack");
+        common::start_stack("wireloss", 2, &["--control-socket", &sock]).expect("start stack");
 
     // Same delay on both, so RTT cannot be what separates them: the only
     // difference the scheduler can see is loss.

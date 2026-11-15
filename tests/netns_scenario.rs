@@ -8,16 +8,15 @@ mod common;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use network_sim::{ImpairmentConfig, LinkScenarioConfig, Scenario, ScenarioConfig, SrtlaTestStack};
+use network_sim::{ImpairmentConfig, LinkScenarioConfig, Scenario, ScenarioConfig};
 
 #[test]
 fn test_random_walk_stability() {
     if common::skip_without_impairment_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("rw", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("rw", 2, &[]).expect("start stack");
 
     // Wait for registration to complete (bounded readiness poll).
     common::wait_until_ready(&stack);
@@ -119,9 +118,8 @@ fn test_step_change_convergence() {
     if common::skip_without_impairment_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("step", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("step", 2, &[]).expect("start stack");
 
     // Wait for registration to complete (bounded readiness poll).
     common::wait_until_ready(&stack);

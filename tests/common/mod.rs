@@ -45,14 +45,19 @@ pub fn skip_without_impairment_deps() -> bool {
     }
 }
 
-/// Build the srtla_send binary (debug mode). Call once before tests that
-/// need the binary. Panics if the build fails.
-pub fn build_srtla_send() {
-    let status = std::process::Command::new("cargo")
-        .args(["build", "--bin", "srtla_send"])
-        .status()
-        .expect("failed to run cargo build");
-    assert!(status.success(), "cargo build failed");
+/// Start the netns stack against the srtla_send binary cargo built for this
+/// test run.
+pub fn start_stack(
+    test_name: &str,
+    num_links: usize,
+    sender_extra_args: &[&str],
+) -> anyhow::Result<SrtlaTestStack> {
+    SrtlaTestStack::start(
+        std::path::Path::new(env!("CARGO_BIN_EXE_srtla_send")),
+        test_name,
+        num_links,
+        sender_extra_args,
+    )
 }
 
 /// Inject `count` UDP packets to srtla_send's local SRT port from within

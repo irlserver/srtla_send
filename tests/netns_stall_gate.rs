@@ -13,7 +13,7 @@ mod common;
 
 use std::time::Duration;
 
-use network_sim::{ImpairmentConfig, SrtlaTestStack};
+use network_sim::ImpairmentConfig;
 
 /// Lowered staleness ceiling. The latch must engage and the blackhole must
 /// end well inside CONN_TIMEOUT (5 s): a timed-out link resets its latch, and
@@ -25,9 +25,8 @@ fn test_stall_gate_latches_and_rejoins_after_dwell() {
     if common::skip_without_impairment_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("stall", 2, &["--stall-ack-stale-ms", STALE_CEILING_MS])
+    let mut stack = common::start_stack("stall", 2, &["--stall-ack-stale-ms", STALE_CEILING_MS])
         .expect("start stack");
     common::wait_until_ready(&stack);
 

@@ -8,16 +8,15 @@ mod common;
 use std::thread;
 use std::time::Duration;
 
-use network_sim::{ImpairmentConfig, SrtlaTestStack};
+use network_sim::ImpairmentConfig;
 
 #[test]
 fn test_link_failure_failover() {
     if common::skip_without_impairment_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("fail", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("fail", 2, &[]).expect("start stack");
 
     // Wait for registration to complete (bounded readiness poll).
     common::wait_until_ready(&stack);
@@ -56,9 +55,8 @@ fn test_link_recovery() {
     if common::skip_without_impairment_deps() {
         return;
     }
-    common::build_srtla_send();
 
-    let mut stack = SrtlaTestStack::start("recv", 2, &[]).expect("start stack");
+    let mut stack = common::start_stack("recv", 2, &[]).expect("start stack");
 
     // Wait for registration to complete (bounded readiness poll).
     common::wait_until_ready(&stack);

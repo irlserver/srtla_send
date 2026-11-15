@@ -848,8 +848,16 @@ const SRTLA_SEND_SRT_PORT: u16 = 5555;
 impl SrtlaTestStack {
     /// Start the full stack: srt-live-transmit → srtla_rec → srtla_send.
     ///
-    /// `sender_extra_args` are appended to the srtla_send command line.
-    pub fn start(test_name: &str, num_links: usize, sender_extra_args: &[&str]) -> Result<Self> {
+    /// `srtla_send_bin` is the sender under test. Callers pass the binary cargo
+    /// built for this test run (`CARGO_BIN_EXE_srtla_send`), so an external
+    /// `CARGO_TARGET_DIR` or an installed sender on `PATH` can never stand in
+    /// for it. `sender_extra_args` are appended to the srtla_send command line.
+    pub fn start(
+        srtla_send_bin: &Path,
+        test_name: &str,
+        num_links: usize,
+        sender_extra_args: &[&str],
+    ) -> Result<Self> {
         let topo = SrtlaTestTopology::new(test_name, num_links)?;
         let ip_list_path = topo.write_ip_list()?;
 
@@ -911,8 +919,6 @@ impl SrtlaTestStack {
         ];
         send_args.extend_from_slice(sender_extra_args);
 
-        // Find the srtla_send binary built by cargo
-        let srtla_send_bin = find_srtla_send_binary()?;
         let bin_str = srtla_send_bin.to_string_lossy().to_string();
 
         let srtla_send = NamespaceProcess::spawn_with_env(
@@ -1222,41 +1228,6 @@ pub fn spawn_udp_stream(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Locate the srtla_send binary from a cargo build.
-fn find_srtla_send_binary() -> Result<PathBuf> {
-    // Check common cargo build output locations
-    let candidates = [
-        // Debug build
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("target/debug/srtla_send"),
-        // Release build
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("target/release/srtla_send"),
-    ];
-
-    for path in &candidates {
-        if path.exists() {
-            return Ok(path.clone());
-        }
-    }
-
-    // Fall back to PATH
-    check_binary("srtla_send").ok_or_else(|| {
-        anyhow::anyhow!(
-            "srtla_send binary not found. Run `cargo build` first. Checked: {:?}",
-            candidates
-        )
-    })
-}
 
 #[cfg(test)]
 mod registration_log_tests {
