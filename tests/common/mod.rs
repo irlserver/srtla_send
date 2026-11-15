@@ -22,15 +22,23 @@ pub fn wait_until_ready(stack: &SrtlaTestStack) {
         .expect("srtla_send uplinks registered with receiver");
 }
 
+/// Under `NETNS_REQUIRED=1` (the CI netns job) a missing dependency is a broken
+/// runner, not a reason to skip: fail loudly so the job cannot pass green with
+/// nothing run.
+pub fn skip_or_fail(reason: impl std::fmt::Display) -> bool {
+    if std::env::var_os("NETNS_REQUIRED").is_some_and(|v| v == "1") {
+        panic!("NETNS_REQUIRED=1 but a dependency is missing: {reason}");
+    }
+    eprintln!("Skipping: {reason}");
+    true
+}
+
 /// Check all integration test dependencies. Returns `true` if tests should
 /// be skipped (prints the reason to stderr). Use at the top of every test.
 pub fn skip_without_deps() -> bool {
     match check_integration_deps() {
         Ok(()) => false,
-        Err(reason) => {
-            eprintln!("Skipping: {reason}");
-            true
-        }
+        Err(reason) => skip_or_fail(reason),
     }
 }
 
@@ -38,10 +46,7 @@ pub fn skip_without_deps() -> bool {
 pub fn skip_without_impairment_deps() -> bool {
     match check_impairment_deps() {
         Ok(()) => false,
-        Err(reason) => {
-            eprintln!("Skipping: {reason}");
-            true
-        }
+        Err(reason) => skip_or_fail(reason),
     }
 }
 

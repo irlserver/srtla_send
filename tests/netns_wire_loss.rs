@@ -66,8 +66,9 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
         return;
     }
     // The adaptive sender is compiled here against the system libsrt.
-    if let Err(reason) = network_sim::check_adaptive_sender_deps() {
-        eprintln!("Skipping: {reason}");
+    if let Err(reason) = network_sim::check_adaptive_sender_deps()
+        && common::skip_or_fail(reason)
+    {
         return;
     }
     let sender_bin = network_sim::build_adaptive_sender().expect("build adaptive SRT sender");
