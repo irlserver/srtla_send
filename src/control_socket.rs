@@ -12,6 +12,8 @@
 //! the appropriate connection's push channel.
 
 #[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use srtla_core::priority::CriticalWindow;
@@ -64,9 +66,27 @@ async fn run(
     critical_window: CriticalWindow,
     hub: SubscriptionHub,
 ) -> std::io::Result<()> {
-    // Remove stale socket file from a previous run.
-    let _ = std::fs::remove_file(&socket_path);
+    // A socket left by a previous run is replaced. Anything else at the path
+    // (a regular file, a symlink, a directory) is the operator's and stays.
+    match std::fs::symlink_metadata(&socket_path) {
+        Ok(meta) if meta.file_type().is_socket() => std::fs::remove_file(&socket_path)?,
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} exists and is not a socket, refusing to replace it",
+                    socket_path.display()
+                ),
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let listener = UnixListener::bind(&socket_path)?;
+    // Any process that can connect can change routing, so only the owning
+    // user may connect. The directory holding the socket covers the moment
+    // between bind and this call.
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     info!(?socket_path, "unix control socket listening");
 
     loop {
@@ -193,6 +213,7 @@ mod tests {
     use super::*;
 
     const IO_TIMEOUT: Duration = Duration::from_secs(2);
+    const GET_STATUS: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"get_status\"}\n";
 
     fn start(path: &Path) -> SubscriptionHub {
         let hub = SubscriptionHub::new();
@@ -276,5 +297,32 @@ mod tests {
         assert_eq!(resp["id"], 7, "split request was mangled: {resp}");
         assert!(resp.get("result").is_some(), "expected a result: {resp}");
         assert!(resp.get("error").is_none(), "unexpected error: {resp}");
+    }
+
+    #[tokio::test]
+    async fn socket_is_created_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let _hub = start(&path);
+        let (mut reader, mut writer) = connect(&path).await;
+        // The server only accepts after the chmod, so an answer means the
+        // mode is final.
+        send(&mut writer, GET_STATUS).await;
+        read_json(&mut reader).await;
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn a_regular_file_at_the_path_is_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        std::fs::write(&path, b"keep").unwrap();
+        let _hub = start(&path);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(std::fs::metadata(&path).unwrap().is_file());
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep");
     }
 }
