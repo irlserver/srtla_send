@@ -105,7 +105,7 @@ async fn handle(
     let mut reader = BufReader::new(read_half);
     let mut buf: Vec<u8> = Vec::new();
     let (push_tx, mut push_rx) = mpsc::channel::<String>(128);
-    let mut owned_ids: Vec<String> = Vec::new();
+    let mut owned_ids: Vec<(String, String)> = Vec::new();
 
     loop {
         // `read_until` keeps partial input in `buf` when the push branch wins
@@ -177,7 +177,7 @@ async fn handle(
     }
 
     // Clean up this connection's subscriptions from the hub.
-    for id in owned_ids {
+    for (id, _topic) in owned_ids {
         hub.unsubscribe(&id).await;
     }
 }

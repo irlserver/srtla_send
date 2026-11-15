@@ -20,8 +20,8 @@
 //!
 //! JSON-RPC error codes follow the spec:
 //! `-32700` parse error, `-32600` invalid request, `-32601` method not found,
-//! `-32602` invalid params, `-32603` internal error. Anything above `-32000`
-//! is reserved for future app-specific errors.
+//! `-32602` invalid params, `-32603` internal error. App-specific errors use
+//! the server range from `-32000`: `-32000` subscription limit reached.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,6 +42,8 @@ const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
+#[cfg(unix)]
+const SUBSCRIPTION_LIMIT: i32 = -32000;
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -121,8 +123,10 @@ pub struct SubscriptionContext<'a> {
     /// Push channel for *this* connection. Used by the hub to fan out
     /// published events onto the socket.
     pub push_tx: mpsc::Sender<String>,
-    /// Subscription ids owned by this connection, for cleanup on drop.
-    pub owned_ids: &'a mut Vec<String>,
+    /// `(subscription id, topic)` pairs owned by this connection. Used for
+    /// cleanup on drop, for one subscription per topic, and so a connection
+    /// can only unsubscribe its own ids.
+    pub owned_ids: &'a mut Vec<(String, String)>,
 }
 
 /// Sync dispatch — used by the stdin/readline loops. Subscriptions are
@@ -210,8 +214,15 @@ async fn handle_subscribe(
             format!("unknown topic: {topic}"),
         ));
     }
-    let id = ctx.hub.subscribe(topic, ctx.push_tx.clone()).await;
-    ctx.owned_ids.push(id.clone());
+    if let Some((id, _)) = ctx.owned_ids.iter().find(|(_, t)| t == topic) {
+        return Ok(serde_json::json!({ "subscription_id": id }));
+    }
+    let id = ctx
+        .hub
+        .subscribe(topic, ctx.push_tx.clone())
+        .await
+        .ok_or_else(|| ErrorObject::new(SUBSCRIPTION_LIMIT, "subscription limit reached"))?;
+    ctx.owned_ids.push((id.clone(), topic.to_string()));
     Ok(serde_json::json!({ "subscription_id": id }))
 }
 
@@ -227,7 +238,7 @@ async fn handle_unsubscribe(
             ErrorObject::new(INVALID_PARAMS, "expected params.subscription_id: string")
         })?;
     let removed = ctx.hub.unsubscribe(id).await;
-    ctx.owned_ids.retain(|x| x != id);
+    ctx.owned_ids.retain(|(x, _)| x != id);
     Ok(serde_json::json!({ "removed": removed }))
 }
 

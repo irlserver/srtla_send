@@ -35,6 +35,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 
+/// Most subscriptions the hub holds at once. `publish` runs on the same loop
+/// that forwards every SRT packet and does work per subscriber, so this bounds
+/// what a local client can add to each tick.
+pub const MAX_SUBSCRIPTIONS: usize = 64;
+
 /// One registered subscription. The sender is the *connection's* push
 /// channel — all subscriptions multiplex over a single mpsc to the
 /// client, with the subscription id carried in each notification so
@@ -62,17 +67,22 @@ impl SubscriptionHub {
     }
 
     /// Register a subscription. Returns the subscription id the client
-    /// should use to unsubscribe. Caller supplies their push channel;
+    /// should use to unsubscribe, or `None` when the hub already holds
+    /// [`MAX_SUBSCRIPTIONS`]. Caller supplies their push channel;
     /// every published event on the topic is written to it.
     #[cfg(unix)]
-    pub async fn subscribe(&self, topic: &str, push_tx: mpsc::Sender<String>) -> String {
+    pub async fn subscribe(&self, topic: &str, push_tx: mpsc::Sender<String>) -> Option<String> {
+        let mut entries = self.entries.lock().await;
+        if entries.len() >= MAX_SUBSCRIPTIONS {
+            return None;
+        }
         let id = format!("sub-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
-        self.entries.lock().await.push(Entry {
+        entries.push(Entry {
             id: id.clone(),
             topic: topic.to_string(),
             sender: push_tx,
         });
-        id
+        Some(id)
     }
 
     /// Remove a subscription by id. Returns true if it was present.
@@ -149,7 +159,7 @@ mod tests {
     async fn subscribe_publish_roundtrip() {
         let hub = SubscriptionHub::new();
         let (tx, mut rx) = mpsc::channel::<String>(8);
-        let id = hub.subscribe("stats", tx).await;
+        let id = hub.subscribe("stats", tx).await.unwrap();
         assert!(id.starts_with("sub-"));
 
         hub.publish("stats", json!({"active_links": 3})).await;
@@ -181,7 +191,7 @@ mod tests {
     async fn unsubscribe_removes_entry() {
         let hub = SubscriptionHub::new();
         let (tx, mut rx) = mpsc::channel::<String>(8);
-        let id = hub.subscribe("stats", tx).await;
+        let id = hub.subscribe("stats", tx).await.unwrap();
         assert!(hub.unsubscribe(&id).await);
         hub.publish("stats", json!({})).await;
         assert!(rx.try_recv().is_err());
