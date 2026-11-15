@@ -30,11 +30,11 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 
 - **Language**: Rust (Edition 2024). `rust-toolchain.toml` pins the stable toolchain; nightly is used only for rustfmt
 - **Minimum Rust Version**: the `rust-version` in `Cargo.toml`, checked by the CI MSRV job
-- **Async Runtime**: Tokio (multi-threaded runtime with macros, net, time, io-util, signal)
+- **Async Runtime**: Tokio (multi-threaded runtime with macros, net, time, io-util, signal, sync)
 - **CLI**: clap with derive features
 - **Logging**: tracing + tracing-subscriber with env-filter
 - **Networking**: socket2 for low-level socket operations, tokio::net for async UDP
-- **Other dependencies**: anyhow (error handling), rand, bytes, chrono, smallvec
+- **Other dependencies**: anyhow (errors), rand, serde and serde_json (control protocol, stats), toml (config file), smallvec, rustc-hash (srtla-core maps), mimalloc (default allocator)
 
 ### Build Profiles
 
@@ -44,69 +44,117 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 
 ### Version
 
-Current version: 3.0.0
+The root package version is the `version` field in the root `Cargo.toml`, and the crates under `crates/` carry their own versions.
 
 ## Codebase Structure
 
 ### Directory Layout
 
 ```
-src/
-  tests/
-    config_tests.rs
-    connection_tests.rs
-    end_to_end_tests.rs
-    integration_tests.rs
-    mod.rs
-    protocol_tests.rs
-    registration_tests.rs
-    rtt_threshold_tests.rs
-    sender_tests.rs
-  config.rs          - Runtime configuration (DynamicConfig, ConfigSnapshot)
-  connection.rs      - Connection management and quality scoring
-  lib.rs             - Library exports
-  main.rs            - CLI entry point
-  mode.rs            - Scheduling mode enum (Classic, Enhanced, RttThreshold)
-  protocol.rs        - SRTLA protocol definitions
-  registration.rs    - Registration flow (REG1/REG2/REG3)
-  sender.rs          - Main sender logic and packet forwarding
-  test_helpers.rs    - Test utilities
-  utils.rs           - Utility functions
-.cargo/
-  config.toml
-.github/
-  workflows/
-    build-debian.yml
-    ci.yml
-Cargo.toml          - Project manifest
-build.rs            - Build script
-rustfmt.toml        - Formatting configuration
+src/                     root crate srtla_send: the I/O shell and the binary
+  main.rs                CLI (clap), config file merge, startup
+  lib.rs                 library exports
+  config.rs              DynamicConfig (runtime atomics), stdin command reader
+  control.rs             JSON-RPC 2.0 dispatcher (stdin and Unix socket)
+  control_socket.rs      async Unix control socket
+  subscriptions.rs       server-push subscriptions for the control socket
+  priority_listener.rs   UDP priority sidecar listener
+  stats.rs               StatsSnapshot for get_stats
+  metrics.rs             Prometheus /metrics endpoint
+  toml_config.rs         --config TOML file
+  version.rs             -v/--version line
+  test_helpers.rs        test helpers (test or test-internals)
+  net/                   uplink socket I/O
+    batch_recv.rs        recvmmsg/sendmmsg batch socket (the only unsafe FFI besides apple.rs)
+    socket.rs            uplink socket creation, egress binders, receiver DNS resolution
+    apple.rs             egress binding for Apple platforms
+  sender/                the event loop and everything it drives
+    mod.rs               run_sender_with_config, the main select! loop
+    packet_handler.rs    local SRT ingress, ACK/NAK handling, batch flushing
+    uplink.rs            per-uplink reader tasks, ConnIo
+    uplink_recv.rs       inbound uplink packet processing
+    housekeeping.rs      1 s tick: keepalives, timeouts, reconnects
+    connections.rs       uplink creation and SIGHUP reload apply
+    reload.rs            SIGHUP IP-list reload guard
+    rehome.rs            whole-bond re-home
+    sequence.rs          sequence-to-link ring buffer
+    client_dedup.rs      one forward per distinct SRT ACK/NAK
+    status.rs            periodic status log
+  tests/                 in-crate tests (#[cfg(test)])
+tests/                   integration tests: netns_*.rs (need root), parser_proptest.rs,
+                         srtla_wire_conformance.rs, signal_shutdown.rs, startup_bind_ordering.rs
+  common/                shared helpers for the integration tests
+crates/
+  srtla-core/            sans-IO core: connection state, selection, registration, congestion
+    src/connection/      SrtlaConnection, ack_nak, rtt, bitrate, incoming, congestion/,
+                         reconnection, batch_send
+    src/selection/       classic, enhanced, classifier, link_cc, quality
+    src/registration/    REG1/REG2/REG3 state machine, probing
+    src/config_snapshot.rs, mode.rs, priority.rs, seq.rs, kalman.rs, ewma.rs, windowed_min.rs,
+    utils.rs, test_helpers.rs (test or test-internals)
+  srtla-protocol/        stateless wire format: parsers, builders, constants, types
+  network-sim/           dev-only netns + tc netem harness for tests/netns_*.rs
+.github/workflows/       ci.yml (lint, test matrix, MSRV, beta, miri, supply chain),
+                         build.yml (release .debs), release.yml (draft release on tag)
+.cargo/config.toml       cargo aliases (xlint, xtest) and the workspace rustflags
+Cargo.toml               workspace and root package manifest
+build.rs                 build script (git metadata for the version line)
+rustfmt.toml             formatting configuration (nightly rustfmt)
 ```
 
 ### Module Organization
 
-- `config`: Runtime configuration with atomic settings (DynamicConfig, ConfigSnapshot)
-- `mode`: SchedulingMode enum (Classic, Enhanced, RttThreshold)
-- `connection`: SrtlaConnection struct, bind/resolve utilities, incoming packet handling
-- `protocol`: SRTLA protocol constants and structures
-- `registration`: Registration manager for SRTLA connection setup
-- `sender`: Main packet forwarding logic, connection selection algorithm
-- `utils`: Common utilities (now_ms, etc.)
+The workspace splits policy from I/O. `srtla-core` holds all scheduling and connection state with no sockets and no tokio in production code. Its methods take the current time as a `now_ms` argument instead of reading the clock (the one exception is `SrtlaRegistrationManager::check_probing_complete` in `registration/probing.rs`, which calls `utils::now_ms()` itself). `srtla-protocol` is the stateless wire format. The root crate `srtla_send` owns sockets, tasks, signals, DNS, the control plane and telemetry, and drives the core types. New I/O goes in the root crate, new policy goes in `srtla-core`.
+
+`srtla_send` (root crate):
+
+- `config`: `DynamicConfig` (runtime atomics read through `ConfigSnapshot`) and the stdin command reader
+- `control`: JSON-RPC 2.0 dispatcher shared by stdin and the Unix socket
+- `control_socket`: async Unix control socket
+- `subscriptions`: server-push subscriptions on the control socket
+- `priority_listener`: UDP listener for the encoder priority sidecar
+- `stats`: `StatsSnapshot` served by `get_stats`
+- `metrics`: Prometheus `/metrics` endpoint
+- `toml_config`: `--config` TOML file loading
+- `net`: uplink sockets (`batch_recv`, `socket`, `apple`)
+- `sender`: the event loop and everything it drives (packet handling, uplink readers, housekeeping, reload, re-home)
+- `test_helpers`: test helpers, built under `test` or the `test-internals` feature
 - `version`: `-v/--version` line composition. The build metadata is OPTIONAL: `build.rs` emits an
   empty string for anything it could not resolve (no git checkout, detached HEAD), and
   `compose_version_line()` drops the parenthetical entirely rather than printing a placeholder
   word. Do not reintroduce `"unknown"`, and do not infer "dirty" from a non-zero `git diff` exit
   code (it exits 128/129 when there is no repository at all).
 
+`srtla-core`:
+
+- `connection`: `SrtlaConnection` and its per-link state (ACK/NAK, RTT, bitrate, congestion, reconnection, batch send)
+- `selection`: link selection (`classic`, `enhanced`, `classifier`, `link_cc`, `quality`)
+- `registration`: REG1/REG2/REG3 state machine, plus the REG2 probes that pick the lowest-RTT link for the first REG1
+- `config_snapshot`: `ConfigSnapshot` and the scheduler tunables
+- `mode`: `SchedulingMode` (`Classic`, `Enhanced`)
+- `priority`: `CriticalWindow`, the state behind the priority sidecar
+- `seq`: wrap-aware arithmetic for 31-bit SRT sequence numbers
+- `kalman`, `ewma`, `windowed_min`: numeric filters
+- `utils`: `now_ms()`, the monotonic clock the shell reads and passes in
+- `test_helpers`: socket-free connection builders, built under `test` or the `test-internals` feature
+
+`srtla-protocol`: `builders`, `parsers`, `constants` and `types`, all re-exported from the crate root.
+
 ### Test Organization
 
-Tests are located in `src/tests/`:
+- `src/tests/*.rs`: in-crate tests, compiled only under `#[cfg(test)]`.
+- In-module `#[cfg(test)] mod tests` blocks in `crates/srtla-core` and `crates/srtla-protocol`.
+- `tests/*.rs`: integration tests. `signal_shutdown.rs`, `startup_bind_ordering.rs` and `netns_*.rs` spawn the built binary. `parser_proptest.rs` and `srtla_wire_conformance.rs` test `srtla-protocol` directly. `tests/netns_*.rs` need root, `ip`, `tc`, `ss`, `srtla_rec` and `srt-live-transmit` (the impairment tests also need `sch_netem`), and skip at runtime when any is missing.
+- The `test-internals` feature makes core fields `pub` for cross-crate tests through `#[cfg(feature = "test-internals")]` field pairs, for example `packet_log` on `SrtlaConnection`:
 
-- Unit tests: In-module tests for individual components
-- Integration tests: Cross-module tests
-- End-to-end tests: Full system tests
-- Protocol tests: SRTLA protocol implementation tests
-- Feature flag: `test-internals` exposes internal fields for testing
+  ```rust
+  #[cfg(feature = "test-internals")]
+  pub packet_log: FxHashMap<i32, Option<u64>>,
+  #[cfg(not(feature = "test-internals"))]
+  pub(crate) packet_log: FxHashMap<i32, Option<u64>>,
+  ```
+
+  The root `Cargo.toml` enables it on `srtla-core` through `[dev-dependencies]`.
 
 ## Code Style and Conventions
 
