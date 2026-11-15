@@ -1,8 +1,7 @@
 //! SRTLA wire protocol: pure, stateless packet (de)serialization.
 //!
 //! No clock, no state, no I/O — just byte layout for the SRTLA registration
-//! handshake, SRT ACK/NAK, and keepalives. The sender crate re-exports this as
-//! `crate::protocol`, so `use crate::protocol::*` keeps working there.
+//! handshake, SRT ACK/NAK, and keepalives.
 
 mod builders;
 mod constants;
