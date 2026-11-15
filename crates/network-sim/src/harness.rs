@@ -1162,8 +1162,12 @@ pub const TS_PACKET_BYTES: usize = 188;
 /// Source port every test injector sends from, so a whole test looks like one
 /// encoder socket to srtla_send's client pin, which drops packets from any
 /// other source. Network namespaces isolate ports, so a fixed number cannot
-/// collide with another test.
-pub const ENCODER_SOURCE_PORT: u16 = 40_000;
+/// collide with another test. The port sits below Linux's default ephemeral
+/// range (32768 to 60999), so an srtla_send uplink or SRT socket in the same
+/// namespace never takes it. Injectors set `SO_REUSEPORT` because sequential
+/// injector processes rebind the port immediately and `spawn_udp_stream` may
+/// overlap a one-shot injection.
+pub const ENCODER_SOURCE_PORT: u16 = 31_000;
 /// libsrt's default payload size. Prefer this when a test needs real
 /// throughput: a Python pump cannot reliably sleep in the sub-millisecond
 /// intervals that megabit rates demand at 188 bytes a datagram, so it

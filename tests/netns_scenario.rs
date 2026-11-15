@@ -8,7 +8,9 @@ mod common;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use network_sim::{ImpairmentConfig, LinkScenarioConfig, Scenario, ScenarioConfig};
+use network_sim::{
+    ENCODER_SOURCE_PORT, ImpairmentConfig, LinkScenarioConfig, Scenario, ScenarioConfig,
+};
 
 #[test]
 fn test_random_walk_stability() {
@@ -72,6 +74,9 @@ fn test_random_walk_stability() {
                         "-c",
                         &format!(
                             "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); \
+                             s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); \
+                             s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEPORT,1); \
+                             s.bind(('0.0.0.0',{ENCODER_SOURCE_PORT})); \
                              [s.sendto(b'\\x00'*188,('127.0.0.1',{port})) for _ in range(50)]; \
                              s.close()"
                         ),
