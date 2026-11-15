@@ -2,9 +2,11 @@
 
 srtla_send exposes runtime control over a Unix socket (preferred) or stdin. The wire format is JSON-RPC 2.0, one message per line. The socket path is set with `--control-socket <path>`.
 
+The socket is set to mode 0600 right after it is bound, so put it in a directory only the service user can enter, such as `$XDG_RUNTIME_DIR` or `/run/srtla`. Between the bind and the chmod the socket briefly has the permissions of the process umask, and the private directory is what covers that window. A socket left at the path by an earlier run is replaced, but any other file there makes srtla_send refuse to open the control socket.
+
 ## Request/response
 
-One request per line, UTF-8 JSON. Responses end with a newline.
+One request per line, UTF-8 JSON. Responses end with a newline. A request line longer than 64 KiB closes the connection.
 
 Request:
 
@@ -77,9 +79,12 @@ Result:
   "stall_ack_stale_ms": 3000,
   "conn_timeout_ms": 5000,
   "critical_windows_received": 142,
-  "critical_malformed_datagrams": 0
+  "critical_malformed_datagrams": 0,
+  "critical_clamped_windows": 0
 }
 ```
+
+`critical_clamped_windows` counts priority-sidecar windows capped at the 2000 ms maximum.
 
 ### `get_stats`
 
@@ -121,6 +126,8 @@ Topics currently implemented:
 
 Subscriptions live for the life of the connection. Dropping the socket cancels every subscription it owns.
 
+Each connection holds at most one subscription per topic. Subscribing again to a topic the connection already follows returns the same `subscription_id`. The process holds at most 64 subscriptions across all connections, and a subscribe past that limit fails with `-32000`. A connection can only unsubscribe its own ids. For any other id, `unsubscribe` returns `{ "removed": false }`.
+
 Stdin is request-only — subscriptions only work on the Unix socket.
 
 ## Error codes
@@ -132,6 +139,7 @@ Stdin is request-only — subscriptions only work on the Unix socket.
 | `-32601` | method not found |
 | `-32602` | invalid params |
 | `-32603` | internal error |
+| `-32000` | subscription limit reached |
 
 ## Examples
 
@@ -139,7 +147,7 @@ Using `socat` on the Unix socket:
 
 ```
 $ echo '{"jsonrpc":"2.0","id":1,"method":"get_status"}' \
-    | socat - UNIX-CONNECT:/tmp/srtla.sock
+    | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/srtla.sock
 {"jsonrpc":"2.0","result":{"mode":"enhanced",...},"id":1}
 ```
 
@@ -147,5 +155,5 @@ Switching mode at runtime:
 
 ```
 $ echo '{"jsonrpc":"2.0","id":1,"method":"set_mode","params":{"mode":"classic"}}' \
-    | socat - UNIX-CONNECT:/tmp/srtla.sock
+    | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/srtla.sock
 ```

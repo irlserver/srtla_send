@@ -145,7 +145,7 @@ srtla_send [OPTIONS] SRT_LISTEN_PORT SRTLA_HOST SRTLA_PORT BIND_IPS_FILE
 - `--conn-timeout-ms <MS>`: Per-link liveness timeout. Silence past this tears the link down and re-registers it (default 5000, clamped to 1000..=60000, also settable at runtime with `set_conn_timeout`). A timed-out link that was registered before makes its first 4 reconnect attempts 1 s apart, so a short modem or tether blip re-registers before SRT's 5 s peer-idle timeout ends the session. After that it retries every 5 s until it registers again.
 - `--no-rehome`: Disable whole-bond re-home (on by default). When every uplink has been down for longer than the all-links-failed window *and* the receiver hostname no longer resolves to the address the bond is pinned to, the sender moves every uplink together to the newly-resolved address in its own address family and re-registers from scratch over the ordinary REG1/REG2/REG3 flow. It is deliberately conservative: a bond with any live uplink is never touched, a merely reordered DNS answer is not a move, a failed lookup is not a move, and at most one migration is attempted per minute. Pass this to keep the old behaviour of staying on the cached address until the process is restarted.
 - `--config <PATH>`: Path to a TOML config file, read once at startup. Each key is the long flag name with underscores (for example `stall_ack_stale_ms = 2000`), and a flag given on the command line wins over the file. The supported keys are `mode`, `no_quality`, `no_stall_deselect`, `stall_min_in_flight`, `stall_ack_stale_ms` and `conn_timeout_ms`. An unknown key or a file that fails to parse stops startup.
-- `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `/tmp/srtla.sock`)
+- `--control-socket <PATH>`: Unix domain socket path for remote control (e.g., `$XDG_RUNTIME_DIR/srtla.sock`)
 - `--priority-bind <ADDR:PORT>`: UDP sidecar address for encoder keyframe priority hints
 - `--metrics-bind <ADDR:PORT>`: Expose a Prometheus scrape endpoint at `/metrics`
 - `-v, --version`: Print version and exit (see [Version output](#version-output))
@@ -187,7 +187,7 @@ With `srtla_send` running on the sender, SRT-enabled applications should stream 
 **With logging and Unix socket control:**
 
 ```bash
-RUST_LOG=info ./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 rec.example.com 5000 ./uplinks.txt
+RUST_LOG=info ./target/release/srtla_send --control-socket $XDG_RUNTIME_DIR/srtla.sock 6000 rec.example.com 5000 ./uplinks.txt
 ```
 
 **With classic mode:**
@@ -235,15 +235,15 @@ Use the `--control-socket` option to enable remote control via Unix socket. The 
 
 ```bash
 # Start with Unix socket control
-./target/release/srtla_send --control-socket /tmp/srtla.sock 6000 10.0.0.1 5000 /tmp/srtla_ips
+./target/release/srtla_send --control-socket $XDG_RUNTIME_DIR/srtla.sock 6000 10.0.0.1 5000 /tmp/srtla_ips
 
 # Fetch current status
 echo '{"jsonrpc":"2.0","id":1,"method":"get_status"}' \
-    | socat - UNIX-CONNECT:/tmp/srtla.sock
+    | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/srtla.sock
 
 # Switch scheduler mode
 echo '{"jsonrpc":"2.0","id":1,"method":"set_mode","params":{"mode":"classic"}}' \
-    | socat - UNIX-CONNECT:/tmp/srtla.sock
+    | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/srtla.sock
 ```
 
 ### Available Methods
@@ -265,7 +265,7 @@ Pass `--metrics-bind ADDR:PORT` to expose a Prometheus scrape endpoint at `/metr
 ```
 srtla_send --metrics-bind 127.0.0.1:9099 \
            --priority-bind 127.0.0.1:7000 \
-           --control-socket /tmp/srtla.sock \
+           --control-socket $XDG_RUNTIME_DIR/srtla.sock \
            6000 rec.example.com 5000 /tmp/uplinks
 ```
 

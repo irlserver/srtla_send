@@ -30,7 +30,7 @@ Pass `--priority-bind ADDR:PORT` to `srtla_send`:
 
 ```
 srtla_send --priority-bind 127.0.0.1:7000 \
-           --control-socket /tmp/srtla.sock \
+           --control-socket $XDG_RUNTIME_DIR/srtla.sock \
            6000 rec.example.com 5000 /tmp/uplinks
 ```
 
