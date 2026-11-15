@@ -61,17 +61,19 @@ fn test_stall_gate_latches_and_rejoins_after_dwell() {
     let output = stack.stop();
     common::dump_output(&output);
 
+    // Tracing logs go to stdout; panic messages go to stderr.
+    let stdout: String = output.srtla_send_stdout.join("\n");
     let stderr: String = output.srtla_send_stderr.join("\n");
     assert!(
-        stderr.contains("silence pull engaged"),
+        stdout.contains("silence pull engaged"),
         "black-holed link never hit the fast silence pull"
     );
     assert!(
-        stderr.contains("stall latch engaged"),
+        stdout.contains("stall latch engaged"),
         "black-holed link never engaged the stall latch"
     );
     assert!(
-        stderr.contains("stall latch released after sustained proof"),
+        stdout.contains("stall latch released after sustained proof"),
         "healed link never completed the rejoin dwell (is duplicate probing delivering proof?)"
     );
     assert!(
