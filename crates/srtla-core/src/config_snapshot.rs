@@ -18,7 +18,7 @@ pub const STALL_MIN_IN_FLIGHT_PACKETS: i32 = 32;
 /// always waiting the full ceiling; the reaction window is exactly the run of
 /// packets that will arrive late (reorder holes) at the receiver. A link with
 /// no RTT baseline yet falls back to the ceiling. Kept well below
-/// `CONN_TIMEOUT` (15 s): deselect is a selection penalty ONLY, never a
+/// `CONN_TIMEOUT` (5 s): deselect is a selection penalty ONLY, never a
 /// liveness/timeout shortcut.
 pub const STALL_ACK_STALE_MS: u64 = 3000;
 
