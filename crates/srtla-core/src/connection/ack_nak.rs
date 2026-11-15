@@ -57,7 +57,9 @@ impl SrtlaConnection {
     /// it as its own — a fast sample invented for a path that never delivered
     /// anything, exactly on the links whose lateness is the thing being
     /// measured. The shell resolves ownership through the sequence tracker,
-    /// which deliberately never records probe copies.
+    /// which deliberately never records probe copies. The caller must also
+    /// require that this copy of the ACK arrived on this link, because a copy
+    /// on another uplink times that link's downlink instead.
     pub fn handle_srt_ack(&mut self, ack: i32, now_ms: u64, owns_acked_seq: bool) {
         // Reduce the wire word to the 31-bit space the packet log is keyed in.
         // A valid SRT ACK already has its MSB clear; masking a corrupt one keeps

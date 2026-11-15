@@ -84,10 +84,13 @@ pub async fn process_connection_events(
         // unique copy may take an RTT sample from it. The tracker never
         // records duplicate probes, so a probing link resolves to `None` here
         // and keeps its estimator free of round trips earned by the link that
-        // actually delivered.
+        // actually delivered. The receiver sends each SRT ACK down every
+        // uplink, and only the first copy advances the cumulative state. A
+        // copy timed off another link's downlink measures that downlink, not
+        // the owner's, so the owner samples only from a copy on its own link.
         let owner = seq_tracker.get(last_acked as u32, current_time_ms);
-        for c in connections.iter_mut() {
-            let owns = owner == Some(c.conn_id);
+        for (i, c) in connections.iter_mut().enumerate() {
+            let owns = owner == Some(c.conn_id) && i == idx;
             c.handle_srt_ack(last_acked, current_time_ms, owns);
         }
     }

@@ -1270,4 +1270,63 @@ mod tests {
             "the sample must come from 100, the last acknowledged packet, got {rtt}"
         );
     }
+
+    /// Process one SRT ACK copy for seq 100 (sent 200 ms ago on link 0)
+    /// arriving on `arrival` across two links.
+    async fn srt_ack_copy_for_link_0_arrives_on(
+        arrival: usize,
+    ) -> smallvec::SmallVec<srtla_core::connection::SrtlaConnection, 4> {
+        use srtla_core::connection::SrtlaIncoming;
+
+        use crate::sender::process_connection_events;
+
+        // Bind before reading the clock so the only work between the test's
+        // clock read and the handler's is the bookkeeping below.
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut conns = create_test_connections(2).await;
+        let now = now_ms();
+        let mut seq_tracker = SequenceTracker::new();
+        conns[0].register_packet(100, now - 200);
+        seq_tracker.insert(100, conns[0].conn_id, now - 200);
+
+        let incoming = SrtlaIncoming {
+            ack_numbers: smallvec::smallvec![101],
+            read_any: true,
+            ..Default::default()
+        };
+        process_connection_events(
+            arrival,
+            &mut conns,
+            None,
+            &listener,
+            &seq_tracker,
+            false,
+            incoming,
+        )
+        .await
+        .unwrap();
+        conns
+    }
+
+    #[tokio::test]
+    async fn srt_ack_copy_on_another_link_takes_no_sample_for_the_owner() {
+        // The receiver sends every SRT ACK down every uplink. A copy that
+        // arrives on link 1 first times link 1's downlink, so link 0 must not
+        // record it as its own round trip.
+        let conns = srt_ack_copy_for_link_0_arrives_on(1).await;
+
+        assert_eq!(conns[0].in_flight_packets, 0, "every link still prunes");
+        assert_eq!(conns[0].get_smooth_rtt_ms(), 0.0);
+        assert_eq!(conns[1].get_smooth_rtt_ms(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn srt_ack_copy_on_the_owning_link_takes_the_sample() {
+        let conns = srt_ack_copy_for_link_0_arrives_on(0).await;
+
+        assert_eq!(conns[0].in_flight_packets, 0);
+        let rtt = conns[0].get_smooth_rtt_ms();
+        // Sent 200 ms before the clock read: a hard floor. The cap only rejects a foreign sample.
+        assert!((200.0..1_000.0).contains(&rtt), "got {rtt}");
+    }
 }
