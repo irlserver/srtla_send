@@ -1147,6 +1147,9 @@ pub fn inject_udp_packets(ns: &Namespace, target_ip: &str, port: u16, count: usi
     let addr = format!("{target_ip}:{port}");
     let script = format!(
         "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); \
+         s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); \
+         s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEPORT,1); \
+         s.bind(('0.0.0.0',{ENCODER_SOURCE_PORT})); \
          [s.sendto(b'\\x00'*188,('{target_ip}',{port})) for _ in range({count})]; s.close()"
     );
     ns.exec_checked("python3", &["-c", &script])
@@ -1156,6 +1159,11 @@ pub fn inject_udp_packets(ns: &Namespace, target_ip: &str, port: u16, count: usi
 
 /// Default datagram size: one MPEG-TS packet.
 pub const TS_PACKET_BYTES: usize = 188;
+/// Source port every test injector sends from, so a whole test looks like one
+/// encoder socket to srtla_send's client pin, which drops packets from any
+/// other source. Network namespaces isolate ports, so a fixed number cannot
+/// collide with another test.
+pub const ENCODER_SOURCE_PORT: u16 = 40_000;
 /// libsrt's default payload size. Prefer this when a test needs real
 /// throughput: a Python pump cannot reliably sleep in the sub-millisecond
 /// intervals that megabit rates demand at 188 bytes a datagram, so it
@@ -1185,7 +1193,9 @@ fn udp_stream_script(
     let dur_secs = duration.as_secs_f64();
 
     Ok(format!(
-        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\nd=b'\\xb8'*\
+        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\ns.\
+         setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.setsockopt(socket.SOL_SOCKET,\
+         socket.SO_REUSEPORT,1)\ns.bind(('0.0.0.0',{ENCODER_SOURCE_PORT}))\nd=b'\\xb8'*\
          {payload_bytes}\nstart=time.time(); i=0\nwhile True:\n\x20   now=time.time()\n\x20   if \
          now-start>={dur_secs}: break\n\x20   s.sendto(d,('{target_ip}',{port}))\n\x20   \
          i+=1\n\x20   nxt=start+i*{interval}\n\x20   slp=nxt-time.time()\n\x20   if slp>0: \
