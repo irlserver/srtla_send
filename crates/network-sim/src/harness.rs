@@ -277,13 +277,13 @@ impl NamespaceProcess {
 
     /// Snapshot of the stdout lines captured so far. Safe to call while
     /// the process is still running.
-    pub fn stdout_lines(&mut self) -> Vec<String> {
+    pub fn stdout_lines(&self) -> Vec<String> {
         self.stdout.lock().map(|b| b.clone()).unwrap_or_default()
     }
 
     /// Snapshot of the stderr lines captured so far. Safe to call while
     /// the process is still running.
-    pub fn stderr_lines(&mut self) -> Vec<String> {
+    pub fn stderr_lines(&self) -> Vec<String> {
         self.stderr.lock().map(|b| b.clone()).unwrap_or_default()
     }
 
@@ -743,40 +743,46 @@ pub fn wait_for_udp_listener(ns: &Namespace, port: u16, timeout: Duration) -> Re
     }
 }
 
-/// Poll `ss -uan` inside `ns` until at least `min_count` UDP sockets are
-/// connected to `peer_ip:peer_port`. The sender `connect()`s one socket per
-/// source IP to the receiver as it brings each uplink online, so a connected
-/// peer entry is the observable readiness signal that replaces a fixed
-/// registration sleep — it returns as soon as the state appears.
-pub fn wait_for_connected_uplinks(
-    ns: &Namespace,
-    peer_ip: &str,
-    peer_port: u16,
+/// Poll srtla_send's captured stdout until at least `min_count` uplinks have
+/// registered with the receiver.
+///
+/// The uplink sockets are never `connect()`ed, so socket state (`ss`) cannot
+/// show readiness. The registration manager logs
+/// `connection established (active=N)` at info level every time the active
+/// count changes, so the highest N seen so far is the number of registered
+/// uplinks.
+pub fn wait_for_registered_uplinks(
+    process: &NamespaceProcess,
     min_count: usize,
     timeout: Duration,
 ) -> Result<()> {
     let start = Instant::now();
-    let peer = format!("{peer_ip}:{peer_port}");
-    let mut last_ss_output;
-
     loop {
-        let out = ns.exec("ss", &["-uan"])?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let count = stdout.lines().filter(|line| line.contains(&peer)).count();
-        if count >= min_count {
+        let log = process.stdout_lines();
+        let registered = registered_uplink_count(&log);
+        if registered >= min_count {
             return Ok(());
         }
-        last_ss_output = stdout.to_string();
-
         if start.elapsed() > timeout {
             bail!(
-                "timeout waiting for {min_count} connected uplink(s) to {peer} in ns {} (saw \
-                 {count})\nlast ss -uan output:\n{last_ss_output}",
-                ns.name
+                "timeout waiting for {min_count} registered uplink(s) (saw \
+                 {registered})\nsrtla_send stdout:\n{}",
+                log.join("\n")
             );
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn registered_uplink_count(log: &[String]) -> usize {
+    log.iter()
+        .filter_map(|line| line.split("connection established (active=").nth(1))
+        .filter_map(|rest| {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<usize>().ok()
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1061,15 @@ impl SrtlaTestStack {
         self.topo.impair_link(idx, config)
     }
 
+    /// Wait until every sender uplink has registered with the receiver.
+    pub fn wait_for_registered_uplinks(&self, timeout: Duration) -> Result<()> {
+        let sender = self
+            .srtla_send
+            .as_ref()
+            .context("srtla_send is not running")?;
+        wait_for_registered_uplinks(sender, self.topo.sender_ips.len(), timeout)
+    }
+
     /// The local SRT port that srtla_send listens on (for injecting test data).
     pub fn sender_srt_port(&self) -> u16 {
         SRTLA_SEND_SRT_PORT
@@ -1241,4 +1256,23 @@ fn find_srtla_send_binary() -> Result<PathBuf> {
             candidates
         )
     })
+}
+
+#[cfg(test)]
+mod registration_log_tests {
+    use super::registered_uplink_count;
+
+    #[test]
+    fn registered_count_is_the_highest_active_count_logged() {
+        let log: Vec<String> = [
+            "\u{1b}[32m INFO\u{1b}[0m Starting RTT probing for 3 connections",
+            "\u{1b}[32m INFO\u{1b}[0m connection established (active=1)",
+            "\u{1b}[32m INFO\u{1b}[0m connection established (active=3)",
+            "\u{1b}[32m INFO\u{1b}[0m connection established (active=2)",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(registered_uplink_count(&log), 3);
+        assert_eq!(registered_uplink_count(&log[..1]), 0);
+    }
 }
