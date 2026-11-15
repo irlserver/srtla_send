@@ -1,11 +1,8 @@
 # Keyframe priority sidecar
 
-srtla_send offers two complementary ways to treat keyframe / parameter-set packets as critical and route them to the most reliable link:
+srtla_send treats keyframe and parameter-set packets as critical when an upstream encoder says so. The encoder opens a short "critical window" over an out-of-band UDP sidecar. While that window is open in enhanced mode, srtla_send routes data packets to the link with the best quality score. When every eligible link scores the same, the normal scheduler decides.
 
-1. A packet-size heuristic (`src/sender/keyframe.rs`) that watches for runs of max-MTU 1316-byte SRT packets and declares a burst when 5 or more land in a row.
-2. An out-of-band UDP sidecar where an upstream encoder explicitly opens a short "critical window".
-
-The two are OR-combined. An encoder that knows it is about to emit a keyframe opens a window; the heuristic keeps catching bursts on its own when no encoder feedback is available.
+srtla_send does not detect keyframes itself. It sees only opaque SRT payloads, so without encoder hints no packet is treated as critical.
 
 ## Why a sidecar UDP, not the JSON-RPC control socket
 

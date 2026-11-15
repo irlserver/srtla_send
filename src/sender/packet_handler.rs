@@ -287,10 +287,9 @@ fn select_pre_registration_connection(
 /// Uses a pre-cached `ConfigSnapshot` to avoid atomic loads per packet.
 /// The caller should create a snapshot once per select iteration for optimal performance.
 ///
-/// When a keyframe burst is detected (runs of consecutive max-MTU 1316-byte data
-/// packets), the scheduler overrides normal selection and routes to the
-/// highest-quality link. This ensures I-frame data — which is critical for
-/// decoder recovery — travels over the most reliable path.
+/// While the encoder's priority-sidecar window is open, or when the packet is
+/// an SRT retransmit, the best-path override routes it to the highest-quality
+/// link (see the comment at the override below).
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_srt_packet(
     res: Result<(usize, SocketAddr), std::io::Error>,
