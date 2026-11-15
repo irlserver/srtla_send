@@ -40,10 +40,10 @@
 //! Re-home rebuilds whatever uplinks the bond currently has, so it always runs
 //! against the local-IP set that the last accepted reload installed. In the
 //! other direction, a reload that lands *after* a re-home dials any newly added
-//! uplink through [`crate::net::resolve_remote`], which picks the first answer —
-//! the same deterministic pick this module makes — so the added link joins the
-//! bond at the address the bond just moved to. Neither order can leave uplinks
-//! split across two receivers.
+//! uplink through [`crate::net::resolve_remote_for_source`], which picks the
+//! first answer in the uplink's address family — the same deterministic pick
+//! this module makes — so the added link joins the bond at the address the bond
+//! just moved to. Neither order can leave uplinks split across two receivers.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -61,7 +61,7 @@ use tracing::{debug, warn};
 use super::connections::{rebuild_uplink_socket, receiver_moved, recover_connection};
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
-use crate::net::resolve_remote_all;
+use crate::net::{resolve_remote_all, select_remote_for_source};
 
 /// At most one re-home *attempt* per minute, process-wide. The limit covers the
 /// DNS probe as well as the migration: housekeeping runs every second, and a
@@ -229,7 +229,7 @@ impl ReceiverResolver for StubResolver {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn try_rehome(
     gate: &mut RehomeGate,
-    connections: &mut [SrtlaConnection],
+    connections: &mut SmallVec<SrtlaConnection, 4>,
     conn_io: &mut ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     seq_tracker: &mut SequenceTracker,
@@ -274,13 +274,13 @@ pub(super) async fn try_rehome(
         return false;
     }
 
-    // Deterministic pick, matching `resolve_remote`: the first answer.
-    let new_remote = fresh[0];
+    let answers: SmallVec<String, 4> = fresh.iter().map(ToString::to_string).collect();
     warn!(
         "re-homing the whole bond: {receiver_host} no longer resolves to {pinned} and every \
-         uplink has been down for {dead_for_ms}ms; moving {} uplink(s) from {pinned} to \
-         {new_remote} and re-registering from scratch",
-        connections.len()
+         uplink has been down for {dead_for_ms}ms; moving {} uplink(s) to [{}] and re-registering \
+         from scratch",
+        connections.len(),
+        answers.join(", ")
     );
 
     rehome_bond(
@@ -290,7 +290,7 @@ pub(super) async fn try_rehome(
         seq_tracker,
         reader_handles,
         packet_tx,
-        new_remote,
+        &fresh,
         now,
     )
     .await;
@@ -298,7 +298,13 @@ pub(super) async fn try_rehome(
     true
 }
 
-/// Repoint every uplink at `new_remote` and restart registration.
+/// Repoint every uplink at the first `new_remotes` answer in its own address
+/// family and restart registration.
+///
+/// An uplink whose family the answer no longer offers is dropped from the bond:
+/// it has nothing it could send to, and keeping it would leave a socketless
+/// participant in the positional probe and REG1 state below. A later IP-list
+/// reload that names it dials it fresh.
 ///
 /// All-or-nothing in the sense that matters: the remote swap happens for the
 /// whole bond in one pass, before any socket is rebuilt, so an uplink whose
@@ -308,21 +314,36 @@ pub(super) async fn try_rehome(
 /// another.
 #[allow(clippy::too_many_arguments)]
 async fn rehome_bond(
-    connections: &mut [SrtlaConnection],
+    connections: &mut SmallVec<SrtlaConnection, 4>,
     conn_io: &mut ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     seq_tracker: &mut SequenceTracker,
     reader_handles: &mut HashMap<ConnectionId, ReaderHandle>,
     packet_tx: &UnboundedSender<UplinkPacket>,
-    new_remote: SocketAddr,
+    new_remotes: &[SocketAddr],
     now: u64,
 ) {
-    // Pass 1 — the atomic part. Nothing here can fail.
-    for conn in connections.iter() {
-        if let Some(io) = conn_io.get_mut(&conn.conn_id) {
-            io.remote = new_remote;
-        }
-    }
+    // Pass 1 — the atomic part, all from one DNS answer before any socket is
+    // rebuilt. Nothing here can fail.
+    connections.retain(
+        |conn| match select_remote_for_source(new_remotes, conn.local_ip) {
+            Ok(remote) => {
+                if let Some(io) = conn_io.get_mut(&conn.conn_id) {
+                    io.remote = remote;
+                }
+                true
+            }
+            Err(e) => {
+                warn!("{}: {e}; dropping it from the re-homed bond", conn.label);
+                conn_io.remove(&conn.conn_id);
+                if let Some(reader) = reader_handles.remove(&conn.conn_id) {
+                    reader.handle.abort();
+                }
+                seq_tracker.remove_connection(conn.conn_id);
+                false
+            }
+        },
+    );
 
     // Pass 2 — rebuild each socket against the new remote, reset the link's
     // protocol state, drop its sequence-tracker ownership and respawn its
@@ -334,7 +355,7 @@ async fn rehome_bond(
                 Err(e) => {
                     warn!(
                         "{}: failed to rebuild socket for re-home ({e}); leaving it to the \
-                         reconnect path, which will now dial {new_remote}",
+                         reconnect path, which will dial the re-homed address",
                         conn.label
                     );
                     recover_connection(conn, seq_tracker);
@@ -356,6 +377,9 @@ async fn rehome_bond(
     // everything else back to pre-REG1, including the probing state machine.
     // Re-probing then picks the REG1 target by RTT just like a fresh start.
     reg.reset_for_rehome();
+    if connections.is_empty() {
+        return;
+    }
     let probes = reg.start_probing(connections, now);
     for (idx, pkt) in probes {
         if let Some(conn) = connections.get(idx)
@@ -381,7 +405,7 @@ mod tests {
     }
 
     struct Bond {
-        connections: Vec<SrtlaConnection>,
+        connections: SmallVec<SrtlaConnection, 4>,
         conn_io: ConnIoMap,
         reg: SrtlaRegistrationManager,
         seq_tracker: SequenceTracker,
@@ -392,7 +416,7 @@ mod tests {
         /// Two uplinks on 127.0.0.1 (so a socket rebuild really binds), both
         /// pinned to `remote`.
         async fn new(remote: SocketAddr) -> Self {
-            let connections = vec![
+            let connections = smallvec::smallvec![
                 create_test_connection().await,
                 create_test_connection().await,
             ];
@@ -606,5 +630,74 @@ mod tests {
             bond.connections.len(),
             "every re-homed uplink gets a fresh reader"
         );
+    }
+
+    fn v6(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), port)
+    }
+
+    #[tokio::test]
+    async fn re_home_picks_the_answer_in_each_uplinks_family() {
+        let mut bond = Bond::new(addr(1)).await;
+        let resolver = StubResolver::new(vec![Some(vec![v6(6000), addr(2)])]);
+        let mut gate = RehomeGate::with_resolver(true, resolver);
+
+        assert!(run_try_rehome(&mut bond, &mut gate, now_ms()).await);
+        assert_eq!(
+            bond.remotes(),
+            vec![addr(2)],
+            "IPv4 uplinks skip the IPv6 answer listed first"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_home_drops_uplinks_whose_family_the_answer_lacks() {
+        use crate::net::{SourceIpBinder, UplinkBinder};
+        use crate::sender::connections::create_connections_from_ips;
+
+        let mut bond = Bond::new(addr(1)).await;
+        let binder: Arc<dyn UplinkBinder> = Arc::new(SourceIpBinder);
+        let added = create_connections_from_ips(
+            &[IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)],
+            &[],
+            "::1",
+            5000,
+            &binder,
+            &mut bond.conn_io,
+        )
+        .await;
+        assert_eq!(added.len(), 1);
+        let v6_id = added[0].conn_id;
+        bond.connections.extend(added);
+
+        let resolver = StubResolver::new(vec![Some(vec![addr(2)])]);
+        let mut gate = RehomeGate::with_resolver(true, resolver);
+        assert!(run_try_rehome(&mut bond, &mut gate, now_ms()).await);
+
+        assert_eq!(bond.connections.len(), 2);
+        assert!(bond.connections.iter().all(|c| c.conn_id != v6_id));
+        assert!(!bond.conn_io.contains_key(&v6_id));
+        assert!(!bond.reader_handles.contains_key(&v6_id));
+        assert_eq!(bond.remotes(), vec![addr(2)]);
+        for (idx, conn) in bond.connections.iter().enumerate() {
+            assert!(
+                bond.conn_io.contains_key(&conn.conn_id),
+                "probe slot {idx} must have a socket to answer on"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn re_home_with_no_matching_family_leaves_nothing_to_register() {
+        let mut bond = Bond::new(addr(1)).await;
+        let resolver = StubResolver::new(vec![Some(vec![v6(6000)])]);
+        let mut gate = RehomeGate::with_resolver(true, resolver);
+
+        assert!(run_try_rehome(&mut bond, &mut gate, now_ms()).await);
+        assert!(bond.connections.is_empty());
+        assert!(bond.conn_io.is_empty());
+        assert!(bond.reader_handles.is_empty());
+        assert!(!bond.reg.is_probing());
+        assert!(bond.reg.reg1_target_idx().is_none());
     }
 }

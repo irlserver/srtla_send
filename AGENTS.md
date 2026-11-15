@@ -203,6 +203,12 @@ uplink to the new address together and re-register from scratch.
   GeoDNS and round-robin must not cause thrash. (3) At most one attempt per
   `REHOME_MIN_INTERVAL_MS` (60s), process-wide; the limit covers the DNS probe
   too, since housekeeping ticks every second.
+- **Per-family pick.** Every uplink dials the first answer in its own address
+  family (`net::select_remote_for_source`), at startup, on reload and on
+  re-home. A dual-stack receiver's A and AAAA records must reach the same
+  receiver group; reachability is not tested. An uplink whose family a re-home
+  answer no longer offers is dropped from the bond until an IP-list reload
+  names it again.
 - **Client id survives.** `SrtlaRegistrationManager::reset_for_rehome` keeps the
   first half of `srtla_id` (the only part a receiver reads out of a REG1) so a
   receiver deriving its half deterministically reissues the identical `full_id`

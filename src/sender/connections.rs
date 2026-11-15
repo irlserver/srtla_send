@@ -12,7 +12,8 @@ use tracing::{debug, info, warn};
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIo, ConnIoMap};
 use crate::net::{
-    BatchUdpSocket, UplinkBinder, create_uplink_socket, resolve_remote, resolve_remote_all,
+    BatchUdpSocket, UplinkBinder, create_uplink_socket, resolve_remote_all,
+    resolve_remote_for_source,
 };
 
 pub struct PendingConnectionChanges {
@@ -168,7 +169,7 @@ async fn connect_uplink(
 ) -> Result<(SrtlaConnection, ConnIo)> {
     use rand::RngCore;
 
-    let remote = resolve_remote(receiver_host, receiver_port).await?;
+    let remote = resolve_remote_for_source(receiver_host, receiver_port, ip).await?;
     let sock = create_uplink_socket(ip)?;
     binder.bind(&sock, ip)?;
     sock.set_nonblocking(true)?;
@@ -382,5 +383,57 @@ mod tests {
             claim_dns_drift_warning(base + DNS_DRIFT_WARN_INTERVAL_MS),
             "the warning is due again once the window has passed"
         );
+    }
+
+    #[test]
+    fn remote_selection_follows_the_source_family_in_answer_order() {
+        let v4a = addr(1);
+        let v4b = addr(2);
+        let v6: SocketAddr = "[2001:db8::1]:5000".parse().unwrap();
+        let answers = [v6, v4a, v4b];
+
+        assert_eq!(
+            crate::net::select_remote_for_source(&answers, v4a.ip()).unwrap(),
+            v4a
+        );
+        assert_eq!(
+            crate::net::select_remote_for_source(&answers, v6.ip()).unwrap(),
+            v6
+        );
+        assert!(crate::net::select_remote_for_source(&[v4a], v6.ip()).is_err());
+        assert!(crate::net::select_remote_for_source(&[v6], v4a.ip()).is_err());
+        assert!(crate::net::select_remote_for_source(&[], v4a.ip()).is_err());
+    }
+
+    #[tokio::test]
+    async fn startup_dials_only_sources_the_receiver_has_a_family_for() {
+        use crate::net::SourceIpBinder;
+
+        let binder: Arc<dyn UplinkBinder> = Arc::new(SourceIpBinder);
+        let sources: [IpAddr; 2] = ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()];
+        for receiver in ["127.0.0.1", "::1"] {
+            let mut io = ConnIoMap::new();
+            let connections =
+                create_connections_from_ips(&sources, &[], receiver, 9000, &binder, &mut io).await;
+            assert_eq!(connections.len(), 1);
+            assert_eq!(connections[0].local_ip, receiver.parse::<IpAddr>().unwrap());
+            let remote = io[&connections[0].conn_id].remote;
+            assert_eq!(remote.ip(), receiver.parse::<IpAddr>().unwrap());
+        }
+    }
+
+    /// The failure family matching prevents: an IPv4 socket cannot send to an
+    /// IPv6 receiver address at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ipv4_socket_cannot_reach_an_ipv6_receiver_address() {
+        use crate::net::SourceIpBinder;
+
+        let source: IpAddr = "127.0.0.1".parse().unwrap();
+        let sock = create_uplink_socket(source).unwrap();
+        SourceIpBinder.bind(&sock, source).unwrap();
+        let v6: SocketAddr = "[::1]:9".parse().unwrap();
+        let err = sock.send_to(b"x", &v6.into()).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EAFNOSUPPORT));
     }
 }

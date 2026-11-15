@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
+use smallvec::SmallVec;
 use srtla_core::connection::{STARTUP_GRACE_MS, SrtlaConnection};
 use srtla_core::registration::SrtlaRegistrationManager;
 use tokio::sync::mpsc::UnboundedSender;
@@ -19,7 +20,7 @@ pub const GLOBAL_TIMEOUT_MS: u64 = 10_000;
 /// since old entries are naturally overwritten.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_housekeeping(
-    connections: &mut [SrtlaConnection],
+    connections: &mut SmallVec<SrtlaConnection, 4>,
     conn_io: &mut ConnIoMap,
     reg: &mut SrtlaRegistrationManager,
     seq_tracker: &mut SequenceTracker,
@@ -268,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn dead_reader_is_restarted_for_active_connection() {
-        let mut connections = vec![create_test_connection().await];
+        let mut connections = smallvec::smallvec![create_test_connection().await];
         let conn_id = connections[0].conn_id;
         let mut conn_io = create_test_conn_io_map(&connections);
         let mut reg = SrtlaRegistrationManager::new();
@@ -414,7 +415,7 @@ mod tests {
     /// A bond in the shape the re-home trigger cares about: uplinks on
     /// 127.0.0.1 (so a socket rebuild really binds), all pinned to `remote`.
     struct RehomeFixture {
-        connections: Vec<SrtlaConnection>,
+        connections: SmallVec<SrtlaConnection, 4>,
         conn_io: ConnIoMap,
         reg: SrtlaRegistrationManager,
         seq_tracker: SequenceTracker,
@@ -424,7 +425,7 @@ mod tests {
 
     impl RehomeFixture {
         async fn new(remote: SocketAddr) -> Self {
-            let connections = vec![
+            let connections = smallvec::smallvec![
                 create_test_connection().await,
                 create_test_connection().await,
             ];

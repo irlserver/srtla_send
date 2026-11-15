@@ -99,10 +99,10 @@ pub fn create_uplink_socket(domain_for: IpAddr) -> Result<Socket> {
 
 /// Every address the receiver's hostname currently answers with.
 ///
-/// [`resolve_remote`] picks the first of these to dial. The full set matters
-/// only to the reconnect path, which compares the address an uplink is pinned
-/// to against a fresh answer to detect that the receiver's DNS has drifted (see
-/// `sender::connections`).
+/// [`resolve_remote_for_source`] picks one of these to dial. The full set also
+/// feeds the reconnect and re-home paths, which compare the addresses the bond
+/// is pinned to against a fresh answer to detect receiver DNS drift (see
+/// `sender::connections` and `sender::rehome`).
 pub async fn resolve_remote_all(host: &str, port: u16) -> Result<SmallVec<SocketAddr, 4>> {
     let addrs = tokio::net::lookup_host((host, port))
         .await
@@ -110,10 +110,28 @@ pub async fn resolve_remote_all(host: &str, port: u16) -> Result<SmallVec<Socket
     Ok(addrs.collect())
 }
 
-pub async fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr> {
-    resolve_remote_all(host, port)
-        .await?
-        .first()
+/// The first answer in `source`'s address family, keeping DNS order within it.
+///
+/// A dual-stack receiver answers with both A and AAAA records, and an uplink
+/// socket can only reach the family it was created in: an IPv4 modem handed an
+/// IPv6 receiver address fails every send with `EAFNOSUPPORT`. Filtering by
+/// family assumes the A and AAAA records reach the same receiver group;
+/// reachability is not tested.
+pub fn select_remote_for_source(addrs: &[SocketAddr], source: IpAddr) -> Result<SocketAddr> {
+    addrs
+        .iter()
         .copied()
-        .ok_or_else(|| anyhow::anyhow!("no DNS result for {}", host))
+        .find(|addr| addr.is_ipv4() == source.is_ipv4())
+        .ok_or_else(|| {
+            let family = if source.is_ipv4() { "IPv4" } else { "IPv6" };
+            anyhow::anyhow!("receiver has no {family} address for source {source}")
+        })
+}
+
+pub async fn resolve_remote_for_source(
+    host: &str,
+    port: u16,
+    source: IpAddr,
+) -> Result<SocketAddr> {
+    select_remote_for_source(&resolve_remote_all(host, port).await?, source)
 }
