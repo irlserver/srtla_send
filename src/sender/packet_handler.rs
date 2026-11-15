@@ -11,6 +11,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, trace, warn};
 
 use super::client_dedup::ClientDedup;
+use super::client_pin::{ClientPin, ClientVerdict};
 use super::connections::recover_connection;
 use super::no_link_log::{NoLinkLog, log_event};
 use super::sequence::SequenceTracker;
@@ -326,7 +327,7 @@ pub async fn handle_srt_packet(
     conn_io: &ConnIoMap,
     last_selected_idx: &mut Option<usize>,
     seq_tracker: &mut SequenceTracker,
-    last_client_addr: &mut Option<SocketAddr>,
+    client_pin: &mut ClientPin,
     no_link_log: &mut NoLinkLog,
     last_session_isn: &mut Option<u32>,
     registration_complete: bool,
@@ -343,6 +344,28 @@ pub async fn handle_srt_packet(
 
             let pkt = &recv_buf[..n];
             let session_isn = srtla_protocol::parse_srt_session_start(pkt);
+            let previous = client_pin.addr();
+            match client_pin.admit(src, session_isn.is_some(), packet_time_ms) {
+                ClientVerdict::Drop => {
+                    if let Some(dropped) = client_pin.should_log_drop(packet_time_ms) {
+                        warn!(
+                            pinned = ?previous,
+                            %src,
+                            dropped,
+                            "dropping SRT packets from a source other than the pinned client"
+                        );
+                    }
+                    return;
+                }
+                ClientVerdict::Accept { repinned: true } => {
+                    info!(
+                        previous = ?previous,
+                        new = %src,
+                        "SRT client opened a new session from a new source; following it"
+                    );
+                }
+                ClientVerdict::Accept { repinned: false } => {}
+            }
             if let Some(isn) = session_isn {
                 note_srt_session_start(isn, connections, last_session_isn);
             }
@@ -366,7 +389,6 @@ pub async fn handle_srt_packet(
                     )
                     .await;
                 }
-                *last_client_addr = Some(src);
                 return;
             }
 
@@ -446,7 +468,6 @@ pub async fn handle_srt_packet(
             } else if let Some(event) = no_link_log.on_dropped(packet_time_ms) {
                 log_event(event, src);
             }
-            *last_client_addr = Some(src);
         }
         Err(e) => warn!("error reading local SRT: {}", e),
     }

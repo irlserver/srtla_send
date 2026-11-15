@@ -1,4 +1,5 @@
 mod client_dedup;
+mod client_pin;
 mod connections;
 mod housekeeping;
 mod no_link_log;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 pub(crate) use client_dedup::ClientDedup;
+use client_pin::ClientPin;
 // Re-export connection management functions for tests
 #[allow(unused_imports)]
 pub use connections::{
@@ -192,7 +194,7 @@ pub async fn run_sender_with_config(
     batch_flush_timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     let mut status_elapsed_ms: u64 = 0;
-    let mut last_client_addr: Option<SocketAddr> = None;
+    let mut client_pin = ClientPin::new();
     let mut last_session_isn: Option<u32> = None;
     let mut no_link_log = NoLinkLog::default();
     // Zero-allocation ring buffer for sequence tracking
@@ -261,7 +263,7 @@ pub async fn run_sender_with_config(
                             &conn_io,
                             &mut last_selected_idx,
                             &mut seq_tracker,
-                            &mut last_client_addr,
+                            &mut client_pin,
                             &mut no_link_log,
                             &mut last_session_isn,
                             reg.has_connected,
@@ -276,7 +278,7 @@ pub async fn run_sender_with_config(
                             &mut reg,
                             &instant_tx,
                             &mut client_dedup,
-                            last_client_addr,
+                            client_pin.addr(),
                             &local_listener,
                             &seq_tracker,
                             &config_snap,
@@ -294,7 +296,7 @@ pub async fn run_sender_with_config(
                                 &mut reg,
                                 &instant_tx,
                                 &mut client_dedup,
-                                last_client_addr,
+                                client_pin.addr(),
                                 &local_listener,
                                 &seq_tracker,
                                 &config_snap,
@@ -307,7 +309,7 @@ pub async fn run_sender_with_config(
                                 &mut reg,
                                 &instant_tx,
                                 &mut client_dedup,
-                                last_client_addr,
+                                client_pin.addr(),
                                 &local_listener,
                                 &seq_tracker,
                                 &config_snap,
@@ -413,7 +415,7 @@ pub async fn run_sender_with_config(
                             &mut reg,
                             &instant_tx,
                             &mut client_dedup,
-                            last_client_addr,
+                            client_pin.addr(),
                             &local_listener,
                             &seq_tracker,
                             &config_snap,
@@ -470,7 +472,7 @@ pub async fn run_sender_with_config(
                 &mut reg,
                 &instant_tx,
                 &mut client_dedup,
-                last_client_addr,
+                client_pin.addr(),
                 &local_listener,
                 &seq_tracker,
                 &config_snap,

@@ -79,6 +79,8 @@ src/                     root crate srtla_send: the I/O shell and the binary
     rehome.rs            whole-bond re-home
     sequence.rs          sequence-to-link ring buffer
     client_dedup.rs      one forward per distinct SRT ACK/NAK
+    client_pin.rs        which source the local SRT listener treats as the encoder
+    no_link_log.rs       outage logging for packets no link can carry
     status.rs            periodic status log
   tests/                 in-crate tests (#[cfg(test)])
 tests/                   integration tests: netns_*.rs (need root), parser_proptest.rs,
