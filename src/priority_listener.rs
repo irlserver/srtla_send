@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 
-use srtla_core::priority::{CriticalWindow, DATAGRAM_LEN, PROTO_MAGIC};
+use srtla_core::priority::{CriticalWindow, DATAGRAM_LEN, MAX_WINDOW_MS, PROTO_MAGIC};
 use tokio::net::UdpSocket;
 use tracing::{info, trace, warn};
 
@@ -43,15 +43,25 @@ pub fn spawn_listener(
                     }
                     let window_ms = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as u64;
                     let now = srtla_core::utils::now_ms();
-                    state.extend_to(now + window_ms);
-                    trace!(window_ms, "critical window extended");
+                    let applied_ms = window_ms.min(MAX_WINDOW_MS);
+                    // This task is the only writer, so the first clamp warns
+                    // exactly once per process.
+                    if state.open_window(now, window_ms) && state.clamped_windows() == 1 {
+                        warn!(
+                            ?src,
+                            requested_ms = window_ms,
+                            max_ms = MAX_WINDOW_MS,
+                            "priority window clamped (further clamps are only counted)"
+                        );
+                    }
+                    trace!(window_ms = applied_ms, "critical window extended");
                     if let Some(ref hub) = hub {
                         hub.publish(
                             "priority.window",
                             serde_json::json!({
                                 "at_ms": now,
-                                "window_ms": window_ms,
-                                "deadline_ms": now + window_ms,
+                                "window_ms": applied_ms,
+                                "deadline_ms": now + applied_ms,
                             }),
                         )
                         .await;

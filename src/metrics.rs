@@ -327,6 +327,24 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
     )
     .ok();
 
+    writeln!(
+        out,
+        "# HELP srtla_send_critical_clamped_windows_total priority-sidecar windows capped at the \
+         maximum length"
+    )
+    .ok();
+    writeln!(
+        out,
+        "# TYPE srtla_send_critical_clamped_windows_total counter"
+    )
+    .ok();
+    writeln!(
+        out,
+        "srtla_send_critical_clamped_windows_total {}",
+        cw.clamped_windows()
+    )
+    .ok();
+
     // Suppress unused-variable warnings when all fields above are covered.
     let _ = snap;
 
@@ -441,6 +459,7 @@ mod tests {
         assert!(text.contains("srtla_send_active_links"));
         assert!(text.contains("srtla_send_total_links"));
         assert!(text.contains("srtla_send_critical_windows_total"));
+        assert!(text.contains("srtla_send_critical_clamped_windows_total"));
         assert!(text.contains("srtla_send_mode"));
     }
 

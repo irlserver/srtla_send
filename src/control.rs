@@ -334,9 +334,15 @@ fn handle_method(
 
         "get_status" => {
             let snap = config.snapshot();
-            let (windows_received, malformed) = critical_window
-                .map(|w| (w.windows_received(), w.malformed_datagrams()))
-                .unwrap_or((0, 0));
+            let (windows_received, malformed, clamped) = critical_window
+                .map(|w| {
+                    (
+                        w.windows_received(),
+                        w.malformed_datagrams(),
+                        w.clamped_windows(),
+                    )
+                })
+                .unwrap_or((0, 0, 0));
             Ok(json!({
                 "mode": snap.mode.to_string(),
                 "quality_enabled": snap.quality_enabled,
@@ -346,6 +352,7 @@ fn handle_method(
                 "conn_timeout_ms": snap.conn_timeout_ms,
                 "critical_windows_received": windows_received,
                 "critical_malformed_datagrams": malformed,
+                "critical_clamped_windows": clamped,
             }))
         }
 

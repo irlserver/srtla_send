@@ -20,6 +20,8 @@ bytes 1..5 : u32 big-endian    — window length in milliseconds
 srtla_send stores `now + window_ms` as the current critical deadline.
 `is_critical_now()` returns true while `now < deadline`.
 
+srtla_send caps a single window at 2000 ms and counts each datagram it had to cap.
+
 Overlapping windows extend the deadline monotonically (`fetch_max`). A late datagram referring to an earlier deadline is ignored — it can never shrink an active window.
 
 ## Enabling
@@ -40,13 +42,16 @@ A window of 30–80 ms covers a typical keyframe burst at 24–60 fps. Err on th
 
 ## Telemetry
 
-`get_status` exposes two counters:
+`get_status` exposes three counters:
 
 ```json
 {
   "critical_windows_received": 142,
-  "critical_malformed_datagrams": 0
+  "critical_malformed_datagrams": 0,
+  "critical_clamped_windows": 0
 }
 ```
 
 `critical_malformed_datagrams > 0` almost always means a mismatched magic byte (version skew) or a sender writing short datagrams.
+
+`critical_clamped_windows > 0` means a sender asked for a window longer than 2000 ms. Most often the encoder writes the length little endian, which turns 50 ms into about 9.7 days.

@@ -23,7 +23,8 @@
 //! bytes 1..5 : u32 big-endian — window length in milliseconds
 //! ```
 //!
-//! srtla_send stores `now + window_ms` as the critical deadline.
+//! srtla_send caps `window_ms` at [`MAX_WINDOW_MS`] and stores
+//! `now + window_ms` as the critical deadline.
 //! `is_critical_now()` returns true while `now < deadline`. Overlapping
 //! windows extend the deadline monotonically (fetch_max) so a fresh
 //! hint can only ever push the deadline forward, never shrink it.
@@ -38,6 +39,13 @@ pub const PROTO_MAGIC: u8 = 0xc1;
 /// Datagram length in bytes: `[magic u8][window_ms u32 big-endian]`.
 pub const DATAGRAM_LEN: usize = 5;
 
+/// Longest window one datagram can open. Real keyframe windows are 30 to 80 ms
+/// (see `docs/KEYFRAME_PRIORITY.md`). The deadline only moves forward, so
+/// without a cap one bad datagram (or a length written little endian) would
+/// route everything through the best-path override, and so onto one link,
+/// until the process restarts.
+pub const MAX_WINDOW_MS: u64 = 2_000;
+
 /// Shared state reflecting the most recent critical-window deadline plus
 /// observability counters. Cloned freely; all mutation is via atomics.
 #[derive(Clone, Default)]
@@ -47,11 +55,25 @@ pub struct CriticalWindow {
     /// Set when a malformed datagram arrives. Surfaced in telemetry so a
     /// silently-dropped client becomes visible to operators.
     malformed_datagrams: Arc<AtomicU64>,
+    /// Datagrams whose window exceeded [`MAX_WINDOW_MS`] and was cut down to
+    /// it. Nonzero usually means an encoder writes the length little endian.
+    clamped_windows: Arc<AtomicU64>,
 }
 
 impl CriticalWindow {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Open a window of `window_ms` starting at `now_ms`, capped at
+    /// [`MAX_WINDOW_MS`]. Returns `true` when the window was capped.
+    pub fn open_window(&self, now_ms: u64, window_ms: u64) -> bool {
+        let clamped = window_ms > MAX_WINDOW_MS;
+        if clamped {
+            self.clamped_windows.fetch_add(1, Ordering::Relaxed);
+        }
+        self.extend_to(now_ms + window_ms.min(MAX_WINDOW_MS));
+        clamped
     }
 
     /// Push the critical deadline forward (fetch_max). Ignores older
@@ -74,6 +96,10 @@ impl CriticalWindow {
 
     pub fn malformed_datagrams(&self) -> u64 {
         self.malformed_datagrams.load(Ordering::Relaxed)
+    }
+
+    pub fn clamped_windows(&self) -> u64 {
+        self.clamped_windows.load(Ordering::Relaxed)
     }
 
     /// Record a malformed sidecar datagram. Kept here because the counter is
@@ -214,6 +240,27 @@ mod tests {
         assert!(w.is_critical_now(299));
         assert!(!w.is_critical_now(300));
         assert_eq!(w.windows_received(), 3);
+    }
+
+    #[test]
+    fn open_window_within_the_cap_is_applied_as_sent() {
+        let w = CriticalWindow::new();
+        assert!(!w.open_window(10_000, 50));
+        assert!(w.is_critical_now(10_049));
+        assert!(!w.is_critical_now(10_050));
+        assert_eq!(w.clamped_windows(), 0);
+        assert_eq!(w.windows_received(), 1);
+    }
+
+    #[test]
+    fn open_window_clamps_an_oversized_window() {
+        let w = CriticalWindow::new();
+        // u32::MAX ms is about 49.7 days: the largest window the wire format
+        // can carry.
+        assert!(w.open_window(10_000, u32::MAX as u64));
+        assert!(w.is_critical_now(10_000 + MAX_WINDOW_MS - 1));
+        assert!(!w.is_critical_now(10_000 + MAX_WINDOW_MS));
+        assert_eq!(w.clamped_windows(), 1);
     }
 
     #[test]
