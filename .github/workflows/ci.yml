@@ -155,7 +155,8 @@ jobs:
         run: |
           sudo cp -a "$RUNNER_TEMP/rx-root/." /
           sudo ldconfig
-          command -v srtla_rec srt-live-transmit
+          command -v srtla_rec
+          command -v srt-live-transmit
           pkg-config --modversion srt
 
       - name: Install the pinned Rust toolchain
@@ -166,7 +167,7 @@ jobs:
       - name: Netns tests
         env:
           NETNS_REQUIRED: "1"
-        run: cargo test --locked --test 'netns_*' -- --test-threads=1
+        run: cargo test --locked --no-fail-fast --test 'netns_*' -- --test-threads=1
 
   msrv:
     name: MSRV
