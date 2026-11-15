@@ -22,6 +22,7 @@ pub struct TomlConfig {
     pub stall_min_in_flight: Option<i32>,
     pub stall_ack_stale_ms: Option<u64>,
     pub conn_timeout_ms: Option<u64>,
+    pub listen_addr: Option<std::net::IpAddr>,
 }
 
 // `SchedulingMode` is a pure core type with no serde dependency, so the file
@@ -44,6 +45,8 @@ impl TomlConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv6Addr};
+
     use super::*;
 
     #[test]
@@ -71,6 +74,12 @@ mod tests {
         assert_eq!(cfg.stall_min_in_flight, Some(64));
         assert_eq!(cfg.stall_ack_stale_ms, Some(1500));
         assert_eq!(cfg.conn_timeout_ms, Some(8000));
+    }
+
+    #[test]
+    fn toml_listen_addr_parses_v6() {
+        let cfg: TomlConfig = toml::from_str(r#"listen_addr = "::1""#).unwrap();
+        assert_eq!(cfg.listen_addr, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
     }
 
     #[test]

@@ -11,7 +11,7 @@ mod uplink;
 mod uplink_recv;
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -72,6 +72,7 @@ const STATUS_LOG_INTERVAL_MS: u64 = 30_000;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_sender_with_config(
     local_srt_port: u16,
+    listen_addr: IpAddr,
     receiver_host: &str,
     receiver_port: u16,
     ips_file: &str,
@@ -101,10 +102,17 @@ pub async fn run_sender_with_config(
     // It also removes a rare startup failure: an uplink's ephemeral source port
     // landing on `local_srt_port` used to make this wildcard bind fail with
     // AddrInUse.
-    let local_listener = UdpSocket::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, local_srt_port)))
+    let listen = SocketAddr::new(listen_addr, local_srt_port);
+    let local_listener = UdpSocket::bind(listen)
         .await
         .context("bind local SRT UDP listener")?;
-    info!("listening for SRT on [::]:{}", local_srt_port);
+    info!("listening for SRT on {listen}");
+    if listen_addr.is_unspecified() {
+        info!(
+            "the SRT listener accepts any interface; only the client pin guards it (use \
+             --listen-addr 127.0.0.1 for an encoder on this device)"
+        );
+    }
 
     let (ips, weights) = read_weighted_ip_list(ips_file).await?;
     debug!("uplink IPs loaded: {}", describe_weights(&ips, &weights));
