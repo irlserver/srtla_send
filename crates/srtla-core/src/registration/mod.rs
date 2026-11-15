@@ -38,38 +38,41 @@ struct OutOfPhaseCounters {
 /// sockets and does the sending.
 #[derive(Default)]
 pub struct RegDriverSends {
-    /// REG1 to a single target uplink: `(conn_idx, packet)`.
-    pub reg1: Option<(usize, [u8; SRTLA_TYPE_REG1_LEN])>,
+    /// REG1 to a single target uplink: `(conn_id, packet)`.
+    pub reg1: Option<(u64, [u8; SRTLA_TYPE_REG1_LEN])>,
     /// REG2 to broadcast to every uplink.
     pub broadcast_reg2: Option<[u8; SRTLA_TYPE_REG2_LEN]>,
 }
 
 pub struct SrtlaRegistrationManager {
     pub srtla_id: [u8; SRTLA_ID_LEN],
-    pending_reg2_idx: Option<usize>,
+    pending_reg2_conn: Option<u64>,
     pub(crate) pending_timeout_at_ms: u64,
     pub(crate) active_connections: usize,
     pub has_connected: bool,
     broadcast_reg2_pending: bool,
-    pub(crate) reg1_target_idx: Option<usize>,
+    pub(crate) reg1_target_conn: Option<u64>,
     pub(crate) reg1_next_send_at_ms: u64,
     probing_state: ProbingState,
     probe_id: [u8; SRTLA_ID_LEN],
     probe_results: SmallVec<ProbeResult, 4>,
-    /// Uplink indices we have queued a REG2 for. A REG3 is honored only for a
+    /// Uplinks we have queued a REG2 for. A REG3 is honored only for a
     /// member, and the grant is ONE-SHOT: `handle_reg3` consumes it, so a
     /// duplicate or replayed REG3 cannot re-fire the "just registered" effects
     /// (`clear_pre_registration_state`, which wipes a live link's packet log,
     /// in-flight count, congestion state and batch queue). A legitimate
     /// reconnect re-arms the gate through [`Self::build_reg2`].
     ///
-    /// Indices are positional into the shell's connection vector, exactly like
-    /// `pending_reg2_idx` / `reg1_target_idx`.
-    awaiting_reg3: SmallVec<usize, 4>,
-    /// `connected` flags snapshotted by [`Self::update_active_connections`],
-    /// indexed the same way. Used only to keep a REG2 broadcast from re-arming
-    /// the one-shot gate on an already-established, forwarding uplink.
-    connected_snapshot: SmallVec<bool, 4>,
+    /// Keyed by `SrtlaConnection::conn_id`, like `pending_reg2_conn` and
+    /// `reg1_target_conn`. The id survives any reordering of the shell's
+    /// connection vector, so a reload that removes an uplink cannot move a
+    /// grant onto the link that slides into its position.
+    awaiting_reg3: SmallVec<u64, 4>,
+    /// Ids of the uplinks [`Self::update_active_connections`] saw as
+    /// connected, keyed by `SrtlaConnection::conn_id` for the same reason.
+    /// Used only to keep a REG2 broadcast from re-arming the one-shot gate on
+    /// an already-established, forwarding uplink.
+    connected_snapshot: SmallVec<u64, 4>,
     out_of_phase: OutOfPhaseCounters,
 }
 
@@ -85,12 +88,12 @@ impl SrtlaRegistrationManager {
         rand::rng().fill_bytes(&mut id);
         Self {
             srtla_id: id,
-            pending_reg2_idx: None,
+            pending_reg2_conn: None,
             pending_timeout_at_ms: 0,
             active_connections: 0,
             has_connected: false,
             broadcast_reg2_pending: false,
-            reg1_target_idx: None,
+            reg1_target_conn: None,
             reg1_next_send_at_ms: 0,
             probing_state: default_probing_state(),
             probe_id: new_probe_id(),
@@ -131,11 +134,11 @@ impl SrtlaRegistrationManager {
     /// handshake.
     pub fn reset_for_rehome(&mut self) {
         rand::rng().fill_bytes(&mut self.srtla_id[SRTLA_ID_LEN / 2..]);
-        self.pending_reg2_idx = None;
+        self.pending_reg2_conn = None;
         self.pending_timeout_at_ms = 0;
         self.active_connections = 0;
         self.broadcast_reg2_pending = false;
-        self.reg1_target_idx = None;
+        self.reg1_target_conn = None;
         self.reg1_next_send_at_ms = 0;
         self.awaiting_reg3.clear();
         self.connected_snapshot.clear();
@@ -146,7 +149,7 @@ impl SrtlaRegistrationManager {
         self.probe_results = new_probe_results();
     }
 
-    /// Arm the one-shot REG3 grant for `conn_idx`.
+    /// Arm the one-shot REG3 grant for `conn_id`.
     ///
     /// Sans-IO caveat: the manager builds packets and the shell transmits them,
     /// so the grant is armed when a REG2 is *queued*, not when it provably left
@@ -155,33 +158,30 @@ impl SrtlaRegistrationManager {
     /// handshake window — deliberately the liveness-safe direction: over-arming
     /// can only admit a REG3 for an uplink we did try to register, whereas
     /// under-arming would silently refuse a legitimate registration.
-    fn arm_reg3_grant(&mut self, conn_idx: usize) {
-        if !self.awaiting_reg3.contains(&conn_idx) {
-            self.awaiting_reg3.push(conn_idx);
+    fn arm_reg3_grant(&mut self, conn_id: u64) {
+        if !self.awaiting_reg3.contains(&conn_id) {
+            self.awaiting_reg3.push(conn_id);
         }
     }
 
-    fn revoke_reg3_grant(&mut self, conn_idx: usize) {
-        self.awaiting_reg3.retain(|&idx| idx != conn_idx);
+    fn revoke_reg3_grant(&mut self, conn_id: u64) {
+        self.awaiting_reg3.retain(|&id| id != conn_id);
     }
 
-    fn is_connected_snapshot(&self, conn_idx: usize) -> bool {
-        self.connected_snapshot
-            .get(conn_idx)
-            .copied()
-            .unwrap_or(false)
+    fn is_connected_snapshot(&self, conn_id: u64) -> bool {
+        self.connected_snapshot.contains(&conn_id)
     }
 
-    /// Build a REG1 packet for `conn_idx` and advance into the "awaiting REG2"
+    /// Build a REG1 packet for `conn_id` and advance into the "awaiting REG2"
     /// state. Pure: the caller transmits the returned bytes on the uplink and
     /// stamps [`SrtlaConnection::note_sent`].
-    pub fn build_reg1_for(&mut self, conn_idx: usize, now: u64) -> [u8; SRTLA_TYPE_REG1_LEN] {
+    pub fn build_reg1_for(&mut self, conn_id: u64, now: u64) -> [u8; SRTLA_TYPE_REG1_LEN] {
         let pkt = create_reg1_packet(&self.srtla_id);
-        debug!("queueing REG1 for uplink #{}", conn_idx);
-        info!("REG1 → uplink #{} ({} bytes)", conn_idx, pkt.len());
+        debug!("queueing REG1 for uplink {:x}", conn_id);
+        info!("REG1 → uplink {:x} ({} bytes)", conn_id, pkt.len());
 
-        self.pending_reg2_idx = Some(conn_idx);
-        self.reg1_target_idx = Some(conn_idx);
+        self.pending_reg2_conn = Some(conn_id);
+        self.reg1_target_conn = Some(conn_id);
         self.pending_timeout_at_ms = now + REG2_TIMEOUT * 1000;
         // Allow the driver to retry at a 1s cadence while waiting on REG2
         self.reg1_next_send_at_ms = now + 1000;
@@ -195,29 +195,29 @@ impl SrtlaRegistrationManager {
     /// a link that reached this path has been reset (`connected == false`) and
     /// must be able to complete a fresh handshake. Only the broadcast in
     /// [`Self::reg_driver_pending_sends`] skips established links.
-    pub fn build_reg2(&mut self, conn_idx: usize) -> [u8; SRTLA_TYPE_REG2_LEN] {
+    pub fn build_reg2(&mut self, conn_id: u64) -> [u8; SRTLA_TYPE_REG2_LEN] {
         let pkt = create_reg2_packet(&self.srtla_id);
-        debug!("queueing REG2 for uplink #{}", conn_idx);
-        info!("REG2 → uplink #{} ({} bytes)", conn_idx, pkt.len());
-        self.arm_reg3_grant(conn_idx);
+        debug!("queueing REG2 for uplink {:x}", conn_id);
+        info!("REG2 → uplink {:x} ({} bytes)", conn_id, pkt.len());
+        self.arm_reg3_grant(conn_id);
         pkt
     }
 
     pub fn process_registration_packet(
         &mut self,
-        conn_idx: usize,
+        conn_id: u64,
         buf: &[u8],
         now_ms: u64,
     ) -> Option<RegistrationEvent> {
         match get_packet_type(buf) {
             Some(SRTLA_TYPE_REG_NGP) => {
-                debug!("REG_NGP from uplink #{}", conn_idx);
-                self.handle_reg_ngp(conn_idx, now_ms);
+                debug!("REG_NGP from uplink {:x}", conn_id);
+                self.handle_reg_ngp(conn_id, now_ms);
                 Some(RegistrationEvent::RegNgp)
             }
             Some(SRTLA_TYPE_REG2) => {
-                debug!("REG2 from uplink #{} (len={})", conn_idx, buf.len());
-                self.handle_reg2(conn_idx, buf, now_ms);
+                debug!("REG2 from uplink {:x} (len={})", conn_id, buf.len());
+                self.handle_reg2(conn_id, buf, now_ms);
                 Some(RegistrationEvent::Reg2)
             }
             // An out-of-phase REG3/REG_ERR reports `None`: the shell's
@@ -228,13 +228,12 @@ impl SrtlaRegistrationManager {
             // datagram, which is exactly what it already does for any other
             // spoofable junk that reaches an uplink's source port.
             Some(SRTLA_TYPE_REG3) => {
-                debug!("REG3 from uplink #{}", conn_idx);
-                self.handle_reg3(conn_idx)
-                    .then_some(RegistrationEvent::Reg3)
+                debug!("REG3 from uplink {:x}", conn_id);
+                self.handle_reg3(conn_id).then_some(RegistrationEvent::Reg3)
             }
             Some(SRTLA_TYPE_REG_ERR) => {
-                debug!("REG_ERR from uplink #{}", conn_idx);
-                self.handle_reg_err(conn_idx, now_ms)
+                debug!("REG_ERR from uplink {:x}", conn_id);
+                self.handle_reg_err(conn_id, now_ms)
                     .then_some(RegistrationEvent::RegErr)
             }
             _ => None,
@@ -242,12 +241,13 @@ impl SrtlaRegistrationManager {
     }
 
     /// Decide the registration driver's sends for this tick and advance the
-    /// handshake state machine. Pure: returns the packets; the caller (which
-    /// owns the sockets) transmits REG1 to `reg1.0` and broadcasts REG2 to
-    /// every uplink. `connection_count` is used only for logging.
+    /// handshake state machine. Pure. It returns the packets, and the caller
+    /// (which owns the sockets) transmits REG1 to the uplink whose id is
+    /// `reg1.0` and broadcasts REG2 to every uplink in `connections`. Each of
+    /// those uplinks that is not already connected gets its REG3 grant here.
     pub fn reg_driver_pending_sends(
         &mut self,
-        connection_count: usize,
+        connections: &[SrtlaConnection],
         now: u64,
     ) -> RegDriverSends {
         let mut sends = RegDriverSends::default();
@@ -255,19 +255,19 @@ impl SrtlaRegistrationManager {
         // If nothing connected yet, send REG1. Prefer target from REG_NGP; otherwise,
         // pick the first uplink.
         if self.active_connections == 0 {
-            if let Some(idx) = self.reg1_target_idx {
-                if self.pending_reg2_idx.is_none() && now >= self.reg1_next_send_at_ms {
+            if let Some(conn_id) = self.reg1_target_conn {
+                if self.pending_reg2_conn.is_none() && now >= self.reg1_next_send_at_ms {
                     let pkt = create_reg1_packet(&self.srtla_id);
-                    info!("REG1 → uplink #{} ({} bytes)", idx, pkt.len());
-                    self.pending_reg2_idx = Some(idx);
+                    info!("REG1 → uplink {:x} ({} bytes)", conn_id, pkt.len());
+                    self.pending_reg2_conn = Some(conn_id);
                     self.pending_timeout_at_ms = now + REG2_TIMEOUT * 1000;
                     // throttle retries until next REG_NGP/timeout
                     self.reg1_next_send_at_ms = now + REG2_TIMEOUT * 1000;
-                    sends.reg1 = Some((idx, pkt));
-                } else if self.pending_reg2_idx.is_some() {
+                    sends.reg1 = Some((conn_id, pkt));
+                } else if self.pending_reg2_conn.is_some() {
                     debug!(
-                        "REG1 pending for uplink #{} (timeout at {}), skipping send",
-                        idx, self.pending_timeout_at_ms
+                        "REG1 pending for uplink {:x} (timeout at {}), skipping send",
+                        conn_id, self.pending_timeout_at_ms
                     );
                 }
             } else {
@@ -280,21 +280,24 @@ impl SrtlaRegistrationManager {
             let pkt = create_reg2_packet(&self.srtla_id);
             info!(
                 "broadcast REG2 to {} uplinks ({} bytes)",
-                connection_count,
+                connections.len(),
                 pkt.len()
             );
-            for idx in 0..connection_count {
+            for conn in connections {
                 // Arming an already-established uplink would re-open the
                 // one-shot gate `handle_reg3` consumed, so the REG3 this
                 // broadcast provokes would wipe a live, forwarding link's
                 // state. The link is already registered; it needs no grant.
                 // (The shell still transmits to it — the receiver re-admits
                 // the address either way — only our bookkeeping abstains.)
-                if self.is_connected_snapshot(idx) {
-                    debug!("REG2 → uplink #{} not re-armed (already connected)", idx);
+                if self.is_connected_snapshot(conn.conn_id) {
+                    debug!(
+                        "REG2 → uplink {:x} not re-armed (already connected)",
+                        conn.conn_id
+                    );
                     continue;
                 }
-                self.arm_reg3_grant(idx);
+                self.arm_reg3_grant(conn.conn_id);
             }
             sends.broadcast_reg2 = Some(pkt);
             self.broadcast_reg2_pending = false;
@@ -303,29 +306,29 @@ impl SrtlaRegistrationManager {
         sends
     }
 
-    fn handle_reg_ngp(&mut self, conn_idx: usize, now_ms: u64) {
+    fn handle_reg_ngp(&mut self, conn_id: u64, now_ms: u64) {
         if self.probing_state == ProbingState::WaitingForProbes {
-            self.handle_probe_response(conn_idx, now_ms);
+            self.handle_probe_response(conn_id, now_ms);
             return;
         }
 
-        if self.active_connections == 0 && self.pending_reg2_idx.is_none() {
-            debug!("REG_NGP from uplink #{} accepted as REG1 target", conn_idx);
-            self.reg1_target_idx = Some(conn_idx);
+        if self.active_connections == 0 && self.pending_reg2_conn.is_none() {
+            debug!("REG_NGP from uplink {:x} accepted as REG1 target", conn_id);
+            self.reg1_target_conn = Some(conn_id);
             self.reg1_next_send_at_ms = now_ms;
         } else {
             debug!(
-                "REG_NGP from uplink #{} ignored (active connections present or pending)",
-                conn_idx
+                "REG_NGP from uplink {:x} ignored (active connections present or pending)",
+                conn_id
             );
         }
     }
 
-    fn handle_reg2(&mut self, conn_idx: usize, buf: &[u8], now_ms: u64) {
+    fn handle_reg2(&mut self, conn_id: u64, buf: &[u8], now_ms: u64) {
         if buf.len() < 2 + SRTLA_ID_LEN {
             return;
         }
-        if self.pending_reg2_idx == Some(conn_idx) {
+        if self.pending_reg2_conn == Some(conn_id) {
             // The first half is the nonce we sent in REG1, and every known
             // receiver echoes it. The uplink sockets accept any source, so a
             // REG2 without it is a forgery or a reply meant for another sender.
@@ -335,7 +338,7 @@ impl SrtlaRegistrationManager {
                 self.log_out_of_phase(
                     "REG2",
                     "id does not echo our half",
-                    conn_idx,
+                    conn_id,
                     self.out_of_phase.reg2,
                 );
                 return;
@@ -343,14 +346,14 @@ impl SrtlaRegistrationManager {
             // server returns full id starting at byte 2
             self.srtla_id.copy_from_slice(&buf[2..2 + SRTLA_ID_LEN]);
             debug!(
-                "REG2 from uplink #{} accepted; broadcasting to peers",
-                conn_idx
+                "REG2 from uplink {:x} accepted; broadcasting to peers",
+                conn_id
             );
-            self.pending_reg2_idx = None;
+            self.pending_reg2_conn = None;
             self.pending_timeout_at_ms = now_ms + REG3_TIMEOUT * 1000;
             self.broadcast_reg2_pending = true;
             // stop sending REG1 until next REG_NGP
-            self.reg1_target_idx = None;
+            self.reg1_target_conn = None;
             self.reg1_next_send_at_ms = 0;
         }
     }
@@ -366,18 +369,18 @@ impl SrtlaRegistrationManager {
     /// exact source address, so the gate cannot reject a real one — including
     /// from a NAT-remapped receiver, since the grant is keyed on our uplink,
     /// not on the receiver's address.
-    fn handle_reg3(&mut self, conn_idx: usize) -> bool {
-        if !self.awaiting_reg3.contains(&conn_idx) {
+    fn handle_reg3(&mut self, conn_id: u64) -> bool {
+        if !self.awaiting_reg3.contains(&conn_id) {
             self.out_of_phase.reg3 = self.out_of_phase.reg3.saturating_add(1);
             self.log_out_of_phase(
                 "REG3",
                 "no matching registration in flight",
-                conn_idx,
+                conn_id,
                 self.out_of_phase.reg3,
             );
             return false;
         }
-        self.revoke_reg3_grant(conn_idx);
+        self.revoke_reg3_grant(conn_id);
         self.has_connected = true;
         true
     }
@@ -393,53 +396,53 @@ impl SrtlaRegistrationManager {
     /// as a direct reply to a REG1/REG2 it just received from that address, so
     /// nothing legitimate is ever discarded, and a flood of forged ones is
     /// bounded at zero effect rather than "one teardown per rate-limit window".
-    fn handle_reg_err(&mut self, conn_idx: usize, now_ms: u64) -> bool {
-        let awaiting_reg2 = self.pending_reg2_idx == Some(conn_idx);
-        let awaiting_reg3 = self.awaiting_reg3.contains(&conn_idx);
+    fn handle_reg_err(&mut self, conn_id: u64, now_ms: u64) -> bool {
+        let awaiting_reg2 = self.pending_reg2_conn == Some(conn_id);
+        let awaiting_reg3 = self.awaiting_reg3.contains(&conn_id);
 
         if !awaiting_reg2 && !awaiting_reg3 {
             self.out_of_phase.reg_err = self.out_of_phase.reg_err.saturating_add(1);
             self.log_out_of_phase(
                 "REG_ERR",
                 "no matching registration in flight",
-                conn_idx,
+                conn_id,
                 self.out_of_phase.reg_err,
             );
             return false;
         }
 
         if awaiting_reg2 {
-            debug!("REG_ERR for uplink #{} while awaiting REG2", conn_idx);
+            debug!("REG_ERR for uplink {:x} while awaiting REG2", conn_id);
             // Scoped to the uplink that owns the single in-flight REG1/REG2
-            // slot: clearing these for any other index is what let one forged
+            // slot: clearing these for any other uplink is what let one forged
             // frame abort a different uplink's handshake.
-            self.pending_reg2_idx = None;
+            self.pending_reg2_conn = None;
             self.pending_timeout_at_ms = 0;
-            self.reg1_target_idx = None;
+            self.reg1_target_conn = None;
             // Wait for a fresh REG_NGP to select the next REG1 target
             self.reg1_next_send_at_ms = now_ms + REG2_TIMEOUT * 1000;
         } else {
-            debug!("REG_ERR for uplink #{} while awaiting REG3", conn_idx);
+            debug!("REG_ERR for uplink {:x} while awaiting REG3", conn_id);
         }
         // An awaiting-REG3 REG_ERR revokes only its own grant.
-        self.revoke_reg3_grant(conn_idx);
+        self.revoke_reg3_grant(conn_id);
 
-        warn!("registration failed for connection {}", conn_idx);
+        warn!("registration failed for connection {:x}", conn_id);
         true
     }
 
     /// Log the first rejection of each kind loudly, then drop to `debug!`: a
     /// spoofed flood must not turn into a log-amplification DoS of its own.
-    fn log_out_of_phase(&self, kind: &str, reason: &str, conn_idx: usize, count: u64) {
+    fn log_out_of_phase(&self, kind: &str, reason: &str, conn_id: u64, count: u64) {
         if count == 1 {
             warn!(
-                "{} for uplink #{} ignored: {} (further out-of-phase frames logged at debug)",
-                kind, conn_idx, reason
+                "{} for uplink {:x} ignored: {} (further out-of-phase frames logged at debug)",
+                kind, conn_id, reason
             );
         } else {
             debug!(
-                "{} for uplink #{} ignored: {} ({} so far)",
-                kind, conn_idx, reason, count
+                "{} for uplink {:x} ignored: {} ({} so far)",
+                kind, conn_id, reason, count
             );
         }
     }
@@ -449,16 +452,16 @@ impl SrtlaRegistrationManager {
     /// send. Pure; returns `None` when no immediate REG1 is due.
     pub fn reg1_if_ngp_immediate(
         &mut self,
-        conn_idx: usize,
+        conn_id: u64,
         now: u64,
     ) -> Option<[u8; SRTLA_TYPE_REG1_LEN]> {
         if self.active_connections == 0
-            && self.pending_reg2_idx.is_none()
-            && self.reg1_target_idx == Some(conn_idx)
+            && self.pending_reg2_conn.is_none()
+            && self.reg1_target_conn == Some(conn_id)
             && now >= self.reg1_next_send_at_ms
         {
-            debug!("REG_NGP immediate send for uplink #{}", conn_idx);
-            Some(self.build_reg1_for(conn_idx, now))
+            debug!("REG_NGP immediate send for uplink {:x}", conn_id);
+            Some(self.build_reg1_for(conn_id, now))
         } else {
             None
         }
@@ -481,40 +484,67 @@ impl SrtlaRegistrationManager {
         // Reset and recalculate - this is the authoritative count
         self.active_connections = new_count;
 
-        // Snapshot the per-index `connected` flags for the REG2 broadcast's
+        // Snapshot the ids of the connected uplinks for the REG2 broadcast's
         // re-arm decision. Refreshed from the live slice every housekeeping
         // tick, immediately before `reg_driver_pending_sends` consumes it.
         self.connected_snapshot.clear();
-        for conn in connections {
-            self.connected_snapshot.push(conn.connected);
+        for conn in connections.iter().filter(|c| c.connected) {
+            self.connected_snapshot.push(conn.conn_id);
         }
     }
 
-    pub fn pending_reg2_idx(&self) -> Option<usize> {
-        self.pending_reg2_idx
+    pub fn pending_reg2_conn(&self) -> Option<u64> {
+        self.pending_reg2_conn
     }
 
-    pub fn clear_pending_if_timed_out(&mut self, now_ms_value: u64) -> Option<usize> {
-        if let Some(idx) = self.pending_reg2_idx
+    pub fn clear_pending_if_timed_out(&mut self, now_ms_value: u64) -> Option<u64> {
+        if let Some(conn_id) = self.pending_reg2_conn
             && self.pending_timeout_at_ms != 0
             && now_ms_value >= self.pending_timeout_at_ms
         {
             warn!(
-                "REG2 wait exceeded {}ms for uplink #{}; clearing pending handshake",
+                "REG2 wait exceeded {}ms for uplink {:x}; clearing pending handshake",
                 REG2_TIMEOUT * 1000,
-                idx
+                conn_id
             );
-            self.pending_reg2_idx = None;
+            self.pending_reg2_conn = None;
             self.pending_timeout_at_ms = 0;
-            self.reg1_target_idx = None;
+            self.reg1_target_conn = None;
             self.reg1_next_send_at_ms = now_ms_value;
-            return Some(idx);
+            return Some(conn_id);
         }
         None
     }
 
-    pub fn get_selected_connection_idx(&self) -> Option<usize> {
-        self.reg1_target_idx
+    pub fn selected_conn_id(&self) -> Option<u64> {
+        self.reg1_target_conn
+    }
+
+    /// Drop every handshake slot that names an uplink the shell removed, so a
+    /// pending REG1 or REG2 on a removed link does not stall the handshake until
+    /// its timeout and a grant cannot outlive its link.
+    pub fn forget_connections(&mut self, removed: &[u64], now: u64) {
+        if self
+            .pending_reg2_conn
+            .is_some_and(|id| removed.contains(&id))
+        {
+            // The same reset `clear_pending_if_timed_out` applies when the
+            // REG2 wait expires, without waiting out the 4 s timeout.
+            self.pending_reg2_conn = None;
+            self.pending_timeout_at_ms = 0;
+            self.reg1_target_conn = None;
+            self.reg1_next_send_at_ms = now;
+        } else if self
+            .reg1_target_conn
+            .is_some_and(|id| removed.contains(&id))
+        {
+            // `pending_timeout_at_ms` stays. It is shared with the REG3
+            // deadline and the probe timeout, which this removal does not end.
+            self.reg1_target_conn = None;
+        }
+        self.awaiting_reg3.retain(|id| !removed.contains(id));
+        self.connected_snapshot.retain(|id| !removed.contains(id));
+        self.probe_results.retain(|r| !removed.contains(&r.conn_id));
     }
 }
 
@@ -540,12 +570,12 @@ impl SrtlaRegistrationManager {
         self.broadcast_reg2_pending
     }
 
-    pub fn reg1_target_idx(&self) -> Option<usize> {
-        self.reg1_target_idx
+    pub fn reg1_target_conn(&self) -> Option<u64> {
+        self.reg1_target_conn
     }
 
-    pub fn set_reg1_target_idx(&mut self, value: Option<usize>) {
-        self.reg1_target_idx = value;
+    pub fn set_reg1_target_conn(&mut self, value: Option<u64>) {
+        self.reg1_target_conn = value;
     }
 
     pub fn reg1_next_send_at_ms(&self) -> u64 {
@@ -557,8 +587,8 @@ impl SrtlaRegistrationManager {
     }
 
     // Mutable accessors for tests that need to modify state
-    pub fn set_pending_reg2_idx(&mut self, value: Option<usize>) {
-        self.pending_reg2_idx = value;
+    pub fn set_pending_reg2_conn(&mut self, value: Option<u64>) {
+        self.pending_reg2_conn = value;
     }
 
     pub fn set_pending_timeout_at_ms(&mut self, value: u64) {
@@ -588,13 +618,35 @@ impl SrtlaRegistrationManager {
         self.out_of_phase.reg_err
     }
 
-    pub fn is_awaiting_reg3(&self, conn_idx: usize) -> bool {
-        self.awaiting_reg3.contains(&conn_idx)
+    pub fn is_awaiting_reg3(&self, conn_id: u64) -> bool {
+        self.awaiting_reg3.contains(&conn_id)
     }
 
     /// Arm the one-shot REG3 grant without building a REG2, for tests that
     /// want to start from "a REG2 is in flight on this uplink".
-    pub fn arm_reg3_gate(&mut self, conn_idx: usize) {
-        self.arm_reg3_grant(conn_idx);
+    pub fn arm_reg3_gate(&mut self, conn_id: u64) {
+        self.arm_reg3_grant(conn_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forget_connections_drops_only_removed_ids() {
+        let mut reg = SrtlaRegistrationManager::new();
+        let _ = reg.build_reg1_for(7, 1_000);
+        reg.arm_reg3_grant(7);
+        reg.arm_reg3_grant(8);
+
+        reg.forget_connections(&[7], 2_000);
+
+        assert_eq!(reg.pending_reg2_conn(), None);
+        assert_eq!(reg.reg1_target_conn, None);
+        assert_eq!(reg.reg1_next_send_at_ms, 2_000);
+        assert_eq!(reg.pending_timeout_at_ms, 0);
+        assert!(!reg.awaiting_reg3.contains(&7));
+        assert!(reg.awaiting_reg3.contains(&8));
     }
 }

@@ -148,10 +148,8 @@ pub async fn run_sender_with_config(
 
     // Send the initial RTT probes the (pure) probing state machine emitted.
     let probes = reg.start_probing(&mut connections, srtla_core::utils::now_ms());
-    for (idx, pkt) in probes {
-        if let Some(conn) = connections.get(idx)
-            && let Some(io) = conn_io.get(&conn.conn_id)
-        {
+    for (conn_id, pkt) in probes {
+        if let Some(io) = conn_io.get(&conn_id) {
             let _ = io.socket.send(&pkt).await;
         }
     }
@@ -395,6 +393,7 @@ pub async fn run_sender_with_config(
                                 &mut seq_tracker,
                                 &binder,
                                 &receiver_resolver,
+                                &mut reg,
                             ).await;
                             info!("connection changes applied successfully");
                             sync_readers(&connections, &conn_io, &mut reader_handles, &packet_tx);

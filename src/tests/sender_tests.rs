@@ -7,6 +7,7 @@ mod tests {
 
     use smallvec::SmallVec;
     use srtla_core::mode::SchedulingMode;
+    use srtla_core::registration::SrtlaRegistrationManager;
     use srtla_core::selection::{calculate_quality_multiplier, select_connection_idx};
     use srtla_core::utils::now_ms;
     use tempfile::NamedTempFile;
@@ -510,6 +511,7 @@ mod tests {
             &mut seq_tracker,
             &binder,
             &*crate::sender::StubResolver::new(vec![]),
+            &mut SrtlaRegistrationManager::new(),
         ));
 
         // Should have removed some connections
@@ -522,6 +524,49 @@ mod tests {
         // (they were cleaned up by remove_connection)
         assert!(seq_tracker.get(100, now).is_none());
         assert!(seq_tracker.get(200, now).is_none());
+    }
+
+    #[test]
+    fn apply_connection_changes_forgets_removed_handshakes() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut connections = rt.block_on(create_test_connections(3));
+
+        // The test connections' labels never match the reload's, so the reload
+        // removes all three.
+        let new_ips = vec![
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+        ];
+
+        let mut last_selected_idx = Some(1);
+        let mut seq_tracker = SequenceTracker::new();
+        let mut reg = SrtlaRegistrationManager::new();
+        let awaiting_reg2 = connections[1].conn_id;
+        let awaiting_reg3 = connections[2].conn_id;
+        reg.set_pending_reg2_conn(Some(awaiting_reg2));
+        reg.arm_reg3_gate(awaiting_reg3);
+
+        let binder: std::sync::Arc<dyn crate::net::UplinkBinder> =
+            std::sync::Arc::new(crate::net::SourceIpBinder);
+        // BatchUdpSocket::new registers with the Tokio reactor, so build the map
+        // inside the runtime context.
+        let mut conn_io = rt.block_on(async { create_test_conn_io_map(&connections) });
+        rt.block_on(apply_connection_changes(
+            &mut connections,
+            &mut conn_io,
+            &new_ips,
+            &[],
+            "127.0.0.1",
+            8080,
+            &mut last_selected_idx,
+            &mut seq_tracker,
+            &binder,
+            &*crate::sender::StubResolver::new(vec![]),
+            &mut reg,
+        ));
+
+        assert_eq!(reg.pending_reg2_conn(), None);
+        assert!(!reg.is_awaiting_reg3(awaiting_reg3));
     }
 
     /// Recovery is not just a connection-local reset: the shell's

@@ -25,7 +25,6 @@ mod tests {
         let (instant_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         process_uplink_packet(
             conn,
-            0,
             &mut reg,
             &listener,
             &instant_tx,

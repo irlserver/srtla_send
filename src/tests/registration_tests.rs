@@ -15,8 +15,8 @@ mod tests {
         assert_eq!(reg.active_connections(), 0);
         assert!(!reg.has_connected());
         assert!(!reg.broadcast_reg2_pending());
-        assert_eq!(reg.pending_reg2_idx(), None);
-        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
+        assert_eq!(reg.reg1_target_conn(), None);
 
         // ID should be randomly generated and non-zero
         assert!(!reg.srtla_id().iter().all(|&b| b == 0));
@@ -33,7 +33,7 @@ mod tests {
         // Process REG_NGP from connection 1
         let handled = reg.process_registration_packet(1, &buf, now_ms());
         assert!(handled.is_some());
-        assert_eq!(reg.reg1_target_idx(), Some(1));
+        assert_eq!(reg.reg1_target_conn(), Some(1));
 
         let current_time = now_ms();
         assert!(reg.reg1_next_send_at_ms() <= current_time + 100); // Allow CI scheduler skew
@@ -44,7 +44,7 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
 
         // Set up pending REG2 state
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
         let original_id = reg.srtla_id;
 
         // Create REG2 response packet with modified ID
@@ -57,9 +57,9 @@ mod tests {
 
         // Should have updated the ID and set broadcast pending
         assert_eq!(reg.srtla_id, modified_id);
-        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
         assert!(reg.broadcast_reg2_pending());
-        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.reg1_target_conn(), None);
     }
 
     #[test]
@@ -87,9 +87,9 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
 
         // Set up pending state
-        reg.set_pending_reg2_idx(Some(1));
+        reg.set_pending_reg2_conn(Some(1));
         reg.set_pending_timeout_at_ms(now_ms() + 5000);
-        reg.set_reg1_target_idx(Some(1));
+        reg.set_reg1_target_conn(Some(1));
 
         // Create REG_ERR packet
         let mut buf = vec![0u8; 4];
@@ -100,9 +100,9 @@ mod tests {
 
         // Should clear pending state and wait for a new REG_NGP before retrying
         let after = now_ms();
-        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
         assert_eq!(reg.pending_timeout_at_ms(), 0);
-        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.reg1_target_conn(), None);
         assert!(reg.reg1_next_send_at_ms() >= after + REG2_TIMEOUT * 1000);
     }
 
@@ -128,9 +128,9 @@ mod tests {
         reg.process_registration_packet(0, &ngp, now_ms());
 
         // Should send REG1 to first connection when no connections are active
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
-        assert_eq!(reg.pending_reg2_idx(), Some(0));
+        assert_eq!(reg.pending_reg2_conn(), Some(0));
         assert!(reg.pending_timeout_at_ms() > now_ms());
     }
 
@@ -143,12 +143,12 @@ mod tests {
         ];
 
         // Set a specific target from REG_NGP
-        reg.set_reg1_target_idx(Some(1));
+        reg.set_reg1_target_conn(Some(1));
 
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
         // Should send to the specified target
-        assert_eq!(reg.pending_reg2_idx(), Some(1));
+        assert_eq!(reg.pending_reg2_conn(), Some(1));
     }
 
     #[tokio::test]
@@ -157,15 +157,15 @@ mod tests {
         let connections = [create_test_connection().await];
 
         // Without REG_NGP, nothing should happen
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
-        assert_eq!(reg.pending_reg2_idx(), None);
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
+        assert_eq!(reg.pending_reg2_conn(), None);
 
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
         reg.process_registration_packet(0, &ngp, now_ms());
 
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
-        assert_eq!(reg.pending_reg2_idx(), Some(0));
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
+        assert_eq!(reg.pending_reg2_conn(), Some(0));
     }
 
     #[tokio::test]
@@ -178,7 +178,7 @@ mod tests {
 
         // Trigger broadcast
         reg.set_broadcast_reg2_pending(true);
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
         // Should have cleared the broadcast flag
         assert!(!reg.broadcast_reg2_pending());
@@ -189,8 +189,8 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
         reg.build_reg1_for(0, now_ms());
 
-        assert_eq!(reg.pending_reg2_idx(), Some(0));
-        assert_eq!(reg.reg1_target_idx(), Some(0));
+        assert_eq!(reg.pending_reg2_conn(), Some(0));
+        assert_eq!(reg.reg1_target_conn(), Some(0));
         let now = now_ms();
         assert!(reg.pending_timeout_at_ms() >= now);
         assert!(reg.reg1_next_send_at_ms() >= now);
@@ -201,14 +201,14 @@ mod tests {
     async fn test_send_reg2_to_does_not_override_state() {
         let mut reg = SrtlaRegistrationManager::new();
         // Pretend we already have pending state for another index
-        reg.set_pending_reg2_idx(Some(1));
-        reg.set_reg1_target_idx(Some(1));
+        reg.set_pending_reg2_conn(Some(1));
+        reg.set_reg1_target_conn(Some(1));
 
         let _ = reg.build_reg2(0);
 
         // State should remain unchanged
-        assert_eq!(reg.pending_reg2_idx(), Some(1));
-        assert_eq!(reg.reg1_target_idx(), Some(1));
+        assert_eq!(reg.pending_reg2_conn(), Some(1));
+        assert_eq!(reg.reg1_target_conn(), Some(1));
     }
 
     #[test]
@@ -216,9 +216,9 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
 
         let start = now_ms();
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
         reg.set_pending_timeout_at_ms(start + 10);
-        reg.set_reg1_target_idx(Some(0));
+        reg.set_reg1_target_conn(Some(0));
         reg.set_reg1_next_send_at_ms(start + 1000);
 
         // Advance time beyond timeout
@@ -226,9 +226,9 @@ mod tests {
         let cleared = reg.clear_pending_if_timed_out(cleared_time);
 
         assert_eq!(cleared, Some(0));
-        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
         assert_eq!(reg.pending_timeout_at_ms(), 0);
-        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.reg1_target_conn(), None);
         assert_eq!(reg.reg1_next_send_at_ms(), cleared_time);
     }
 
@@ -246,11 +246,11 @@ mod tests {
 
         // The REG2 broadcast (one per uplink) is what authorizes the REG3s.
         reg.set_broadcast_reg2_pending(true);
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
         // Simulate multiple REG3 responses
-        for i in 0..3 {
-            let handled = reg.process_registration_packet(i, &reg3_packet, now_ms());
+        for conn in &connections {
+            let handled = reg.process_registration_packet(conn.conn_id, &reg3_packet, now_ms());
             assert!(handled.is_some());
         }
 
@@ -272,9 +272,9 @@ mod tests {
 
         // Even with connections available, should not send yet
         let connections = [create_test_connection().await];
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
         assert_eq!(
-            reg.pending_reg2_idx(),
+            reg.pending_reg2_conn(),
             None,
             "Should not send before next-send time"
         );
@@ -290,28 +290,29 @@ mod tests {
         assert!(!reg.has_connected);
 
         // After REG_NGP
+        let id = connections[0].conn_id;
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
-        reg.process_registration_packet(0, &ngp_packet, now_ms());
-        assert_eq!(reg.reg1_target_idx(), Some(0));
+        reg.process_registration_packet(id, &ngp_packet, now_ms());
+        assert_eq!(reg.reg1_target_conn(), Some(id));
 
         // Set up for REG2
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(id));
 
         // Process REG2
         let mut modified_id = reg.srtla_id;
         modified_id[SRTLA_ID_LEN / 2..].fill(0xff);
         let reg2_packet = create_reg2_packet(&modified_id);
-        reg.process_registration_packet(0, &reg2_packet, now_ms());
+        reg.process_registration_packet(id, &reg2_packet, now_ms());
 
         assert!(reg.broadcast_reg2_pending());
-        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
 
         // Drive the broadcast so the uplink holds a REG3 grant, as housekeeping does
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
         // Process REG3
         let reg3_packet = vec![0x92, 0x02];
-        reg.process_registration_packet(0, &reg3_packet, now_ms());
+        reg.process_registration_packet(id, &reg3_packet, now_ms());
 
         assert!(reg.has_connected);
 
@@ -341,7 +342,7 @@ mod tests {
             create_test_connection().await,
         ];
 
-        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.reg1_target_conn(), None);
 
         let probes = reg.start_probing(&mut connections, now_ms());
 
@@ -358,10 +359,10 @@ mod tests {
         connections[0].last_received = Some(now_ms());
         reg.update_active_connections(&connections);
 
-        let initial_target = reg.reg1_target_idx();
+        let initial_target = reg.reg1_target_conn();
         let _ = reg.start_probing(&mut connections, now_ms());
 
-        assert_eq!(reg.reg1_target_idx(), initial_target);
+        assert_eq!(reg.reg1_target_conn(), initial_target);
         assert!(!reg.is_probing());
     }
 
@@ -388,7 +389,7 @@ mod tests {
         let completed = reg.check_probing_complete();
 
         assert!(completed);
-        assert_eq!(reg.reg1_target_idx(), Some(1));
+        assert_eq!(reg.reg1_target_conn(), Some(1));
         assert!(!reg.is_probing());
     }
 
@@ -404,22 +405,26 @@ mod tests {
         let completed = reg.check_probing_complete();
 
         assert!(completed);
-        assert_eq!(reg.reg1_target_idx(), Some(0));
+        assert_eq!(reg.reg1_target_conn(), Some(0));
         assert!(!reg.is_probing());
     }
 
-    #[test]
-    fn test_check_probing_no_responses_uses_fallback() {
+    #[tokio::test]
+    async fn test_check_probing_no_responses_uses_fallback() {
         let mut reg = SrtlaRegistrationManager::new();
+        let mut connections = vec![
+            create_test_connection().await,
+            create_test_connection().await,
+        ];
 
-        reg.set_probing_state_waiting();
-
-        std::thread::sleep(std::time::Duration::from_millis(2100));
+        let _ = reg.start_probing(&mut connections, now_ms());
+        // The probe timeout is already past.
+        reg.set_pending_timeout_at_ms(0);
 
         let completed = reg.check_probing_complete();
 
         assert!(completed);
-        assert_eq!(reg.reg1_target_idx(), Some(0));
+        assert_eq!(reg.reg1_target_conn(), Some(connections[0].conn_id));
         assert!(!reg.is_probing());
     }
 
@@ -440,7 +445,7 @@ mod tests {
         let completed = reg.check_probing_complete();
 
         assert!(completed);
-        assert_eq!(reg.reg1_target_idx(), Some(0));
+        assert_eq!(reg.reg1_target_conn(), Some(0));
     }
 
     #[test]
@@ -468,12 +473,12 @@ mod tests {
         reg.check_probing_complete();
 
         assert!(!reg.is_probing());
-        assert_eq!(reg.reg1_target_idx(), Some(0));
+        assert_eq!(reg.reg1_target_conn(), Some(0));
 
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
         reg.process_registration_packet(1, &ngp_packet, now_ms());
 
-        assert_eq!(reg.reg1_target_idx(), Some(1));
+        assert_eq!(reg.reg1_target_conn(), Some(1));
     }
 
     // Two-phase SRTLA v2 handshake, driven from the sender side:
@@ -486,24 +491,29 @@ mod tests {
             create_test_connection().await,
         ];
 
+        let first = connections[0].conn_id;
         let mut ngp = vec![0u8; 2];
         ngp[0..2].copy_from_slice(&SRTLA_TYPE_REG_NGP.to_be_bytes());
-        reg.process_registration_packet(0, &ngp, now_ms());
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        reg.process_registration_packet(first, &ngp, now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
         assert_eq!(
-            reg.pending_reg2_idx(),
-            Some(0),
+            reg.pending_reg2_conn(),
+            Some(first),
             "REG1 sent on conn 0 -> awaiting REG2"
         );
 
         let sender_prefix = reg.srtla_id;
         let mut full_id = sender_prefix;
         full_id[SRTLA_ID_LEN / 2..].fill(0x5a);
-        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
+        reg.process_registration_packet(first, &create_reg2_packet(&full_id), now_ms());
 
         assert_eq!(reg.srtla_id, full_id, "conn 0 adopts the receiver full_id");
         assert!(reg.broadcast_reg2_pending(), "REG2 broadcast queued");
-        assert_eq!(reg.pending_reg2_idx(), None, "REG2 received clears pending");
+        assert_eq!(
+            reg.pending_reg2_conn(),
+            None,
+            "REG2 received clears pending"
+        );
 
         let broadcast = create_reg2_packet(&reg.srtla_id);
         assert_eq!(
@@ -511,16 +521,16 @@ mod tests {
             &full_id[..],
             "broadcast REG2 carries the full_id to conn N (not just conn 0)"
         );
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
         assert!(
             !reg.broadcast_reg2_pending(),
             "REG2 broadcast consumed after sending to all uplinks"
         );
 
         let reg3 = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
-        for idx in 0..connections.len() {
+        for (idx, conn) in connections.iter().enumerate() {
             assert!(
-                reg.process_registration_packet(idx, &reg3, now_ms())
+                reg.process_registration_packet(conn.conn_id, &reg3, now_ms())
                     .is_some(),
                 "REG3 on conn {idx} handled"
             );
@@ -533,7 +543,7 @@ mod tests {
     #[test]
     fn full_id_propagation_byte_wise() {
         let mut reg = SrtlaRegistrationManager::new();
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
 
         let sender_id = reg.srtla_id;
         let half = SRTLA_ID_LEN / 2;
@@ -562,7 +572,7 @@ mod tests {
     #[test]
     fn reg2_with_a_foreign_id_half_is_ignored() {
         let mut reg = SrtlaRegistrationManager::new();
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
         let original = reg.srtla_id;
         let half = SRTLA_ID_LEN / 2;
 
@@ -574,7 +584,7 @@ mod tests {
         reg.process_registration_packet(0, &create_reg2_packet(&forged), now_ms());
 
         assert_eq!(reg.srtla_id, original);
-        assert_eq!(reg.pending_reg2_idx(), Some(0));
+        assert_eq!(reg.pending_reg2_conn(), Some(0));
         assert!(!reg.broadcast_reg2_pending());
         assert_eq!(reg.out_of_phase_reg2(), 1);
     }
@@ -582,7 +592,7 @@ mod tests {
     #[test]
     fn the_real_reg2_is_still_accepted_after_a_forged_one() {
         let mut reg = SrtlaRegistrationManager::new();
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
         let original = reg.srtla_id;
         let half = SRTLA_ID_LEN / 2;
 
@@ -599,13 +609,13 @@ mod tests {
 
         assert_eq!(reg.srtla_id, real);
         assert!(reg.broadcast_reg2_pending());
-        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
     }
 
     #[test]
     fn reg2_with_trailing_padding_is_accepted() {
         let mut reg = SrtlaRegistrationManager::new();
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
         let mut real = reg.srtla_id;
         real[SRTLA_ID_LEN / 2..].fill(0x5a);
 
@@ -622,7 +632,7 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
         let before = reg.srtla_id;
         reg.reset_for_rehome();
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
 
         let mut reply = before;
         reply[SRTLA_ID_LEN / 2..].fill(0x5a);
@@ -640,7 +650,7 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
         let base = now_ms();
         reg.build_reg1_for(0, base);
-        assert_eq!(reg.pending_reg2_idx(), Some(0));
+        assert_eq!(reg.pending_reg2_conn(), Some(0));
 
         let deadline = reg.pending_timeout_at_ms();
         assert!(
@@ -658,7 +668,7 @@ mod tests {
             Some(0),
             "REG2 wait must time out at REG2_TIMEOUT (4s)"
         );
-        assert_eq!(reg.pending_reg2_idx(), None, "timeout clears pending");
+        assert_eq!(reg.pending_reg2_conn(), None, "timeout clears pending");
         assert_eq!(
             reg.pending_timeout_at_ms(),
             0,
@@ -673,7 +683,7 @@ mod tests {
     async fn reg3_timeout_fires_at_4s_logical() {
         let mut reg = SrtlaRegistrationManager::new();
 
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
         let mut full_id = reg.srtla_id;
         full_id[SRTLA_ID_LEN / 2..].fill(0x7e);
 
@@ -686,7 +696,7 @@ mod tests {
             "REG3 deadline must be REG3_TIMEOUT (4s) past the received REG2"
         );
 
-        reg.set_pending_reg2_idx(Some(0));
+        reg.set_pending_reg2_conn(Some(0));
         assert_eq!(
             reg.clear_pending_if_timed_out(deadline - 1),
             None,
@@ -895,30 +905,31 @@ mod tests {
         connections[1].connected = false;
 
         // Uplink 0 is live and forwarding; uplink 1 is still unregistered.
-        let _ = reg.build_reg2(0);
-        let event = reg.process_registration_packet(0, &reg3_packet(), now);
+        let (id0, id1) = (connections[0].conn_id, connections[1].conn_id);
+        let _ = reg.build_reg2(id0);
+        let event = reg.process_registration_packet(id0, &reg3_packet(), now);
         apply_shell_registration_effects(event, &mut connections[0], now);
         connections[0].register_packet(42, now);
         assert!(connections[0].connected && connections[0].in_flight_packets == 1);
 
         reg.update_active_connections(&connections);
         reg.set_broadcast_reg2_pending(true);
-        let sends = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let sends = reg.reg_driver_pending_sends(&connections, now_ms());
         assert!(
             sends.broadcast_reg2.is_some(),
             "the broadcast still goes out"
         );
         assert!(
-            !reg.is_awaiting_reg3(0),
+            !reg.is_awaiting_reg3(id0),
             "the connected uplink's consumed grant must not be re-armed"
         );
         assert!(
-            reg.is_awaiting_reg3(1),
+            reg.is_awaiting_reg3(id1),
             "an unregistered uplink still gets a grant"
         );
 
         // The receiver answers the broadcast on both links.
-        let event = reg.process_registration_packet(0, &reg3_packet(), now_ms());
+        let event = reg.process_registration_packet(id0, &reg3_packet(), now_ms());
         apply_shell_registration_effects(event, &mut connections[0], now_ms());
         assert_eq!(
             connections[0].in_flight_packets, 1,
@@ -926,7 +937,7 @@ mod tests {
         );
         assert!(connections[0].connected);
 
-        let event = reg.process_registration_packet(1, &reg3_packet(), now_ms());
+        let event = reg.process_registration_packet(id1, &reg3_packet(), now_ms());
         assert!(
             matches!(event, Some(RegistrationEvent::Reg3)),
             "uplink 1 registers normally"
@@ -936,30 +947,35 @@ mod tests {
     }
 
     /// A reload that removes uplink A shifts B and C down one position. The
-    /// manager never sees the vector, so its positional keys do not follow.
+    /// grants are keyed by connection id, so they stay on their own links.
     #[tokio::test]
-    async fn characterize_reload_shift_moves_the_reg3_grant() {
+    async fn reload_removal_keeps_the_reg3_grant_on_its_link() {
         let mut reg = SrtlaRegistrationManager::new();
         let mut connections = vec![
             create_test_connection().await,
             create_test_connection().await,
             create_test_connection().await,
         ];
+        let (_a, b, c) = (
+            connections[0].conn_id,
+            connections[1].conn_id,
+            connections[2].conn_id,
+        );
 
-        let _ = reg.build_reg2(1);
+        let _ = reg.build_reg2(b);
         connections.remove(0);
 
         assert!(
-            reg.process_registration_packet(0, &reg3_packet(), now_ms())
-                .is_none(),
-            "B's real REG3 is rejected at its new position"
-        );
-        assert!(
             matches!(
-                reg.process_registration_packet(1, &reg3_packet(), now_ms()),
+                reg.process_registration_packet(b, &reg3_packet(), now_ms()),
                 Some(RegistrationEvent::Reg3)
             ),
-            "C inherited B's grant"
+            "B's REG3 is honored after the shift"
+        );
+        assert!(
+            reg.process_registration_packet(c, &reg3_packet(), now_ms())
+                .is_none(),
+            "C holds no grant"
         );
     }
 
@@ -994,7 +1010,7 @@ mod tests {
         );
         assert_eq!(conn.in_flight_packets, 1);
         assert_eq!(reg.out_of_phase_reg_err(), 64);
-        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
     }
 
     /// The REG1/REG2 fields are a single global slot: a REG_ERR arriving on
@@ -1004,18 +1020,18 @@ mod tests {
         let mut reg = SrtlaRegistrationManager::new();
 
         reg.build_reg1_for(1, now_ms());
-        assert_eq!(reg.pending_reg2_idx(), Some(1));
+        assert_eq!(reg.pending_reg2_conn(), Some(1));
         let deadline = reg.pending_timeout_at_ms();
 
         let event = reg.process_registration_packet(0, &reg_err_packet(), now_ms());
         assert!(event.is_none());
 
         assert_eq!(
-            reg.pending_reg2_idx(),
+            reg.pending_reg2_conn(),
             Some(1),
             "uplink B keeps its in-flight REG2 window"
         );
-        assert_eq!(reg.reg1_target_idx(), Some(1), "uplink B keeps its target");
+        assert_eq!(reg.reg1_target_conn(), Some(1), "uplink B keeps its target");
         assert_eq!(reg.pending_timeout_at_ms(), deadline);
         assert_eq!(reg.out_of_phase_reg_err(), 1);
     }
@@ -1036,8 +1052,8 @@ mod tests {
         apply_shell_registration_effects(event, &mut conn, after);
 
         assert!(!conn.connected, "an in-phase REG_ERR tears the link down");
-        assert_eq!(reg.pending_reg2_idx(), None);
-        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
+        assert_eq!(reg.reg1_target_conn(), None);
         assert_eq!(reg.pending_timeout_at_ms(), 0);
         assert!(reg.reg1_next_send_at_ms() >= after + REG2_TIMEOUT * 1000);
         assert_eq!(reg.out_of_phase_reg_err(), 0);
@@ -1077,20 +1093,21 @@ mod tests {
         for conn in connections.iter_mut() {
             conn.connected = false;
         }
+        let (id0, id1) = (connections[0].conn_id, connections[1].conn_id);
         let ngp = [0x92, 0x11];
-        reg.process_registration_packet(0, &ngp, now_ms());
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
-        assert_eq!(reg.pending_reg2_idx(), Some(0));
+        reg.process_registration_packet(id0, &ngp, now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
+        assert_eq!(reg.pending_reg2_conn(), Some(id0));
 
         let mut full_id = reg.srtla_id;
         full_id[SRTLA_ID_LEN / 2..].fill(0x5a);
-        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
+        reg.process_registration_packet(id0, &create_reg2_packet(&full_id), now_ms());
         reg.update_active_connections(&connections);
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
         for (idx, conn) in connections.iter_mut().enumerate() {
             let now = now_ms();
-            let event = reg.process_registration_packet(idx, &reg3_packet(), now);
+            let event = reg.process_registration_packet(conn.conn_id, &reg3_packet(), now);
             assert!(
                 matches!(event, Some(RegistrationEvent::Reg3)),
                 "uplink {idx} must register on the cold-start flow"
@@ -1109,19 +1126,19 @@ mod tests {
         reg.update_active_connections(&connections);
         assert_eq!(reg.active_connections(), 0);
 
-        reg.process_registration_packet(1, &ngp, now_ms());
-        assert_eq!(reg.reg1_target_idx(), Some(1));
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
-        assert_eq!(reg.pending_reg2_idx(), Some(1));
+        reg.process_registration_packet(id1, &ngp, now_ms());
+        assert_eq!(reg.reg1_target_conn(), Some(id1));
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
+        assert_eq!(reg.pending_reg2_conn(), Some(id1));
 
         let mut full_id = reg.srtla_id;
         full_id[SRTLA_ID_LEN / 2..].fill(0x7e);
-        reg.process_registration_packet(1, &create_reg2_packet(&full_id), now_ms());
-        let _ = reg.reg_driver_pending_sends(connections.len(), now_ms());
+        reg.process_registration_packet(id1, &create_reg2_packet(&full_id), now_ms());
+        let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
         for (idx, conn) in connections.iter_mut().enumerate() {
             let now = now_ms();
-            let event = reg.process_registration_packet(idx, &reg3_packet(), now);
+            let event = reg.process_registration_packet(conn.conn_id, &reg3_packet(), now);
             assert!(
                 matches!(event, Some(RegistrationEvent::Reg3)),
                 "uplink {idx} must re-register after the receiver restart"
@@ -1176,9 +1193,9 @@ mod tests {
         // receiver: server half filled in, REG3 grant armed, REG1 target picked,
         // a REG2 broadcast queued and probing already complete.
         reg.srtla_id[SRTLA_ID_LEN / 2..].fill(0xab);
-        reg.set_pending_reg2_idx(Some(1));
+        reg.set_pending_reg2_conn(Some(1));
         reg.set_pending_timeout_at_ms(now_ms() + 5_000);
-        reg.set_reg1_target_idx(Some(1));
+        reg.set_reg1_target_conn(Some(1));
         reg.set_reg1_next_send_at_ms(now_ms() + 1_000);
         reg.set_broadcast_reg2_pending(true);
         reg.arm_reg3_gate(0);
@@ -1201,9 +1218,9 @@ mod tests {
             "and re-randomized, not zeroed, so the REG1 looks like a fresh sender's on the wire"
         );
 
-        assert_eq!(reg.pending_reg2_idx(), None);
+        assert_eq!(reg.pending_reg2_conn(), None);
         assert_eq!(reg.pending_timeout_at_ms(), 0);
-        assert_eq!(reg.reg1_target_idx(), None);
+        assert_eq!(reg.reg1_target_conn(), None);
         assert_eq!(reg.reg1_next_send_at_ms(), 0);
         assert!(!reg.broadcast_reg2_pending());
         assert!(!reg.is_awaiting_reg3(0));

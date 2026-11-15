@@ -27,7 +27,6 @@ use super::client_dedup::ClientDedup;
 #[allow(clippy::too_many_arguments)]
 pub async fn process_uplink_packet(
     conn: &mut SrtlaConnection,
-    conn_idx: usize,
     reg: &mut SrtlaRegistrationManager,
     local_listener: &UdpSocket,
     instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
@@ -42,13 +41,13 @@ pub async fn process_uplink_packet(
     let now = srtla_core::utils::now_ms();
     let pt = get_packet_type(data);
     if let Some(pt) = pt {
-        if let Some(event) = reg.process_registration_packet(conn_idx, data, now) {
+        if let Some(event) = reg.process_registration_packet(conn.conn_id, data, now) {
             match event {
                 RegistrationEvent::RegNgp => {
                     // Answering REG_NGP with an immediate REG1 is deferred to
                     // the shell: build the packet here (advancing reg state)
                     // and stash it as an effect so this stays free of uplink I/O.
-                    if let Some(pkt) = reg.reg1_if_ngp_immediate(conn_idx, now) {
+                    if let Some(pkt) = reg.reg1_if_ngp_immediate(conn.conn_id, now) {
                         incoming.reg1_send = Some(pkt);
                     }
                 }

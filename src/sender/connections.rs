@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Result;
 use smallvec::SmallVec;
 use srtla_core::connection::SrtlaConnection;
+use srtla_core::registration::SrtlaRegistrationManager;
 use srtla_core::utils::now_ms;
 use tracing::{debug, info, warn};
 
@@ -38,6 +39,7 @@ pub async fn apply_connection_changes(
     seq_tracker: &mut SequenceTracker,
     binder: &Arc<dyn UplinkBinder>,
     resolver: &dyn ReceiverResolver,
+    reg: &mut SrtlaRegistrationManager,
 ) {
     // Taken before stale links are removed, so a reload that replaces every IP
     // still dials the receiver instance the bond is registered with.
@@ -66,6 +68,7 @@ pub async fn apply_connection_changes(
         // Remove entries for removed connections from the ring buffer and drop
         // their I/O half. Keyed by the stable conn_id, so this stays correct no
         // matter how `retain` shuffled the connections vec's indices.
+        reg.forget_connections(&removed_conn_ids, now_ms());
         for conn_id in removed_conn_ids {
             seq_tracker.remove_connection(conn_id);
             conn_io.remove(&conn_id);
@@ -528,6 +531,7 @@ mod tests {
             &mut SequenceTracker::new(),
             &binder,
             resolver,
+            &mut SrtlaRegistrationManager::new(),
         )
         .await;
     }

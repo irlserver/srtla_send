@@ -387,10 +387,8 @@ async fn rehome_bond(
     // Re-probing then picks the REG1 target by RTT just like a fresh start.
     reg.reset_for_rehome();
     let probes = reg.start_probing(connections, now);
-    for (idx, pkt) in probes {
-        if let Some(conn) = connections.get(idx)
-            && let Some(io) = conn_io.get(&conn.conn_id)
-        {
+    for (conn_id, pkt) in probes {
+        if let Some(io) = conn_io.get(&conn_id) {
             let _ = io.socket.send(&pkt).await;
         }
     }
@@ -571,8 +569,8 @@ mod tests {
         let client_half: Vec<u8> = bond.reg.srtla_id()[..srtla_protocol::SRTLA_ID_LEN / 2].to_vec();
         bond.reg.srtla_id[srtla_protocol::SRTLA_ID_LEN / 2..].fill(0xab);
         bond.reg.arm_reg3_gate(0);
-        bond.reg.set_reg1_target_idx(Some(1));
-        bond.reg.set_pending_reg2_idx(Some(1));
+        bond.reg.set_reg1_target_conn(Some(1));
+        bond.reg.set_pending_reg2_conn(Some(1));
         bond.reg.set_broadcast_reg2_pending(true);
         bond.reg.update_active_connections(&bond.connections);
         assert!(bond.reg.active_connections() > 0);
@@ -594,7 +592,7 @@ mod tests {
              REG1 looks exactly like a fresh sender's"
         );
 
-        assert_eq!(bond.reg.pending_reg2_idx(), None);
+        assert_eq!(bond.reg.pending_reg2_conn(), None);
         assert!(!bond.reg.broadcast_reg2_pending());
         assert!(!bond.reg.is_awaiting_reg3(0), "REG3 grants must be revoked");
         assert_eq!(bond.reg.active_connections(), 0);

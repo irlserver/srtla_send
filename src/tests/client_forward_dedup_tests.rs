@@ -169,7 +169,6 @@ mod tests {
             for pkt in [&ack, &nak] {
                 let incoming = process_uplink_packet(
                     conn,
-                    link,
                     &mut reg,
                     &listener,
                     &instant_tx,

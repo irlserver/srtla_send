@@ -52,7 +52,6 @@ mod tests {
 
         let incoming = process_uplink_packet(
             &mut conns[0],
-            0,
             &mut reg,
             &listener,
             &instant_tx,

@@ -157,7 +157,6 @@ pub async fn handle_uplink_packet(
     if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
         match super::uplink_recv::process_uplink_packet(
             &mut connections[idx],
-            idx,
             reg,
             local_listener,
             instant_tx,

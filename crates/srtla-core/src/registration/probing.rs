@@ -16,14 +16,14 @@ pub(super) enum ProbingState {
 
 #[derive(Debug, Clone)]
 pub(super) struct ProbeResult {
-    pub conn_idx: usize,
+    pub conn_id: u64,
     pub probe_sent_ms: u64,
     pub rtt_ms: Option<u64>,
 }
 
 impl SrtlaRegistrationManager {
     /// Build a REG2 probe for every connection and advance into
-    /// `WaitingForProbes`. Pure: returns `(conn_idx, packet)` for each probe;
+    /// `WaitingForProbes`. Pure: returns `(conn_id, packet)` for each probe;
     /// the shell transmits them on the matching sockets. Each probe is recorded
     /// as sent at `now` (optimistic — a probe datagram the kernel drops is
     /// handled by the probe-response timeout, not a send error). Returns empty
@@ -32,7 +32,7 @@ impl SrtlaRegistrationManager {
         &mut self,
         connections: &mut [SrtlaConnection],
         now: u64,
-    ) -> SmallVec<(usize, [u8; SRTLA_TYPE_REG2_LEN]), 4> {
+    ) -> SmallVec<(u64, [u8; SRTLA_TYPE_REG2_LEN]), 4> {
         let mut probes = SmallVec::new();
         if self.probing_state != ProbingState::NotStarted || self.active_connections > 0 {
             return probes;
@@ -42,11 +42,11 @@ impl SrtlaRegistrationManager {
         self.probing_state = ProbingState::Probing;
         self.probe_results.clear();
 
-        for (idx, conn) in connections.iter_mut().enumerate() {
+        for conn in connections.iter_mut() {
             let pkt = conn.probe_reg2_packet(&self.probe_id, now);
-            probes.push((idx, pkt));
+            probes.push((conn.conn_id, pkt));
             self.probe_results.push(ProbeResult {
-                conn_idx: idx,
+                conn_id: conn.conn_id,
                 probe_sent_ms: now,
                 rtt_ms: None,
             });
@@ -67,22 +67,19 @@ impl SrtlaRegistrationManager {
         probes
     }
 
-    pub fn handle_probe_response(&mut self, conn_idx: usize, now: u64) {
+    pub fn handle_probe_response(&mut self, conn_id: u64, now: u64) {
         if self.probing_state != ProbingState::WaitingForProbes {
             return;
         }
 
-        if let Some(result) = self
-            .probe_results
-            .iter_mut()
-            .find(|r| r.conn_idx == conn_idx)
+        if let Some(result) = self.probe_results.iter_mut().find(|r| r.conn_id == conn_id)
             && result.rtt_ms.is_none()
         {
             let rtt = now.saturating_sub(result.probe_sent_ms);
             result.rtt_ms = Some(rtt);
             info!(
-                "Probe response from connection #{} (RTT: {}ms)",
-                conn_idx, rtt
+                "Probe response from connection {:x} (RTT: {}ms)",
+                conn_id, rtt
             );
         }
     }
@@ -119,16 +116,18 @@ impl SrtlaRegistrationManager {
                 .filter(|r| r.rtt_ms.is_some())
                 .min_by_key(|r| r.rtt_ms.unwrap())
             {
-                self.reg1_target_idx = Some(best.conn_idx);
+                self.reg1_target_conn = Some(best.conn_id);
                 self.reg1_next_send_at_ms = now;
                 info!(
-                    "Selected connection #{} for initial registration (RTT: {}ms)",
-                    best.conn_idx,
+                    "Selected connection {:x} for initial registration (RTT: {}ms)",
+                    best.conn_id,
                     best.rtt_ms.unwrap()
                 );
             } else {
                 warn!("No connections responded to probes - will use first connection");
-                self.reg1_target_idx = Some(0);
+                // `start_probing` records connections in vector order, so the
+                // first result is the uplink that was first when probing began.
+                self.reg1_target_conn = self.probe_results.first().map(|r| r.conn_id);
                 self.reg1_next_send_at_ms = now;
             }
 
@@ -157,10 +156,10 @@ impl SrtlaRegistrationManager {
         self.probe_results.len()
     }
 
-    pub fn simulate_probe_result(&mut self, conn_idx: usize, rtt_ms: u64) {
+    pub fn simulate_probe_result(&mut self, conn_id: u64, rtt_ms: u64) {
         let now = now_ms();
         self.probe_results.push(ProbeResult {
-            conn_idx,
+            conn_id,
             probe_sent_ms: now.saturating_sub(rtt_ms),
             rtt_ms: Some(rtt_ms),
         });

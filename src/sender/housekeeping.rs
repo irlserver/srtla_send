@@ -42,8 +42,8 @@ pub async fn handle_housekeeping(
         // If probing just completed, reset grace period for the selected connection
         if !reg.is_probing()
             && was_probing
-            && let Some(idx) = reg.get_selected_connection_idx()
-            && let Some(conn) = connections.get_mut(idx)
+            && let Some(selected) = reg.selected_conn_id()
+            && let Some(conn) = connections.iter_mut().find(|c| c.conn_id == selected)
         {
             conn.reconnection.startup_grace_deadline_ms = current_ms + STARTUP_GRACE_MS;
             debug!(
@@ -54,7 +54,7 @@ pub async fn handle_housekeeping(
     }
 
     // housekeeping: drive registration, send keepalives
-    for (i, conn) in connections.iter_mut().enumerate() {
+    for conn in connections.iter_mut() {
         // Simple reconnect-on-timeout, then allow reg driver to proceed
         if conn.is_timed_out(current_ms) {
             if conn.should_attempt_reconnect(current_ms) {
@@ -85,14 +85,14 @@ pub async fn handle_housekeeping(
                     }
                 }
 
-                match reg.pending_reg2_idx() {
-                    Some(idx) if idx == i => {
+                match reg.pending_reg2_conn() {
+                    Some(id) if id == conn.conn_id => {
                         info!("{} marked for recovery; re-sending REG1", label);
-                        let pkt = reg.build_reg1_for(i, current_ms);
+                        let pkt = reg.build_reg1_for(conn.conn_id, current_ms);
                         if let Some(io) = conn_io.get(&conn.conn_id) {
                             match io.socket.send(&pkt).await {
                                 Ok(_) => conn.note_sent(current_ms),
-                                Err(e) => warn!("Failed to send REG1 to uplink #{i}: {e:?}"),
+                                Err(e) => warn!("Failed to send REG1 to {label}: {e:?}"),
                             }
                         }
                     }
@@ -104,11 +104,11 @@ pub async fn handle_housekeeping(
                     }
                     None => {
                         info!("{} marked for recovery; re-sending REG2", label);
-                        let pkt = reg.build_reg2(i);
+                        let pkt = reg.build_reg2(conn.conn_id);
                         if let Some(io) = conn_io.get(&conn.conn_id) {
                             match io.socket.send(&pkt).await {
                                 Ok(_) => conn.note_sent(current_ms),
-                                Err(e) => warn!("Failed to send REG2 to uplink #{i}: {e:?}"),
+                                Err(e) => warn!("Failed to send REG2 to {label}: {e:?}"),
                             }
                         }
                     }
@@ -160,14 +160,14 @@ pub async fn handle_housekeeping(
     reg.update_active_connections(connections);
 
     // drive registration (send REG1/REG2 as needed)
-    let sends = reg.reg_driver_pending_sends(connections.len(), current_ms);
-    if let Some((idx, pkt)) = sends.reg1
-        && let Some(conn) = connections.get_mut(idx)
+    let sends = reg.reg_driver_pending_sends(connections, current_ms);
+    if let Some((conn_id, pkt)) = sends.reg1
+        && let Some(conn) = connections.iter_mut().find(|c| c.conn_id == conn_id)
         && let Some(io) = conn_io.get(&conn.conn_id)
     {
         match io.socket.send(&pkt).await {
             Ok(_) => conn.note_sent(current_ms),
-            Err(e) => warn!("Failed to send REG1 to uplink #{idx}: {e:?}"),
+            Err(e) => warn!("Failed to send REG1 to uplink {conn_id:x}: {e:?}"),
         }
     }
     if let Some(pkt) = sends.broadcast_reg2 {
