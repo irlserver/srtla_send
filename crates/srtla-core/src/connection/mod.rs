@@ -288,6 +288,16 @@ pub fn delivery_proof_is_timely(smooth_rtt_ms: f64, budget_ms: u32) -> bool {
     (smooth_rtt_ms / 2.0) <= budget_ms as f64
 }
 
+/// One outstanding duplicate probe.
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeRecord {
+    /// Latest send of this sequence on this link. Drives the age purge.
+    pub sent_ms: u64,
+    /// The sequence was probed more than once on this link, so its ACK
+    /// cannot say which copy it answers (Karn's ambiguity).
+    pub ambiguous: bool,
+}
+
 pub struct SrtlaConnection {
     pub conn_id: u64,
     #[allow(dead_code)]
@@ -323,11 +333,12 @@ pub struct SrtlaConnection {
     /// Entries here are immune to the cumulative sweep and expire by age.
     /// Probes are also deliberately absent from the packet log's in-flight
     /// accounting and from NAK attribution: a probe is not payload this link
-    /// owes anyone.
+    /// owes anyone. A sequence probed twice on this link is kept but marked
+    /// ambiguous, so its ACK still proves delivery and yields no RTT sample.
     #[cfg(feature = "test-internals")]
-    pub probe_log: FxHashMap<i32, u64>,
+    pub probe_log: FxHashMap<i32, ProbeRecord>,
     #[cfg(not(feature = "test-internals"))]
-    pub(crate) probe_log: FxHashMap<i32, u64>,
+    pub(crate) probe_log: FxHashMap<i32, ProbeRecord>,
     /// Highest sequence number that has been cumulatively ACKed, or
     /// [`NO_ACK_YET`] before the first ACK (and after every reset).
     ///
@@ -634,7 +645,7 @@ impl SrtlaConnection {
         use crate::config_snapshot::{PROBE_LOG_MAX_AGE_MS, PROBE_LOG_SOFT_CAP};
         if self.probe_log.len() >= PROBE_LOG_SOFT_CAP {
             let cutoff = send_time_ms.saturating_sub(PROBE_LOG_MAX_AGE_MS);
-            self.probe_log.retain(|_, sent| *sent >= cutoff);
+            self.probe_log.retain(|_, p| p.sent_ms >= cutoff);
             // Still full of live entries: this link is being probed faster than
             // it can answer, so the oldest are the least useful. Start over
             // rather than grow without bound.
@@ -642,7 +653,16 @@ impl SrtlaConnection {
                 self.probe_log.clear();
             }
         }
-        self.probe_log.insert(seq, send_time_ms);
+        self.probe_log
+            .entry(seq)
+            .and_modify(|p| {
+                p.sent_ms = send_time_ms;
+                p.ambiguous = true;
+            })
+            .or_insert(ProbeRecord {
+                sent_ms: send_time_ms,
+                ambiguous: false,
+            });
     }
 
     /// Check if the batch queue needs time-based flushing (15ms interval)

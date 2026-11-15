@@ -134,9 +134,12 @@ impl SrtlaConnection {
         // link would inflate the very window that makes it seize the stream on
         // release. Checked first — the sweep-proof log is where a slow link's
         // probes actually survive to be answered.
-        if let Some(sent_ms) = self.probe_log.remove(&seq) {
+        if let Some(probe) = self.probe_log.remove(&seq) {
             self.last_ack_or_rtt_sample_ms = now_ms;
-            self.rtt.record_round_trip(sent_ms, now_ms);
+            // A sequence probed twice on this link has no unambiguous send time.
+            if !probe.ambiguous {
+                self.rtt.record_round_trip(probe.sent_ms, now_ms);
+            }
             return true;
         }
 
@@ -436,7 +439,13 @@ mod tests {
     #[tokio::test]
     async fn foreign_ack_for_a_probe_leaves_it_for_its_own_ack() {
         let mut conn = create_test_connection().await;
-        conn.probe_log.insert(42, 1_000);
+        conn.probe_log.insert(
+            42,
+            crate::connection::ProbeRecord {
+                sent_ms: 1_000,
+                ambiguous: false,
+            },
+        );
         conn.last_ack_or_rtt_sample_ms = 500;
 
         assert!(!conn.handle_srtla_ack_foreign(42));
@@ -460,8 +469,37 @@ mod tests {
     #[tokio::test]
     async fn arrival_ack_still_stamps_delivery_proof() {
         let mut conn = create_test_connection().await;
-        conn.probe_log.insert(42, 1_000);
+        conn.probe_log.insert(
+            42,
+            crate::connection::ProbeRecord {
+                sent_ms: 1_000,
+                ambiguous: false,
+            },
+        );
         assert!(conn.handle_srtla_ack_specific(42, false, 1_040));
         assert_eq!(conn.last_ack_or_rtt_sample_ms, 1_040);
+    }
+
+    /// A sequence probed twice on one link cannot time a round trip: its ACK
+    /// may answer either copy. It still proves the link delivers.
+    #[tokio::test]
+    async fn a_repeated_probe_stamps_proof_but_takes_no_rtt_sample() {
+        let mut conn = create_test_connection().await;
+        conn.queue_probe_packet(&[0u8; 64], 42, 1_000);
+        conn.queue_probe_packet(&[0u8; 64], 42, 1_500);
+        assert!(conn.probe_log[&42].ambiguous);
+
+        assert!(conn.handle_srtla_ack_specific(42, false, 1_510));
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 1_510);
+        assert_eq!(conn.rtt.estimated_rtt_ms, 0.0, "no RTT sample");
+    }
+
+    #[tokio::test]
+    async fn a_single_probe_still_yields_an_rtt_sample() {
+        let mut conn = create_test_connection().await;
+        conn.queue_probe_packet(&[0u8; 64], 42, 1_000);
+
+        assert!(conn.handle_srtla_ack_specific(42, false, 1_040));
+        assert_eq!(conn.rtt.estimated_rtt_ms, 40.0);
     }
 }
