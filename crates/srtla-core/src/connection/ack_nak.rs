@@ -167,6 +167,32 @@ impl SrtlaConnection {
         sent_ms.is_some()
     }
 
+    /// Bookkeeping for an SRTLA ACK that arrived on a *different* link but
+    /// whose sequence this link still logs (the fallback scan in the packet
+    /// handler). O(1) remove.
+    ///
+    /// The receiver answers on the link that delivered the packet, so a
+    /// foreign-arrival ACK proves the *arrival* link, not this one: it must not
+    /// stamp delivery proof, record a round trip, or grow the window here. Only
+    /// the in-flight accounting moves.
+    ///
+    /// `probe_log` is deliberately left alone. A silence-pulled or stall-gated
+    /// link's duplicate probe shares its sequence with the unique copy on the
+    /// healthy link; once a cumulative SRT ACK clears that copy, the healthy
+    /// link's SRTLA ACK lands here. Crediting the probe would keep a
+    /// black-holed link's proof fresh forever, and consuming it would leave
+    /// the probe's own ACK nothing to match, starving a live link of the proof
+    /// and RTT it needs to finish its rejoin dwell. The probe waits for its
+    /// own ACK, or ages out in `record_probe`.
+    #[inline]
+    pub fn handle_srtla_ack_foreign(&mut self, seq: i32) -> bool {
+        if self.packet_log.remove(&seq).is_some() {
+            self.in_flight_packets = self.packet_log.len() as i32;
+            return true;
+        }
+        false
+    }
+
     pub fn handle_srtla_ack_global(&mut self) {
         // Global +1 window increase for connections that have received data (from
         // original implementation)
@@ -319,5 +345,58 @@ mod tests {
         assert_eq!(conn.highest_acked_seq, 30);
         assert!(conn.packet_log.is_empty());
         assert_eq!(conn.rtt.estimated_rtt_ms, 40.0);
+    }
+
+    /// A foreign-arrival SRTLA ACK (fallback scan) clears the owner's log
+    /// entry but must not refresh its delivery proof or take an RTT sample:
+    /// the receiver answered on another link, so this link proved nothing.
+    #[tokio::test]
+    async fn foreign_ack_does_not_stamp_delivery_proof() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        conn.last_ack_or_rtt_sample_ms = 500;
+        let rtt_before = conn.rtt.estimated_rtt_ms;
+
+        assert!(conn.handle_srtla_ack_foreign(10));
+        assert!(!conn.packet_log.contains_key(&10));
+        assert_eq!(conn.in_flight_packets, 0);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 500, "proof must not move");
+        assert_eq!(conn.rtt.estimated_rtt_ms, rtt_before, "no RTT sample");
+    }
+
+    /// A pulled link's duplicate probe sits in its probe log while the unique
+    /// copy goes out on the healthy link. The healthy link's ACK falling back
+    /// here must neither credit the probe nor consume it: the probe's own ACK,
+    /// arriving later on this link, is still the proof.
+    #[tokio::test]
+    async fn foreign_ack_for_a_probe_leaves_it_for_its_own_ack() {
+        let mut conn = create_test_connection().await;
+        conn.probe_log.insert(42, 1_000);
+        conn.last_ack_or_rtt_sample_ms = 500;
+
+        assert!(!conn.handle_srtla_ack_foreign(42));
+        assert!(conn.probe_log.contains_key(&42));
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 500, "proof must not move");
+
+        assert!(conn.handle_srtla_ack_specific(42, false, 1_040));
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 1_040);
+    }
+
+    /// Unknown sequences are left for the next link in the fallback scan.
+    #[tokio::test]
+    async fn foreign_ack_for_an_unknown_seq_is_not_claimed() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        assert!(!conn.handle_srtla_ack_foreign(99));
+        assert_eq!(conn.in_flight_packets, 1);
+    }
+
+    /// Arrival-link ACKs are unchanged: they still stamp proof.
+    #[tokio::test]
+    async fn arrival_ack_still_stamps_delivery_proof() {
+        let mut conn = create_test_connection().await;
+        conn.probe_log.insert(42, 1_000);
+        assert!(conn.handle_srtla_ack_specific(42, false, 1_040));
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 1_040);
     }
 }

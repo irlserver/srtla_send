@@ -592,6 +592,27 @@ mod tests {
     }
 
     #[test]
+    fn test_same_millisecond_keepalive_echo_is_delivery_proof() {
+        // On a sub-millisecond path (LAN, veth) the echo returns inside the
+        // tick it was sent in: a 0 ms round trip. Not an RTT sample, but still
+        // proof, or a latched link there can never hold proof between its
+        // sparse probe ACKs and never finishes its rejoin dwell.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conn = rt.block_on(create_test_connection());
+        let now = now_ms();
+
+        let echo = conn.keepalive_packet(now);
+        conn.handle_keepalive_echo(&echo, now);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, now);
+
+        // An echo stamped in the future is garbage, not proof.
+        conn.last_ack_or_rtt_sample_ms = 0;
+        let future = conn.keepalive_packet(now + 5_000);
+        conn.handle_keepalive_echo(&future, now);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 0);
+    }
+
+    #[test]
     fn test_rtt_measurement_needs() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut conn = rt.block_on(create_test_connection());
