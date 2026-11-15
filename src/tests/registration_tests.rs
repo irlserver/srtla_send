@@ -1113,8 +1113,7 @@ mod tests {
         );
         assert!(
             reg.has_connected(),
-            "has_connected records that this process has streamed before and only drives log \
-             wording; it must survive"
+            "has_connected must survive a re-home because it selects the normal forwarding path"
         );
     }
 }
