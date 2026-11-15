@@ -121,6 +121,12 @@ impl CriticalWindow {
 /// probes — so its multiplier decays to a pristine 1.0 while the link actually
 /// carrying the stream absorbs every NAK. Left unchecked, the excluded link
 /// wins this comparison *systematically*, not occasionally.
+///
+/// Links over their in-flight cap are skipped for a related reason. Enhanced
+/// selection skips a capped link before it refreshes that link's quality cache,
+/// so the multiplier stops updating while the link stays over the cap. The skip
+/// here is unconditional, unlike in enhanced selection. When every link is
+/// capped this returns `None` and the normal scheduler decides.
 pub fn select_best_quality_idx(
     conns: &[crate::connection::SrtlaConnection],
     now_ms: u64,
@@ -137,6 +143,7 @@ pub fn select_best_quality_idx(
             || conn.is_timed_out(now_ms)
             || conn.is_stall_gated()
             || conn.is_quality_excluded()
+            || crate::selection::enhanced::in_flight_cap_exceeded(conn)
         {
             continue;
         }
@@ -160,20 +167,23 @@ pub fn select_best_quality_idx(
 }
 
 /// The best-path override as the packet handler applies it: the link
-/// [`select_best_quality_idx`] would pick, but only under enhanced scheduling.
+/// [`select_best_quality_idx`] would pick, but only while quality scoring is
+/// active (`ConfigSnapshot::effective_quality_enabled`).
 ///
-/// Classic mode never consults the quality cache. Only enhanced selection
-/// refreshes it, so in classic mode the multipliers are either the default 1.0
-/// on every link or values left over from before a runtime switch from
-/// enhanced to classic. Ranking on either would override the classic scheduler
-/// (and the operator's link weights) with stale or meaningless data, so in
-/// classic mode this returns `None` and the scheduler's choice stands.
+/// Only enhanced selection with quality scoring on refreshes the quality cache.
+/// In classic mode, and in enhanced mode with quality scoring off, the
+/// multipliers are either the default 1.0 on every link or values frozen at
+/// whatever they were when scoring stopped (a runtime switch to classic, or
+/// `set_quality` turning it off). Ranking on them would override the scheduler
+/// (and the operator's link weights) with stale data and pin every retransmit
+/// and critical-window packet to one link, so in those cases this returns
+/// `None` and the scheduler's choice stands.
 pub fn select_best_path_override_idx(
     conns: &[crate::connection::SrtlaConnection],
     now_ms: u64,
-    mode: crate::mode::SchedulingMode,
+    quality_active: bool,
 ) -> Option<usize> {
-    if mode.is_classic() {
+    if !quality_active {
         return None;
     }
     select_best_quality_idx(conns, now_ms)
@@ -279,6 +289,7 @@ mod tests {
 
     #[test]
     fn best_path_override_is_off_in_classic_mode_even_with_stale_multipliers() {
+        use crate::config_snapshot::ConfigSnapshot;
         use crate::mode::SchedulingMode;
         use crate::test_helpers::create_test_connections;
 
@@ -293,15 +304,51 @@ mod tests {
         conns[1].quality_cache.multiplier = 1.1;
         assert_eq!(select_best_quality_idx(&conns, now), Some(1));
 
+        let classic = ConfigSnapshot {
+            mode: SchedulingMode::Classic,
+            ..ConfigSnapshot::default()
+        };
+        let enhanced = ConfigSnapshot::default();
+
         // Classic never consults the cache: the scheduler's choice stands.
         assert_eq!(
-            select_best_path_override_idx(&conns, now, SchedulingMode::Classic),
+            select_best_path_override_idx(&conns, now, classic.effective_quality_enabled()),
             None
         );
         // Enhanced still prefers the better link.
         assert_eq!(
-            select_best_path_override_idx(&conns, now, SchedulingMode::Enhanced),
+            select_best_path_override_idx(&conns, now, enhanced.effective_quality_enabled()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn best_path_override_is_off_in_enhanced_mode_with_quality_off() {
+        use crate::config_snapshot::ConfigSnapshot;
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = crate::utils::now_ms();
+
+        // Multipliers frozen at unequal values when quality scoring was turned
+        // off. Nothing refreshes them any more, so ranking on them would send
+        // every critical packet to link 1 indefinitely.
+        conns[0].quality_cache.multiplier = 0.6;
+        conns[1].quality_cache.multiplier = 1.1;
+        assert_eq!(select_best_quality_idx(&conns, now), Some(1));
+
+        let enhanced_quality_off = ConfigSnapshot {
+            quality_enabled: false,
+            ..ConfigSnapshot::default()
+        };
+        assert_eq!(
+            select_best_path_override_idx(
+                &conns,
+                now,
+                enhanced_quality_off.effective_quality_enabled()
+            ),
+            None
         );
     }
 
@@ -329,6 +376,28 @@ mod tests {
             "critical traffic must go to the link that is actually carrying, however battered, \
              not to one the scheduler just excluded"
         );
+    }
+
+    #[test]
+    fn best_quality_idx_skips_links_over_their_in_flight_cap() {
+        use crate::selection::enhanced::in_flight_cap_exceeded;
+        use crate::test_helpers::create_test_connections;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = crate::utils::now_ms();
+
+        // Link 1 has the better multiplier, but it is over its in-flight cap,
+        // so enhanced selection has stopped refreshing it. Link 0 has no rate
+        // target yet and therefore no cap.
+        conns[0].quality_cache.multiplier = 0.6;
+        conns[1].quality_cache.multiplier = 1.1;
+        conns[1].cc_target_bps = 1_000_000;
+        conns[1].in_flight_packets = 100;
+
+        assert!(in_flight_cap_exceeded(&conns[1]));
+        assert!(!in_flight_cap_exceeded(&conns[0]));
+        assert_eq!(select_best_quality_idx(&conns, now), Some(0));
     }
 
     #[test]
