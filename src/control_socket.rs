@@ -279,6 +279,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_status_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let _hub = start(&path);
+        let (mut reader, mut writer) = connect(&path).await;
+
+        send(&mut writer, GET_STATUS).await;
+        let resp = read_json(&mut reader).await;
+        assert_eq!(resp["id"], 1);
+        assert!(resp["result"]["mode"].is_string(), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn subscription_push_is_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let hub = start(&path);
+        let (mut reader, mut writer) = connect(&path).await;
+        let id = subscribe_stats(&mut reader, &mut writer).await;
+
+        hub.publish("stats", serde_json::json!({"x": 1})).await;
+        let push = read_json(&mut reader).await;
+        assert_eq!(push["method"], "stats.update");
+        assert_eq!(push["params"]["subscription_id"], id);
+        assert_eq!(push["params"]["data"]["x"], 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_line_closes_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let _hub = start(&path);
+        let (mut reader, mut writer) = connect(&path).await;
+
+        send(&mut writer, &vec![b'a'; MAX_REQUEST_LINE + 1]).await;
+        let mut line = String::new();
+        let read = tokio::time::timeout(IO_TIMEOUT, reader.read_line(&mut line))
+            .await
+            .expect("server kept the connection open");
+        match read {
+            Ok(0) => {}
+            // Closing with unread bytes in the receive queue makes Linux
+            // report a reset instead of a clean EOF.
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("expected the connection to close, got {other:?} with {line:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_removes_the_connections_subscriptions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let hub = start(&path);
+        let (mut reader, mut writer) = connect(&path).await;
+        subscribe_stats(&mut reader, &mut writer).await;
+        assert_eq!(hub.len().await, 1);
+
+        drop(reader);
+        drop(writer);
+        let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+        while hub.len().await != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "subscription outlived its connection"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
     async fn split_request_during_push_is_not_lost() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ctl.sock");
