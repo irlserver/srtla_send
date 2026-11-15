@@ -68,7 +68,7 @@ impl SubscriptionHub {
 
     /// Register a subscription. Returns the subscription id the client
     /// should use to unsubscribe, or `None` when the hub already holds
-    /// [`MAX_SUBSCRIPTIONS`]. Caller supplies their push channel;
+    /// [`MAX_SUBSCRIPTIONS`]. Caller supplies their push channel, and
     /// every published event on the topic is written to it.
     #[cfg(unix)]
     pub async fn subscribe(&self, topic: &str, push_tx: mpsc::Sender<String>) -> Option<String> {
