@@ -149,21 +149,19 @@ mod tests {
             conn.register_packet(i, current_time);
         }
 
-        conn.handle_nak(100, now_ms());
+        conn.handle_nak(100, current_time);
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_count, 1);
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        conn.handle_nak(101, now_ms());
+        conn.handle_nak(101, current_time + 500);
         assert_eq!(conn.congestion.nak_burst_count, 2);
         assert_eq!(conn.congestion.nak_count, 2);
 
-        conn.handle_nak(102, now_ms());
+        conn.handle_nak(102, current_time + 500);
         assert_eq!(conn.congestion.nak_burst_count, 3);
         assert_eq!(conn.congestion.nak_count, 3);
 
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        conn.handle_nak(103, now_ms());
+        conn.handle_nak(103, current_time + 1_600);
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_count, 4);
     }
@@ -178,16 +176,15 @@ mod tests {
             conn.register_packet(i, current_time);
         }
 
-        conn.handle_nak(100, now_ms());
-        conn.handle_nak(101, now_ms());
-        conn.handle_nak(102, now_ms());
+        conn.handle_nak(100, current_time);
+        conn.handle_nak(101, current_time);
+        conn.handle_nak(102, current_time);
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
-        conn.perform_window_recovery(now_ms());
+        conn.perform_window_recovery(current_time);
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        conn.perform_window_recovery(now_ms());
+        conn.perform_window_recovery(current_time + 1_100);
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_burst_start_time_ms, 0);
     }
@@ -221,15 +218,14 @@ mod tests {
             conn.register_packet(i, current_time);
         }
 
-        conn.handle_nak(100, now_ms());
-        conn.handle_nak(101, now_ms());
+        conn.handle_nak(100, current_time);
+        conn.handle_nak(101, current_time);
         assert_eq!(conn.congestion.nak_burst_count, 2);
 
-        conn.handle_nak(102, now_ms());
+        conn.handle_nak(102, current_time);
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        conn.handle_nak(103, now_ms());
+        conn.handle_nak(103, current_time + 1_100);
         assert_eq!(conn.congestion.nak_burst_count, 0);
     }
 
