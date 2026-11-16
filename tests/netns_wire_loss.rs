@@ -35,11 +35,13 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use network_sim::ImpairmentConfig;
+use network_sim::{ImpairmentConfig, NamespaceProcess};
+use srtla_core::seq::seq_after;
 
 /// Both links are the same generous size. Each is far above the share it
 /// ends up carrying, so the lossy link stays uncongested and its 2% loss
@@ -103,6 +105,13 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
             },
         )
         .expect("impair link 1");
+
+    // Started before the SRT session, so the capture holds every data packet.
+    let capture_dir = tempfile::tempdir().expect("create link capture dir");
+    let captures = stack
+        .start_link_captures(capture_dir.path())
+        .inspect_err(|e| eprintln!("link capture skipped: {e:#}"))
+        .ok();
 
     common::wait_until_ready(&stack);
     stack
@@ -208,6 +217,9 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     // kills it along with everything else.
     let output = stack.stop();
     print_nak_attribution(&output.srtla_send_stdout);
+    if let Some(captures) = captures {
+        print_link_captures(capture_dir.path(), &stack.topo.sender_ips, captures);
+    }
     let _ = std::fs::remove_file(&sock);
 
     // srtla_send runs housekeeping, the weak-link classifier and the CC
@@ -441,6 +453,181 @@ fn print_nak_attribution(stdout: &[String]) {
             eprintln!("{l}");
         }
     }
+}
+
+/// What the captures at both ends of one link show. NAKs cannot tell a lost
+/// packet from one that arrived after a higher sequence on the other link,
+/// because the receiver reports a gap either way. The captures can.
+#[derive(Debug, Default, PartialEq)]
+struct LinkCaptureSummary {
+    sent: usize,
+    arrived: usize,
+    /// Sent on this link and seen arriving on no link.
+    lost: usize,
+    /// Arrivals on this link after a strictly higher sequence had already
+    /// arrived on any link.
+    reordered: usize,
+    /// For each reordered arrival, in arrival order, how long after the first
+    /// higher sequence it arrived.
+    late_us: Vec<u64>,
+}
+
+/// `sent[i]` and `received[i]` are the `(timestamp_us, seq)` lists captured at
+/// the two ends of link `i`. All receive captures run in one namespace, so
+/// their timestamps share a clock and can be merged.
+fn summarize_link_captures(
+    sent: &[Vec<(u64, u32)>],
+    received: &[Vec<(u64, u32)>],
+) -> Vec<LinkCaptureSummary> {
+    let arrived_anywhere: HashSet<u32> = received.iter().flatten().map(|&(_, seq)| seq).collect();
+    let mut summaries: Vec<LinkCaptureSummary> = sent
+        .iter()
+        .zip(received)
+        .map(|(sent, received)| {
+            let sent: HashSet<u32> = sent.iter().map(|&(_, seq)| seq).collect();
+            let arrived: HashSet<u32> = received.iter().map(|&(_, seq)| seq).collect();
+            LinkCaptureSummary {
+                sent: sent.len(),
+                arrived: arrived.len(),
+                lost: sent
+                    .iter()
+                    .filter(|seq| !arrived_anywhere.contains(seq))
+                    .count(),
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    let mut arrivals: Vec<(u64, u32, usize)> = received
+        .iter()
+        .enumerate()
+        .flat_map(|(link, r)| r.iter().map(move |&(ts, seq)| (ts, seq, link)))
+        .collect();
+    arrivals.sort_by_key(|&(ts, _, _)| ts);
+
+    // Every arrival that set a new highest sequence, with its time. The first
+    // arrival above a late packet always set a new high, so a binary search
+    // over these finds it.
+    let mut record_highs: Vec<(u32, u64)> = Vec::new();
+    for (ts, seq, link) in arrivals {
+        let ahead = |high: u32| seq_after(high as i32, seq as i32);
+        match record_highs.last() {
+            Some(&(high, _)) if ahead(high) => {
+                let first_higher = record_highs.partition_point(|&(high, _)| !ahead(high));
+                summaries[link].reordered += 1;
+                summaries[link]
+                    .late_us
+                    .push(ts - record_highs[first_higher].1);
+            }
+            Some(&(high, _)) if high == seq => {}
+            _ => record_highs.push((seq, ts)),
+        }
+    }
+    summaries
+}
+
+/// Prints the per-link capture summary, or why there is none. Like the NAK
+/// summary it runs before the assertions.
+fn print_link_captures(dir: &Path, sender_ips: &[String], mut captures: Vec<NamespaceProcess>) {
+    for capture in &mut captures {
+        capture.kill();
+    }
+    thread::sleep(Duration::from_millis(500));
+
+    eprintln!("--- link capture summary ---");
+    // tcpdump reports on exit how many packets the kernel dropped before it
+    // could read them. Those would show up as lost here.
+    for capture in &captures {
+        for line in capture.stderr_lines() {
+            eprintln!("  tcpdump: {line}");
+        }
+    }
+
+    let read = |name: String| -> Result<Vec<(u64, u32)>, String> {
+        let bytes = std::fs::read(dir.join(&name)).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                format!("{name} is not readable by the test user: {e}")
+            } else {
+                format!("read {name}: {e}")
+            }
+        })?;
+        network_sim::srt_data_seqs_from_pcap(&bytes).map_err(|e| format!("parse {name}: {e:#}"))
+    };
+    let mut sent = Vec::new();
+    let mut received = Vec::new();
+    for i in 0..sender_ips.len() {
+        match (
+            read(format!("send_{i}.pcap")),
+            read(format!("recv_{i}.pcap")),
+        ) {
+            (Ok(s), Ok(r)) => {
+                sent.push(s);
+                received.push(r);
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("  link capture summary skipped: {e}");
+                return;
+            }
+        }
+    }
+
+    let ms = |us: Option<&u64>| us.map_or(0.0, |&us| us as f64 / 1000.0);
+    for (i, (link, ip)) in summarize_link_captures(&sent, &received)
+        .into_iter()
+        .zip(sender_ips)
+        .enumerate()
+    {
+        let mut late = link.late_us;
+        late.sort_unstable();
+        eprintln!(
+            "link {i} ({ip}): sent={} arrived={} lost={} reordered={} late_ms_median={:.1} \
+             late_ms_max={:.1}",
+            link.sent,
+            link.arrived,
+            link.lost,
+            link.reordered,
+            ms(late.get(late.len() / 2)),
+            ms(late.last()),
+        );
+    }
+}
+
+#[test]
+fn link_captures_separate_loss_from_reorder() {
+    // Starts two below the wrap, so the run crosses from 0x7fff_ffff to 0.
+    let s = |k: u32| (0x7fff_fffe + k) & 0x7fff_ffff;
+    let sent = vec![
+        vec![(1, s(1)), (3, s(3)), (5, s(5))],
+        vec![(2, s(2)), (4, s(4)), (6, s(6))],
+    ];
+    let received = vec![
+        // s(5) never arrives, and s(6) shows up again as a duplicate.
+        vec![(10, s(1)), (45, s(3)), (55, s(6))],
+        // s(4) overtakes s(2) and s(3).
+        vec![(20, s(4)), (30, s(2)), (50, s(6))],
+    ];
+
+    let summaries = summarize_link_captures(&sent, &received);
+
+    assert_eq!(
+        summaries,
+        vec![
+            LinkCaptureSummary {
+                sent: 3,
+                arrived: 3,
+                lost: 1,
+                reordered: 1,
+                late_us: vec![25],
+            },
+            LinkCaptureSummary {
+                sent: 3,
+                arrived: 3,
+                lost: 0,
+                reordered: 1,
+                late_us: vec![10],
+            },
+        ]
+    );
 }
 
 #[test]

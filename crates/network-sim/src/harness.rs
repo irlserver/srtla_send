@@ -1147,6 +1147,66 @@ impl SrtlaTestStack {
         SRTLA_REC_PORT
     }
 
+    /// Capture the traffic to srtla_rec at both ends of every link, into
+    /// `send_<i>.pcap` (sender veth) and `recv_<i>.pcap` (receiver veth) in
+    /// `dir`. Read them back with [`srt_data_seqs_from_pcap`].
+    ///
+    /// The captures run until the returned processes are killed or dropped.
+    /// Stopping one signals every process in its namespace (see
+    /// [`NamespaceProcess::kill`]), so hold them until the stack has stopped.
+    /// For the same reason this never fails once a capture is running. A
+    /// failed spawn after that is logged and the captures started so far are
+    /// returned, so a missing file is how the caller learns of it.
+    ///
+    /// `-U` writes every packet as it arrives, so killing tcpdump loses none.
+    /// `-Z root` keeps tcpdump from dropping to its own user, which could not
+    /// write into a directory the test user owns.
+    pub fn start_link_captures(&self, dir: &Path) -> Result<Vec<NamespaceProcess>> {
+        if check_binary("tcpdump").is_none() {
+            bail!("tcpdump not found in PATH");
+        }
+        let filter_port = SRTLA_REC_PORT.to_string();
+        let ends = [
+            ("send", &self.topo.sender_ns, &self.topo.sender_ifaces),
+            ("recv", &self.topo.receiver_ns, &self.topo.receiver_ifaces),
+        ];
+        let mut captures = Vec::new();
+        for i in 0..self.topo.sender_ifaces.len() {
+            for (side, ns, ifaces) in ends {
+                let path = dir.join(format!("{side}_{i}.pcap"));
+                let path = path.to_string_lossy();
+                let spawned = NamespaceProcess::spawn(
+                    ns,
+                    "tcpdump",
+                    &[
+                        "-i",
+                        &ifaces[i],
+                        "-U",
+                        "-Z",
+                        "root",
+                        "-s",
+                        "96",
+                        "-w",
+                        &path,
+                        "udp",
+                        "dst",
+                        "port",
+                        &filter_port,
+                    ],
+                );
+                match spawned {
+                    Ok(capture) => captures.push(capture),
+                    Err(e) if captures.is_empty() => return Err(e),
+                    Err(e) => {
+                        tracing::warn!(%path, "link capture did not start: {e:#}");
+                        return Ok(captures);
+                    }
+                }
+            }
+        }
+        Ok(captures)
+    }
+
     /// Stop all processes and collect their output.
     pub fn stop(&mut self) -> StackOutput {
         let mut send_out = (vec![], vec![]);
@@ -1309,6 +1369,88 @@ pub fn spawn_udp_stream(
 }
 
 // ---------------------------------------------------------------------------
+// Packet capture
+// ---------------------------------------------------------------------------
+
+const PCAP_MAGIC_MICROS: u32 = 0xa1b2_c3d4;
+const PCAP_GLOBAL_HEADER_BYTES: usize = 24;
+const PCAP_RECORD_HEADER_BYTES: usize = 16;
+const PCAP_LINKTYPE_ETHERNET: u32 = 1;
+const ETHERNET_HEADER_BYTES: usize = 14;
+const ETHERTYPE_IPV4: u16 = 0x0800;
+const IPPROTO_UDP: u8 = 17;
+const UDP_HEADER_BYTES: usize = 8;
+
+/// `(timestamp_us, seq)` of every original SRT data packet in a classic pcap
+/// capture of UDP over Ethernet, in capture order.
+///
+/// Retransmits are left out. One shares its sequence with the original it
+/// repairs, so it would read as a late arrival of that original. srtla_send's
+/// duplicate probes carry the retransmit flag too, so they are left out as
+/// well. A truncated final record is ignored, because a capture killed in the
+/// middle of a write can end in one.
+pub fn srt_data_seqs_from_pcap(bytes: &[u8]) -> Result<Vec<(u64, u32)>> {
+    let Some(header) = bytes.get(..PCAP_GLOBAL_HEADER_BYTES) else {
+        bail!("pcap is shorter than its {PCAP_GLOBAL_HEADER_BYTES} byte global header");
+    };
+    let magic = [header[0], header[1], header[2], header[3]];
+    let read_u32: fn([u8; 4]) -> u32 = if u32::from_le_bytes(magic) == PCAP_MAGIC_MICROS {
+        u32::from_le_bytes
+    } else if u32::from_be_bytes(magic) == PCAP_MAGIC_MICROS {
+        u32::from_be_bytes
+    } else {
+        bail!(
+            "unsupported pcap magic {:#010x}, expected microsecond classic pcap",
+            u32::from_be_bytes(magic)
+        );
+    };
+    let word = |b: &[u8], at: usize| read_u32([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+
+    let link_type = word(header, 20);
+    if link_type != PCAP_LINKTYPE_ETHERNET {
+        bail!("unsupported pcap link type {link_type}, expected Ethernet");
+    }
+
+    let mut seqs = Vec::new();
+    let mut rest = &bytes[PCAP_GLOBAL_HEADER_BYTES..];
+    while let Some(record) = rest.get(..PCAP_RECORD_HEADER_BYTES) {
+        let ts_us = u64::from(word(record, 0)) * 1_000_000 + u64::from(word(record, 4));
+        let incl_len = word(record, 8) as usize;
+        let Some(frame) = rest[PCAP_RECORD_HEADER_BYTES..].get(..incl_len) else {
+            break;
+        };
+        if let Some(seq) = srt_data_seq_in_frame(frame) {
+            seqs.push((ts_us, seq));
+        }
+        rest = &rest[PCAP_RECORD_HEADER_BYTES + incl_len..];
+    }
+    Ok(seqs)
+}
+
+/// The sequence of an original SRT data packet carried in an Ethernet frame,
+/// or `None` for any other frame. The payload is read from the captured bytes
+/// rather than the UDP length, because a short snap length cuts it off.
+fn srt_data_seq_in_frame(frame: &[u8]) -> Option<u32> {
+    let ethertype = u16::from_be_bytes([*frame.get(12)?, *frame.get(13)?]);
+    if ethertype != ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = frame.get(ETHERNET_HEADER_BYTES..)?;
+    let version_ihl = *ip.first()?;
+    if version_ihl >> 4 != 4 || *ip.get(9)? != IPPROTO_UDP {
+        return None;
+    }
+    let ip_header_bytes = usize::from(version_ihl & 0x0f) * 4;
+    let payload = ip.get(ip_header_bytes + UDP_HEADER_BYTES..)?;
+    if payload.len() < 8 || payload[0] & 0x80 != 0 || payload[4] & 0x04 != 0 {
+        return None;
+    }
+    Some(u32::from_be_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1390,5 +1532,106 @@ mod stream_script_tests {
             }
             previous_seq = Some(word0);
         }
+    }
+}
+
+#[cfg(test)]
+mod pcap_tests {
+    use super::srt_data_seqs_from_pcap;
+
+    type Word = fn(u32) -> [u8; 4];
+
+    fn global_header(word: Word, link_type: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(word(0xa1b2_c3d4));
+        out.extend([0u8; 4]);
+        out.extend(word(0));
+        out.extend(word(0));
+        out.extend(word(96));
+        out.extend(word(link_type));
+        out
+    }
+
+    /// Ethernet, a 20 byte IPv4 header and a UDP header around `payload`.
+    fn udp_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0u8; 12];
+        frame.extend([0x08, 0x00]);
+        let mut ip = [0u8; 20];
+        ip[0] = 0x45;
+        ip[9] = 17;
+        frame.extend(ip);
+        frame.extend([0x9c, 0x40, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00]);
+        frame.extend(payload);
+        frame
+    }
+
+    fn record(word: Word, ts_sec: u32, ts_usec: u32, frame: &[u8]) -> Vec<u8> {
+        let len = u32::try_from(frame.len()).expect("frame fits a pcap record");
+        let mut out = Vec::new();
+        out.extend(word(ts_sec));
+        out.extend(word(ts_usec));
+        out.extend(word(len));
+        out.extend(word(len));
+        out.extend(frame);
+        out
+    }
+
+    fn srt_header(word0: u32, word1: u32) -> Vec<u8> {
+        let mut out = word0.to_be_bytes().to_vec();
+        out.extend(word1.to_be_bytes());
+        out.extend([0u8; 8]);
+        out
+    }
+
+    #[test]
+    fn pcap_yields_only_srt_data_packets() {
+        let le: Word = u32::to_le_bytes;
+        let mut pcap = global_header(le, 1);
+        pcap.extend(record(
+            le,
+            7,
+            250,
+            &udp_frame(&srt_header(0x0000_1234, 0xc000_0001)),
+        ));
+        pcap.extend(record(le, 8, 0, &udp_frame(&srt_header(0x8002_0000, 0))));
+
+        let seqs = srt_data_seqs_from_pcap(&pcap).expect("parse pcap");
+
+        assert_eq!(seqs, vec![(7_000_250, 0x1234)]);
+    }
+
+    #[test]
+    fn pcap_in_big_endian_skips_retransmits_and_a_truncated_tail() {
+        let be: Word = u32::to_be_bytes;
+        let mut pcap = global_header(be, 1);
+        pcap.extend(record(
+            be,
+            1,
+            5,
+            &udp_frame(&srt_header(0x0000_0010, 0xc400_0002)),
+        ));
+        pcap.extend(record(
+            be,
+            1,
+            9,
+            &udp_frame(&srt_header(0x0000_0011, 0xc000_0003)),
+        ));
+        let mut tail = record(be, 2, 0, &udp_frame(&srt_header(0x12, 0xc000_0004)));
+        tail.truncate(tail.len() - 1);
+        pcap.extend(tail);
+
+        let seqs = srt_data_seqs_from_pcap(&pcap).expect("parse pcap");
+
+        assert_eq!(seqs, vec![(1_000_009, 0x11)]);
+    }
+
+    #[test]
+    fn pcap_rejects_other_magic_and_link_types() {
+        let le: Word = u32::to_le_bytes;
+        let mut nanos = global_header(le, 1);
+        nanos[..4].copy_from_slice(&0xa1b2_3c4d_u32.to_le_bytes());
+        assert!(srt_data_seqs_from_pcap(&nanos).is_err());
+        assert!(srt_data_seqs_from_pcap(&global_header(le, 113)).is_err());
+        assert!(srt_data_seqs_from_pcap(&[0u8; 10]).is_err());
     }
 }
