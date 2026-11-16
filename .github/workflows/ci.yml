@@ -167,7 +167,8 @@ jobs:
       - name: Netns tests
         env:
           NETNS_REQUIRED: "1"
-        run: cargo test --locked --no-fail-fast --test 'netns_*' -- --test-threads=1
+        # --show-output keeps passing tests' diagnostics, such as the wire-loss NAK summary.
+        run: cargo test --locked --no-fail-fast --test 'netns_*' -- --test-threads=1 --show-output
 
   msrv:
     name: MSRV
