@@ -38,7 +38,7 @@ pub async fn handle_housekeeping(
 
     if reg.is_probing() {
         let was_probing = true;
-        reg.check_probing_complete();
+        reg.check_probing_complete(current_ms);
         // If probing just completed, reset grace period for the selected connection
         if !reg.is_probing()
             && was_probing

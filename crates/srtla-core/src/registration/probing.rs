@@ -4,7 +4,6 @@ use tracing::{info, warn};
 
 use super::SrtlaRegistrationManager;
 use crate::connection::SrtlaConnection;
-use crate::utils::now_ms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProbingState {
@@ -84,12 +83,11 @@ impl SrtlaRegistrationManager {
         }
     }
 
-    pub fn check_probing_complete(&mut self) -> bool {
+    pub fn check_probing_complete(&mut self, now: u64) -> bool {
         if self.probing_state != ProbingState::WaitingForProbes {
             return false;
         }
 
-        let now = now_ms();
         let all_responded = self.probe_results.iter().all(|r| r.rtt_ms.is_some());
         let timed_out = now >= self.pending_timeout_at_ms;
 
@@ -156,8 +154,7 @@ impl SrtlaRegistrationManager {
         self.probe_results.len()
     }
 
-    pub fn simulate_probe_result(&mut self, conn_id: u64, rtt_ms: u64) {
-        let now = now_ms();
+    pub fn simulate_probe_result(&mut self, conn_id: u64, rtt_ms: u64, now: u64) {
         self.probe_results.push(ProbeResult {
             conn_id,
             probe_sent_ms: now.saturating_sub(rtt_ms),
@@ -165,9 +162,9 @@ impl SrtlaRegistrationManager {
         });
     }
 
-    pub fn set_probing_state_waiting(&mut self) {
+    pub fn set_probing_state_waiting(&mut self, now: u64) {
         self.probing_state = ProbingState::WaitingForProbes;
-        self.pending_timeout_at_ms = now_ms() + 2000;
+        self.pending_timeout_at_ms = now + 2000;
     }
 }
 

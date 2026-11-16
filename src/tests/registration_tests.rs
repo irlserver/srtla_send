@@ -369,10 +369,11 @@ mod tests {
     #[test]
     fn test_probe_response_tracking() {
         let mut reg = SrtlaRegistrationManager::new();
+        let base = now_ms();
 
-        reg.set_probing_state_waiting();
-        reg.simulate_probe_result(0, 100);
-        reg.simulate_probe_result(1, 200);
+        reg.set_probing_state_waiting(base);
+        reg.simulate_probe_result(0, 100, base);
+        reg.simulate_probe_result(1, 200, base);
 
         assert_eq!(reg.probe_results_count(), 2);
     }
@@ -380,13 +381,14 @@ mod tests {
     #[test]
     fn test_check_probing_complete_selects_lowest_rtt() {
         let mut reg = SrtlaRegistrationManager::new();
+        let base = now_ms();
 
-        reg.set_probing_state_waiting();
-        reg.simulate_probe_result(0, 150);
-        reg.simulate_probe_result(1, 50);
-        reg.simulate_probe_result(2, 200);
+        reg.set_probing_state_waiting(base);
+        reg.simulate_probe_result(0, 150, base);
+        reg.simulate_probe_result(1, 50, base);
+        reg.simulate_probe_result(2, 200, base);
 
-        let completed = reg.check_probing_complete();
+        let completed = reg.check_probing_complete(base);
 
         assert!(completed);
         assert_eq!(reg.reg1_target_conn(), Some(1));
@@ -396,13 +398,12 @@ mod tests {
     #[test]
     fn test_check_probing_timeout_selects_best_available() {
         let mut reg = SrtlaRegistrationManager::new();
+        let base = now_ms();
 
-        reg.set_probing_state_waiting();
-        reg.simulate_probe_result(0, 100);
+        reg.set_probing_state_waiting(base);
+        reg.simulate_probe_result(0, 100, base);
 
-        std::thread::sleep(std::time::Duration::from_millis(2100));
-
-        let completed = reg.check_probing_complete();
+        let completed = reg.check_probing_complete(base + 2_100);
 
         assert!(completed);
         assert_eq!(reg.reg1_target_conn(), Some(0));
@@ -412,16 +413,15 @@ mod tests {
     #[tokio::test]
     async fn test_check_probing_no_responses_uses_fallback() {
         let mut reg = SrtlaRegistrationManager::new();
+        let base = now_ms();
         let mut connections = vec![
             create_test_connection().await,
             create_test_connection().await,
         ];
 
-        let _ = reg.start_probing(&mut connections, now_ms());
-        // The probe timeout is already past.
-        reg.set_pending_timeout_at_ms(0);
+        let _ = reg.start_probing(&mut connections, base);
 
-        let completed = reg.check_probing_complete();
+        let completed = reg.check_probing_complete(base + 2_100);
 
         assert!(completed);
         assert_eq!(reg.reg1_target_conn(), Some(connections[0].conn_id));
@@ -431,18 +431,17 @@ mod tests {
     #[test]
     fn test_handle_probe_response_records_rtt() {
         let mut reg = SrtlaRegistrationManager::new();
+        let base = now_ms();
 
-        reg.set_probing_state_waiting();
-        reg.simulate_probe_result(0, 0);
-        reg.simulate_probe_result(1, 0);
+        reg.set_probing_state_waiting(base);
+        reg.simulate_probe_result(0, 0, base);
+        reg.simulate_probe_result(1, 0, base);
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        reg.handle_probe_response(0, now_ms());
+        reg.handle_probe_response(0, base + 50);
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        reg.handle_probe_response(1, now_ms());
+        reg.handle_probe_response(1, base + 100);
 
-        let completed = reg.check_probing_complete();
+        let completed = reg.check_probing_complete(base + 100);
 
         assert!(completed);
         assert_eq!(reg.reg1_target_conn(), Some(0));
@@ -451,14 +450,14 @@ mod tests {
     #[test]
     fn test_reg_ngp_during_probing_handled_as_probe_response() {
         let mut reg = SrtlaRegistrationManager::new();
+        let base = now_ms();
 
-        reg.set_probing_state_waiting();
-        reg.simulate_probe_result(0, 0);
+        reg.set_probing_state_waiting(base);
+        reg.simulate_probe_result(0, 0, base);
 
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
-        std::thread::sleep(std::time::Duration::from_millis(50));
 
-        reg.process_registration_packet(0, &ngp_packet, now_ms());
+        reg.process_registration_packet(0, &ngp_packet, base + 50);
 
         assert!(reg.is_probing());
         assert_eq!(reg.probe_results_count(), 1);
@@ -467,16 +466,17 @@ mod tests {
     #[test]
     fn test_reg_ngp_after_probing_updates_target() {
         let mut reg = SrtlaRegistrationManager::new();
+        let base = now_ms();
 
-        reg.set_probing_state_waiting();
-        reg.simulate_probe_result(0, 100);
-        reg.check_probing_complete();
+        reg.set_probing_state_waiting(base);
+        reg.simulate_probe_result(0, 100, base);
+        reg.check_probing_complete(base);
 
         assert!(!reg.is_probing());
         assert_eq!(reg.reg1_target_conn(), Some(0));
 
         let ngp_packet = [0x92, 0x11, 0x00, 0x00];
-        reg.process_registration_packet(1, &ngp_packet, now_ms());
+        reg.process_registration_packet(1, &ngp_packet, base);
 
         assert_eq!(reg.reg1_target_conn(), Some(1));
     }
