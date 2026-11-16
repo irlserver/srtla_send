@@ -34,7 +34,7 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup toolchain install nightly --profile minimal --component rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Format
         run: cargo +nightly fmt --all -- --check
@@ -60,7 +60,7 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # srtla_send's dev-dependency turns on srtla-core's test-internals feature
       # in every workspace test build, so a test run cannot see the pub(crate)
@@ -162,7 +162,7 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Netns tests
         env:
@@ -182,7 +182,7 @@ jobs:
           echo "MSRV=${msrv}" >>"${GITHUB_ENV}"
           rustup toolchain install "${msrv}" --profile minimal
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Check
         run: cargo +"${MSRV}" check --workspace --all-targets --all-features --locked
@@ -196,7 +196,7 @@ jobs:
       - name: Install beta
         run: rustup toolchain install beta --profile minimal
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Test
         run: cargo +beta test --workspace --all-features --locked
@@ -231,7 +231,7 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-deny
 
