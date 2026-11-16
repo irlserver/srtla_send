@@ -216,9 +216,15 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     // The adaptive sender lives in the stack's caller slot, so stop()
     // kills it along with everything else.
     let output = stack.stop();
-    print_nak_attribution(&output.srtla_send_stdout);
+    let nak_lines = nak_attributed_lines(&output.srtla_send_stdout);
+    print_nak_attribution(&nak_lines);
     if let Some(captures) = captures {
-        print_link_captures(capture_dir.path(), &stack.topo.sender_ips, captures);
+        print_link_captures(
+            capture_dir.path(),
+            &stack.topo.sender_ips,
+            captures,
+            &nak_lines,
+        );
     }
     let _ = std::fs::remove_file(&sock);
 
@@ -382,18 +388,22 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|token| token.strip_prefix(key)?.strip_prefix('='))
 }
 
-/// Tallies stripped `nak attributed` lines per link. The link label reads
+/// The link label of a stripped `nak attributed` line. It reads
 /// `host:port via ip` and the host is the same on every link, so the label is
-/// taken whole from `link=` up to ` seq=` rather than split on spaces. A line
-/// whose label cannot be found lands under `?`, so a format change shows up in
-/// the summary instead of silently emptying it.
+/// taken whole from `link=` up to ` seq=` rather than split on spaces.
+fn nak_link_label(line: &str) -> Option<&str> {
+    line.split_once("link=")
+        .and_then(|(_, rest)| rest.split_once(" seq="))
+        .map(|(link, _)| link)
+}
+
+/// Tallies stripped `nak attributed` lines per link. A line whose label cannot
+/// be found lands under `?`, so a format change shows up in the summary instead
+/// of silently emptying it.
 fn tally_naks<'a>(lines: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, NakTally> {
     let mut tallies: BTreeMap<String, NakTally> = BTreeMap::new();
     for line in lines {
-        let link = line
-            .split_once("link=")
-            .and_then(|(_, rest)| rest.split_once(" seq="))
-            .map_or("?", |(link, _)| link);
+        let link = nak_link_label(line).unwrap_or("?");
         let tally = tallies.entry(link.to_string()).or_default();
         tally.total += 1;
         if field(line, "resend") == Some("true") {
@@ -418,16 +428,19 @@ fn tally_naks<'a>(lines: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, 
     tallies
 }
 
-/// Prints the evidence for whether the clean link's NAKs are reorder NAKs.
-/// It runs before the assertions so whichever one fails still has it in the
-/// output.
-fn print_nak_attribution(stdout: &[String]) {
-    let lines: Vec<String> = stdout
+/// srtla_send's `nak attributed` lines, stripped of colour codes.
+fn nak_attributed_lines(stdout: &[String]) -> Vec<String> {
+    stdout
         .iter()
         .filter(|l| l.contains("nak attributed"))
         .map(|l| strip_ansi(l))
-        .collect();
+        .collect()
+}
 
+/// Prints the evidence for whether the clean link's NAKs are reorder NAKs.
+/// It runs before the assertions so whichever one fails still has it in the
+/// output.
+fn print_nak_attribution(lines: &[String]) {
     eprintln!("--- nak attribution summary ---");
     for (link, t) in tally_naks(lines.iter().map(String::as_str)) {
         eprintln!(
@@ -438,7 +451,7 @@ fn print_nak_attribution(stdout: &[String]) {
 
     const SHOWN: usize = 40;
     if lines.len() <= 2 * SHOWN {
-        for l in &lines {
+        for l in lines {
             eprintln!("{l}");
         }
     } else {
@@ -526,15 +539,80 @@ fn summarize_link_captures(
     summaries
 }
 
+/// Link index and seq of every NAK charged to a first send, one entry per
+/// `nak attributed` line. The link is the one whose sender IP ends the label.
+/// Resends are left out because the receive captures leave out retransmits.
+fn naked_first_sends<'a>(
+    lines: impl IntoIterator<Item = &'a str>,
+    sender_ips: &[String],
+) -> Vec<(usize, u32)> {
+    lines
+        .into_iter()
+        .filter(|line| field(line, "resend") == Some("false"))
+        .filter_map(|line| {
+            let (_, ip) = nak_link_label(line)?.rsplit_once(" via ")?;
+            let link = sender_ips.iter().position(|s| s == ip)?;
+            let seq = field(line, "seq")?.parse().ok()?;
+            Some((link, seq))
+        })
+        .collect()
+}
+
+/// Where the NAKed first sends charged to one link actually arrived. This
+/// needs only the receive captures, so unlike `lost` it also sees packets a
+/// qdisc dropped on the sender veth before the send capture could.
+#[derive(Debug, Default, PartialEq)]
+struct NakedArrivals {
+    total: usize,
+    /// The charged link delivered it, so the NAK was a reorder, not a loss.
+    arrived_on_link: usize,
+    arrived_elsewhere: usize,
+    never_arrived: usize,
+}
+
+fn classify_naked_first_sends(
+    naks: &[(usize, u32)],
+    received: &[Vec<(u64, u32)>],
+) -> Vec<NakedArrivals> {
+    let arrived: Vec<HashSet<u32>> = received
+        .iter()
+        .map(|r| r.iter().map(|&(_, seq)| seq).collect())
+        .collect();
+    let mut by_link: Vec<NakedArrivals> = received.iter().map(|_| Default::default()).collect();
+    for &(link, seq) in naks {
+        let Some(tally) = by_link.get_mut(link) else {
+            continue;
+        };
+        tally.total += 1;
+        if arrived[link].contains(&seq) {
+            tally.arrived_on_link += 1;
+        } else if arrived.iter().any(|a| a.contains(&seq)) {
+            tally.arrived_elsewhere += 1;
+        } else {
+            tally.never_arrived += 1;
+        }
+    }
+    by_link
+}
+
 /// Prints the per-link capture summary, or why there is none. Like the NAK
 /// summary it runs before the assertions.
-fn print_link_captures(dir: &Path, sender_ips: &[String], mut captures: Vec<NamespaceProcess>) {
+fn print_link_captures(
+    dir: &Path,
+    sender_ips: &[String],
+    mut captures: Vec<NamespaceProcess>,
+    nak_lines: &[String],
+) {
     for capture in &mut captures {
         capture.kill();
     }
     thread::sleep(Duration::from_millis(500));
 
     eprintln!("--- link capture summary ---");
+    eprintln!(
+        "  note: lost cannot see qdisc drops on the sender veth, because the send capture taps \
+         packets after tbf and netem"
+    );
     // tcpdump reports on exit how many packets the kernel dropped before it
     // could read them. Those would show up as lost here.
     for capture in &captures {
@@ -590,6 +668,19 @@ fn print_link_captures(dir: &Path, sender_ips: &[String], mut captures: Vec<Name
             ms(late.last()),
         );
     }
+
+    let naks = naked_first_sends(nak_lines.iter().map(String::as_str), sender_ips);
+    for (i, (link, ip)) in classify_naked_first_sends(&naks, &received)
+        .into_iter()
+        .zip(sender_ips)
+        .enumerate()
+    {
+        eprintln!(
+            "naked first sends on link {i} ({ip}): total={} arrived_on_link={} \
+             arrived_elsewhere={} never_arrived={}",
+            link.total, link.arrived_on_link, link.arrived_elsewhere, link.never_arrived,
+        );
+    }
 }
 
 #[test]
@@ -630,19 +721,62 @@ fn link_captures_separate_loss_from_reorder() {
     );
 }
 
+/// A `nak attributed` line as srtla_send prints it, colour codes included.
+fn nak_line(link: &str, seq: u32, age: &str, rtt: u64, resend: bool) -> String {
+    format!(
+        "2026-11-16T10:00:00.000000Z \u{1b}[34mDEBUG\u{1b}[0m nak attributed \
+         \u{1b}[3mlink\u{1b}[0m\u{1b}[2m=\u{1b}[0m{link} \
+         \u{1b}[3mseq\u{1b}[0m\u{1b}[2m=\u{1b}[0m{seq} \
+         \u{1b}[3mage_ms\u{1b}[0m\u{1b}[2m=\u{1b}[0m{age} \
+         \u{1b}[3mrtt_ms\u{1b}[0m\u{1b}[2m=\u{1b}[0m{rtt} \
+         \u{1b}[3mresend\u{1b}[0m\u{1b}[2m=\u{1b}[0m{resend} \
+         \u{1b}[3mvia\u{1b}[0m\u{1b}[2m=\u{1b}[0m\"tracker\""
+    )
+}
+
+#[test]
+fn naked_first_sends_are_classified_by_where_they_arrived() {
+    let sender_ips = ["10.10.1.1".to_string(), "10.10.2.1".to_string()];
+    let lossy = "10.99.0.1:5000 via 10.10.1.1";
+    let clean = "10.99.0.1:5000 via 10.10.2.1";
+    let raw = [
+        nak_line(clean, 7, "Some(12)", 60, false),
+        nak_line(clean, 8, "Some(14)", 60, false),
+        nak_line(clean, 9, "Some(70)", 60, false),
+        nak_line(clean, 10, "None", 60, true),
+        nak_line(lossy, 11, "Some(80)", 60, false),
+        nak_line("10.99.0.1:5000 via 10.10.9.1", 12, "Some(80)", 60, false),
+    ];
+    let lines = nak_attributed_lines(&raw);
+    let received = vec![vec![(5, 8), (6, 10)], vec![(1, 7), (2, 11)]];
+
+    let naks = naked_first_sends(lines.iter().map(String::as_str), &sender_ips);
+    let arrivals = classify_naked_first_sends(&naks, &received);
+
+    // The resend and the line from an unknown link are left out.
+    assert_eq!(naks, vec![(1, 7), (1, 8), (1, 9), (0, 11)]);
+    assert_eq!(
+        arrivals,
+        vec![
+            NakedArrivals {
+                total: 1,
+                arrived_on_link: 0,
+                arrived_elsewhere: 1,
+                never_arrived: 0,
+            },
+            NakedArrivals {
+                total: 3,
+                arrived_on_link: 1,
+                arrived_elsewhere: 1,
+                never_arrived: 1,
+            },
+        ]
+    );
+}
+
 #[test]
 fn nak_lines_are_tallied_per_link() {
-    let line = |link: &str, age: &str, rtt: u64, resend: bool| {
-        format!(
-            "2026-11-16T10:00:00.000000Z \u{1b}[34mDEBUG\u{1b}[0m nak attributed \
-             \u{1b}[3mlink\u{1b}[0m\u{1b}[2m=\u{1b}[0m{link} \
-             \u{1b}[3mseq\u{1b}[0m\u{1b}[2m=\u{1b}[0m42 \
-             \u{1b}[3mage_ms\u{1b}[0m\u{1b}[2m=\u{1b}[0m{age} \
-             \u{1b}[3mrtt_ms\u{1b}[0m\u{1b}[2m=\u{1b}[0m{rtt} \
-             \u{1b}[3mresend\u{1b}[0m\u{1b}[2m=\u{1b}[0m{resend} \
-             \u{1b}[3mvia\u{1b}[0m\u{1b}[2m=\u{1b}[0m\"tracker\""
-        )
-    };
+    let line = |link: &str, age: &str, rtt: u64, resend: bool| nak_line(link, 42, age, rtt, resend);
     let lossy = "10.0.0.1:5000 via 10.1.0.2";
     let clean = "10.0.0.1:5000 via 10.2.0.2";
     let raw = [
