@@ -106,7 +106,7 @@ rustfmt.toml             formatting configuration (nightly rustfmt)
 
 ### Module Organization
 
-The workspace splits policy from I/O. `srtla-core` holds all scheduling and connection state with no sockets and no tokio in production code. Its methods take the current time as a `now_ms` argument instead of reading the clock (the one exception is `SrtlaRegistrationManager::check_probing_complete` in `registration/probing.rs`, which calls `utils::now_ms()` itself). `srtla-protocol` is the stateless wire format. The root crate `srtla_send` owns sockets, tasks, signals, DNS, the control plane and telemetry, and drives the core types. New I/O goes in the root crate, new policy goes in `srtla-core`.
+The workspace splits policy from I/O. `srtla-core` holds all scheduling and connection state with no sockets and no tokio in production code. Its methods take the current time as a `now_ms` argument instead of reading the clock. `srtla-protocol` is the stateless wire format. The root crate `srtla_send` owns sockets, tasks, signals, DNS, the control plane and telemetry, and drives the core types. New I/O goes in the root crate, new policy goes in `srtla-core`.
 
 `srtla_send` (root crate):
 
