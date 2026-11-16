@@ -799,6 +799,39 @@ fn registered_uplink_count(log: &[String]) -> usize {
         .unwrap_or(0)
 }
 
+/// Poll srtla_send's captured stdout until at least `min_count` links have
+/// left the Warming phase.
+///
+/// srtla_send logs each Warming to Live transition at debug level, either when
+/// enough RTT probes completed or when the warming timeout auto-promotes the
+/// link.
+pub fn wait_for_live_links(
+    process: &NamespaceProcess,
+    min_count: usize,
+    timeout: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        let live = live_link_count(&process.stdout_lines());
+        if live >= min_count {
+            return Ok(());
+        }
+        if start.elapsed() > timeout {
+            bail!("timeout waiting for {min_count} live link(s) (saw {live})");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn live_link_count(log: &[String]) -> usize {
+    log.iter()
+        .filter(|line| {
+            line.contains("warming complete, transitioning to Live")
+                || line.contains("auto-promoting to Live")
+        })
+        .count()
+}
+
 // ---------------------------------------------------------------------------
 // SrtlaTestStack
 // ---------------------------------------------------------------------------
@@ -1095,6 +1128,15 @@ impl SrtlaTestStack {
         wait_for_registered_uplinks(sender, self.topo.sender_ips.len(), timeout)
     }
 
+    /// Wait until every sender link has left the Warming phase.
+    pub fn wait_for_live_links(&self, timeout: Duration) -> Result<()> {
+        let sender = self
+            .srtla_send
+            .as_ref()
+            .context("srtla_send is not running")?;
+        wait_for_live_links(sender, self.topo.sender_ips.len(), timeout)
+    }
+
     /// The local SRT port that srtla_send listens on (for injecting test data).
     pub fn sender_srt_port(&self) -> u16 {
         SRTLA_SEND_SRT_PORT
@@ -1272,7 +1314,7 @@ pub fn spawn_udp_stream(
 
 #[cfg(test)]
 mod registration_log_tests {
-    use super::registered_uplink_count;
+    use super::{live_link_count, registered_uplink_count};
 
     #[test]
     fn registered_count_is_the_highest_active_count_logged() {
@@ -1286,6 +1328,18 @@ mod registration_log_tests {
         .to_vec();
         assert_eq!(registered_uplink_count(&log), 3);
         assert_eq!(registered_uplink_count(&log[..1]), 0);
+    }
+
+    #[test]
+    fn live_link_count_counts_both_transition_forms() {
+        let log: Vec<String> = [
+            "\u{1b}[34mDEBUG\u{1b}[0m 10.0.1.2: warming complete, transitioning to Live",
+            "\u{1b}[34mDEBUG\u{1b}[0m 10.0.2.2: warming timeout (5000ms), auto-promoting to Live",
+            "\u{1b}[32m INFO\u{1b}[0m connection established (active=2)",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(live_link_count(&log), 2);
     }
 }
 

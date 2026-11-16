@@ -11,7 +11,7 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use network_sim::ImpairmentConfig;
 
@@ -26,14 +26,36 @@ fn test_stall_gate_latches_and_rejoins_after_dwell() {
         return;
     }
 
-    let mut stack = common::start_stack("stall", 2, &["--stall-ack-stale-ms", STALE_CEILING_MS])
-        .expect("start stack");
+    // At 400 packets per second over two near-zero-RTT veths a link's backlog
+    // peaks around 15 packets, below the default stall minimum of 32, so the
+    // default would make the silence pull depend on timing.
+    let mut stack = common::start_stack(
+        "stall",
+        2,
+        &[
+            "--stall-ack-stale-ms",
+            STALE_CEILING_MS,
+            "--stall-min-in-flight",
+            "8",
+        ],
+    )
+    .expect("start stack");
     common::wait_until_ready(&stack);
 
     // Continuous load throughout: selection (which drives the latch) runs per
-    // routed packet, and the black-holed link must accumulate the >=32
-    // in-flight backlog the stall signal requires.
+    // routed packet, and the black-holed link must accumulate the in-flight
+    // backlog the stall signal requires. The stall logic is meant for Live
+    // links, and the RTT probes that end Warming need traffic, so the load
+    // keeps running until both links have left Warming.
     common::inject_stream(&stack, 400, Duration::from_secs(2)).expect("warmup stream");
+    let live_deadline = Instant::now() + Duration::from_secs(10);
+    while stack.wait_for_live_links(Duration::ZERO).is_err() {
+        assert!(
+            Instant::now() < live_deadline,
+            "links never left the Warming phase"
+        );
+        common::inject_stream(&stack, 400, Duration::from_millis(500)).expect("warming stream");
+    }
 
     // Black out both directions, as a real outage does. Shaping only the
     // sender's egress would still deliver the receiver's SRT ACKs on link 0.
