@@ -63,6 +63,12 @@ const RUN_SECS: u64 = 45;
 /// cap of about one packet and is effectively out of the bond.
 const CC_FLOOR_BPS: u64 = 100_000;
 
+/// The smallest steady-state share of the bond each link must carry. The
+/// lossy link is expected to carry less than the clean one, and both
+/// oscillate, so this leaves room for that while still catching a link
+/// that has effectively left the bond.
+const MIN_LINK_SHARE: f64 = 0.15;
+
 #[test]
 fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     if common::skip_without_impairment_deps() {
@@ -126,6 +132,8 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     let mut bond_bps_steady: Vec<u64> = Vec::new();
     let mut lossy_bps_steady: Vec<u64> = Vec::new();
     let mut clean_bps_steady: Vec<u64> = Vec::new();
+    let mut lossy_share_steady: Vec<f64> = Vec::new();
+    let mut clean_share_steady: Vec<f64> = Vec::new();
     let mut prev_line = String::new();
     let mut frozen_ticks = 0usize;
 
@@ -199,6 +207,10 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
             bond_bps_steady.push(bond_bps);
             lossy_bps_steady.push(link_bps(lossy));
             clean_bps_steady.push(link_bps(&links[1]));
+            if bond_bps > 0 {
+                lossy_share_steady.push(link_bps(lossy) as f64 / bond_bps as f64);
+                clean_share_steady.push(link_bps(&links[1]) as f64 / bond_bps as f64);
+            }
         }
         // Ignore the bootstrap ticks: the target is parked at the floor
         // until the first RTT sample, which would trivially satisfy the
@@ -304,9 +316,18 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
         v.sort_unstable();
         v[v.len() / 2]
     };
+    let share_median = |mut v: Vec<f64>| -> f64 {
+        if v.is_empty() {
+            return 0.0;
+        }
+        v.sort_unstable_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
     let bond_median = median(bond_bps_steady);
     let lossy_median = median(lossy_bps_steady.clone());
     let clean_median = median(clean_bps_steady);
+    let lossy_share = share_median(lossy_share_steady);
+    let clean_share = share_median(clean_share_steady);
     eprintln!(
         "\nsteady state: bond={bond_median} bps, lossy={lossy_median} bps, clean={clean_median} \
          bps, lossy CC target low-water={lossy_target_min} bps"
@@ -323,39 +344,37 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
          wire loss ratcheted a healthy {LOSSY_LINK_KBIT} kbit link out of the bond"
     );
 
-    // 2. Both links carry a real share at once — this is a bond, not a
+    // 2. Both links carry a real share at once. This is a bond, not a
     //    failover, and getting the second link to register and pull
     //    traffic is the point of the topology work in the harness.
     //
-    //    A modest per-link floor, not a goodput target. The adaptive
-    //    sender keeps the run far healthier than the old constant pump
-    //    (which collapsed almost immediately), but an SRT session over a
-    //    hard-capped lossy link still oscillates — it does not settle at
-    //    a clean steady rate. Reaching that would take production-grade
-    //    congestion control (belacoder's, tuned for real cellular), which
-    //    is well beyond what this test needs. So assert liveness, which
-    //    holds through the oscillation, not a throughput figure that
-    //    would be flaky.
-    let each_link_floor = 500_000; // 0.5 Mbps: clearly pulling weight, not idle
+    //    A share of the bond, not an absolute rate. The adaptive sender's
+    //    offered load varies from run to run, so an absolute rate would
+    //    measure the sender, not the bond. A link with real loss is also
+    //    expected to carry less than the clean one, so the floor only
+    //    asks that each link pull a real share. An SRT session over a
+    //    hard-capped lossy link still oscillates and does not settle at a
+    //    clean steady rate, so the check is liveness, which holds through
+    //    the oscillation, not a throughput figure that would be flaky.
     assert!(
-        lossy_median > each_link_floor,
-        "lossy link carried only {lossy_median} bps — it is nominally in the bond but effectively \
-         idle"
+        lossy_share >= MIN_LINK_SHARE,
+        "lossy link carried only {share:.0}% of the bond (median {lossy_median} bps) and is \
+         effectively idle",
+        share = lossy_share * 100.0,
     );
     assert!(
-        clean_median > each_link_floor,
-        "clean link carried only {clean_median} bps — the bond is really running on one link"
+        clean_share >= MIN_LINK_SHARE,
+        "clean link carried only {share:.0}% of the bond (median {clean_median} bps), so the bond \
+         is really running on one link",
+        share = clean_share * 100.0,
     );
-
-    // bond_median is logged above for the operator; not asserted, since
-    // under oscillation it is not a stable aggregate to threshold on.
-    let _ = bond_median;
 }
 
 /// How one link's attributed NAKs split up. An early NAK names a packet sent
-/// less than one RTT before it, which the receiver could not have detected as
-/// lost and reported back in time. That is the fingerprint of a reorder NAK on
-/// a bond, where a later sequence arrives over the other link first.
+/// less than one RTT before it, which only means the gap was detected through
+/// a faster path. On a bond, a real loss and a delay both produce one, so
+/// whether the packet arrived (see the capture summary) is what separates
+/// reorder from loss.
 #[derive(Debug, Default, PartialEq)]
 struct NakTally {
     total: usize,
