@@ -94,7 +94,7 @@ mod tests {
         conn.register_packet(103, current_time);
 
         // Test single NAK
-        conn.handle_nak(100, now_ms());
+        conn.handle_nak(100, false, now_ms());
         assert_eq!(conn.congestion.nak_count, 1);
         assert!(conn.window < initial_window);
         assert_eq!(conn.congestion.nak_burst_count, 0);
@@ -105,15 +105,15 @@ mod tests {
 
         // Simulate NAK burst (multiple NAKs within 1 second)
         conn.congestion.last_nak_time_ms = current_time;
-        conn.handle_nak(101, now_ms());
+        conn.handle_nak(101, false, now_ms());
         assert_eq!(conn.congestion.nak_burst_count, 2);
 
-        conn.handle_nak(102, now_ms());
+        conn.handle_nak(102, false, now_ms());
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
         // Test fast recovery mode activation
         conn.window = 1500; // Low enough to trigger fast recovery
-        conn.handle_nak(103, now_ms());
+        conn.handle_nak(103, false, now_ms());
         assert!(conn.congestion.fast_recovery_mode);
     }
 
@@ -129,7 +129,7 @@ mod tests {
         conn.register_packet(100, current_time);
 
         // Now handle a NAK for that same packet
-        conn.handle_nak(100, now_ms());
+        conn.handle_nak(100, false, now_ms());
 
         assert!(conn.window < initial_window, "Window should shrink on NAK");
         assert_eq!(
@@ -149,19 +149,19 @@ mod tests {
             conn.register_packet(i, current_time);
         }
 
-        conn.handle_nak(100, current_time);
+        conn.handle_nak(100, false, current_time);
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_count, 1);
 
-        conn.handle_nak(101, current_time + 500);
+        conn.handle_nak(101, false, current_time + 500);
         assert_eq!(conn.congestion.nak_burst_count, 2);
         assert_eq!(conn.congestion.nak_count, 2);
 
-        conn.handle_nak(102, current_time + 500);
+        conn.handle_nak(102, false, current_time + 500);
         assert_eq!(conn.congestion.nak_burst_count, 3);
         assert_eq!(conn.congestion.nak_count, 3);
 
-        conn.handle_nak(103, current_time + 1_600);
+        conn.handle_nak(103, false, current_time + 1_600);
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert_eq!(conn.congestion.nak_count, 4);
     }
@@ -176,9 +176,9 @@ mod tests {
             conn.register_packet(i, current_time);
         }
 
-        conn.handle_nak(100, current_time);
-        conn.handle_nak(101, current_time);
-        conn.handle_nak(102, current_time);
+        conn.handle_nak(100, false, current_time);
+        conn.handle_nak(101, false, current_time);
+        conn.handle_nak(102, false, current_time);
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
         conn.perform_window_recovery(current_time);
@@ -201,7 +201,7 @@ mod tests {
         let initial_burst_count = conn.congestion.nak_burst_count;
         let initial_window = conn.window;
 
-        let found = conn.handle_nak(999, now_ms());
+        let found = conn.handle_nak(999, false, now_ms());
         assert!(!found);
         assert_eq!(conn.congestion.nak_count, initial_nak_count);
         assert_eq!(conn.congestion.nak_burst_count, initial_burst_count);
@@ -218,14 +218,14 @@ mod tests {
             conn.register_packet(i, current_time);
         }
 
-        conn.handle_nak(100, current_time);
-        conn.handle_nak(101, current_time);
+        conn.handle_nak(100, false, current_time);
+        conn.handle_nak(101, false, current_time);
         assert_eq!(conn.congestion.nak_burst_count, 2);
 
-        conn.handle_nak(102, current_time);
+        conn.handle_nak(102, false, current_time);
         assert_eq!(conn.congestion.nak_burst_count, 3);
 
-        conn.handle_nak(103, current_time + 1_100);
+        conn.handle_nak(103, false, current_time + 1_100);
         assert_eq!(conn.congestion.nak_burst_count, 0);
     }
 
@@ -239,9 +239,9 @@ mod tests {
             conn.register_packet(i, current_time);
         }
 
-        conn.handle_nak(100, now_ms());
-        conn.handle_nak(101, now_ms());
-        conn.handle_nak(102, now_ms());
+        conn.handle_nak(100, false, now_ms());
+        conn.handle_nak(101, false, now_ms());
+        conn.handle_nak(102, false, now_ms());
         assert_eq!(conn.congestion.nak_burst_count, 3);
         assert!(conn.congestion.nak_burst_start_time_ms > 0);
 
@@ -631,7 +631,7 @@ mod tests {
 
         // Simulate some NAKs to reduce window
         for _ in 0..5 {
-            conn.handle_nak(100, now_ms());
+            conn.handle_nak(100, false, now_ms());
         }
         let reduced_window = conn.window;
 
@@ -773,7 +773,7 @@ mod tests {
         assert_eq!(conn.time_since_last_nak_ms(current_time), None);
 
         conn.register_packet(100, current_time);
-        conn.handle_nak(100, now_ms());
+        conn.handle_nak(100, false, now_ms());
         assert_eq!(conn.congestion.nak_count, 1);
         assert_eq!(conn.congestion.nak_burst_count, 0);
         assert!(conn.time_since_last_nak_ms(now_ms()).is_some());
@@ -793,7 +793,7 @@ mod tests {
         // Register packet first, then reduce window to trigger fast recovery
         conn.register_packet(100, current_time);
         conn.window = 1500;
-        conn.handle_nak(100, now_ms());
+        conn.handle_nak(100, false, now_ms());
 
         assert!(conn.congestion.fast_recovery_mode);
 
@@ -836,7 +836,7 @@ mod tests {
 
         // Reduce window through NAKs
         conn.register_packet(100, current_time);
-        conn.handle_nak(100, now_ms());
+        conn.handle_nak(100, false, now_ms());
         let reduced_window = conn.window;
 
         // Test 1: Recent NAKs (<5 seconds) - should recover at 25% rate (minimal)
@@ -908,7 +908,7 @@ mod tests {
         // Reduce window and trigger fast recovery mode
         conn.register_packet(100, current_time);
         conn.window = 1500;
-        conn.handle_nak(100, now_ms());
+        conn.handle_nak(100, false, now_ms());
         assert!(conn.congestion.fast_recovery_mode);
 
         let reduced_window = conn.window;
@@ -952,7 +952,7 @@ mod tests {
 
         // Reduce window
         conn.register_packet(100, current_time);
-        conn.handle_nak(100, now_ms());
+        conn.handle_nak(100, false, now_ms());
         let reduced_window = conn.window;
 
         // Test normal mode timing constraint (2000ms min wait + 1000ms increment wait)
@@ -1091,7 +1091,7 @@ mod tests {
         let before: Vec<i32> = connections.iter().map(|c| c.congestion.nak_count).collect();
         let before_inflight = connections[1].in_flight_packets;
 
-        let counted = attribute_nak(&mut connections, &seq_tracker, seq, now);
+        let counted = attribute_nak(&mut connections, &seq_tracker, seq, false, now);
 
         assert_eq!(
             counted,
@@ -1135,7 +1135,7 @@ mod tests {
         connections[2].register_packet(known as i32, now);
         let before2 = connections[2].congestion.nak_count;
 
-        let counted = attribute_nak(&mut connections, &seq_tracker, known, now);
+        let counted = attribute_nak(&mut connections, &seq_tracker, known, false, now);
         assert_eq!(
             counted,
             Some(2),
@@ -1147,7 +1147,7 @@ mod tests {
 
         // (b) truly unknown: not tracked and in no packet_log → no-op.
         let counts_before: Vec<i32> = connections.iter().map(|c| c.congestion.nak_count).collect();
-        let counted_unknown = attribute_nak(&mut connections, &seq_tracker, 999_999, now);
+        let counted_unknown = attribute_nak(&mut connections, &seq_tracker, 999_999, false, now);
         assert_eq!(
             counted_unknown, None,
             "a sequence no uplink holds is attributable to none"
@@ -1178,7 +1178,7 @@ mod tests {
         assert_eq!(connections[0].in_flight_packets, 1);
 
         // First sighting inside the window: counted once on the sending uplink.
-        let first = attribute_nak(&mut connections, &seq_tracker, seq, base);
+        let first = attribute_nak(&mut connections, &seq_tracker, seq, false, base);
         assert_eq!(first, Some(0));
         assert_eq!(
             connections[0].congestion.nak_count, 1,
@@ -1203,7 +1203,7 @@ mod tests {
         // Duplicate NAK inside the window: routed to the same uplink, whose
         // packet_log no longer holds the sequence → not re-counted, and the
         // short-circuit keeps the other uplink clean.
-        let dup = attribute_nak(&mut connections, &seq_tracker, seq, within);
+        let dup = attribute_nak(&mut connections, &seq_tracker, seq, false, within);
         assert_eq!(
             dup, None,
             "the duplicate NAK is a no-op (single accounting)"
@@ -1222,15 +1222,13 @@ mod tests {
         );
     }
 
-    /// Open question: should a repeated loss report for a sequence whose
-    /// retransmit went out on another link count against that other link?
     /// Link 0 loses the original, the retransmit rides link 1 (the best-path
     /// override sends R-flagged packets to the best link), and libsrt repeats
-    /// the loss report while the retransmit is still in flight. This pins what
-    /// the code does today. The repeated NAK resolves to link 1 through the
-    /// tracker and shrinks link 1's window, although link 1 lost nothing.
+    /// the loss report while the retransmit is still in flight. The repeated
+    /// NAK resolves to link 1 through the tracker and clears its resend entry,
+    /// but link 1 lost nothing, so its window and NAK count stay as they were.
     #[tokio::test]
-    async fn repeated_nak_after_retransmit_link_switch_is_charged_to_the_retransmit_link() {
+    async fn repeated_nak_after_retransmit_link_switch_is_not_charged_to_the_retransmit_link() {
         let mut connections = create_test_connections(2).await;
         let base = now_ms();
         let seq: u32 = 900;
@@ -1240,7 +1238,7 @@ mod tests {
         connections[0].register_packet(seq as i32, base);
         seq_tracker.insert(seq, connections[0].conn_id, base);
 
-        let first = attribute_nak(&mut connections, &seq_tracker, seq, base + 30);
+        let first = attribute_nak(&mut connections, &seq_tracker, seq, false, base + 30);
         assert_eq!(
             first,
             Some(0),
@@ -1249,32 +1247,40 @@ mod tests {
         let link0_naks = connections[0].congestion.nak_count;
         let link1_naks = connections[1].congestion.nak_count;
         let link1_window = connections[1].window;
+        let link1_in_flight = connections[1].in_flight_packets;
 
         // The retransmit goes out on link 1. `forward_via_connection` moves the
         // tracker entry when it queues the packet, and the batch flush then
-        // registers it in link 1's packet log.
-        connections[1].register_packet(seq as i32, base + 40);
+        // logs the R-flagged copy in link 1's packet log as a resend.
+        let mut r_flagged = [0u8; 20];
+        r_flagged[..4].copy_from_slice(&seq.to_be_bytes());
+        r_flagged[4] = 0x04;
+        connections[1].queue_data_packet(&r_flagged, Some(seq), base + 40);
+        assert_eq!(connections[1].take_batch(base + 40).len(), 1);
         seq_tracker.insert(seq, connections[1].conn_id, base + 40);
+        assert_eq!(connections[1].in_flight_packets, link1_in_flight + 1);
 
-        let repeated = attribute_nak(&mut connections, &seq_tracker, seq, base + 60);
+        let repeated = attribute_nak(&mut connections, &seq_tracker, seq, false, base + 60);
         assert_eq!(
             repeated,
             Some(1),
             "the repeated loss report resolves to the link that carries the retransmit"
         );
         assert_eq!(
-            connections[1].congestion.nak_count,
-            link1_naks + 1,
-            "link 1 is charged a NAK for a loss on link 0"
+            connections[1].congestion.nak_count, link1_naks,
+            "link 1 is not charged a NAK for a loss on link 0"
+        );
+        assert_eq!(
+            connections[1].window, link1_window,
+            "link 1's window is untouched by the repeated report"
+        );
+        assert_eq!(
+            connections[1].in_flight_packets, link1_in_flight,
+            "the repeated report still clears the resend entry"
         );
         assert_eq!(
             connections[0].congestion.nak_count, link0_naks,
             "link 0 is not charged for the repeated report"
-        );
-        assert_eq!(
-            connections[1].window,
-            link1_window - WINDOW_DECR,
-            "the charge runs the congestion NAK path and shrinks link 1's window"
         );
     }
 

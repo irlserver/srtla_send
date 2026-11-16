@@ -27,25 +27,28 @@ pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
 /// once that link is found we never fall through, so a duplicate NAK for an
 /// already-cleared sequence can't be re-counted against a different link. Only
 /// when the tracker has no record do we fall back to the first link that still
-/// recognizes the sequence in its own packet log. Returns the index of the link
+/// recognizes the sequence in its own packet log. In enhanced mode a link
+/// whose entry is a resend only clears it and keeps its window, because the
+/// NAK repeats a loss already charged. Returns the index of the link
 /// that counted the NAK, or `None` if none did. Production ignores the return;
 /// it exists so the attribution path is unit-testable directly instead of mirrored.
 pub(crate) fn attribute_nak(
     connections: &mut [SrtlaConnection],
     seq_tracker: &SequenceTracker,
     nak: u32,
+    classic: bool,
     current_time_ms: u64,
 ) -> Option<usize> {
     if let Some(conn_id) = seq_tracker.get(nak, current_time_ms)
         && let Some(pos) = connections.iter().position(|c| c.conn_id == conn_id)
     {
         return connections[pos]
-            .handle_nak(nak as i32, current_time_ms)
+            .handle_nak(nak as i32, classic, current_time_ms)
             .then_some(pos);
     }
 
     for (i, conn) in connections.iter_mut().enumerate() {
-        if conn.handle_nak(nak as i32, current_time_ms) {
+        if conn.handle_nak(nak as i32, classic, current_time_ms) {
             return Some(i);
         }
     }
@@ -125,7 +128,7 @@ pub async fn process_connection_events(
     }
 
     for nak in incoming.nak_numbers.iter() {
-        attribute_nak(connections, seq_tracker, *nak, current_time_ms);
+        attribute_nak(connections, seq_tracker, *nak, classic, current_time_ms);
     }
 
     if let Some(client) = last_client_addr {

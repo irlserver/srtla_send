@@ -418,21 +418,21 @@ mod tests {
             connections[2].congestion.nak_count,
         ];
 
-        let found_0 = connections[0].handle_nak(100, now_ms());
+        let found_0 = connections[0].handle_nak(100, false, now_ms());
         assert!(found_0);
         assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
         assert_eq!(connections[1].congestion.nak_count, initial_counts[1]);
         assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
-        let found_1 = connections[1].handle_nak(200, now_ms());
+        let found_1 = connections[1].handle_nak(200, false, now_ms());
         assert!(found_1);
         assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
         assert_eq!(connections[1].congestion.nak_count, initial_counts[1] + 1);
         assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
-        let not_found_0 = connections[0].handle_nak(999, now_ms());
-        let not_found_1 = connections[1].handle_nak(999, now_ms());
-        let not_found_2 = connections[2].handle_nak(999, now_ms());
+        let not_found_0 = connections[0].handle_nak(999, false, now_ms());
+        let not_found_1 = connections[1].handle_nak(999, false, now_ms());
+        let not_found_2 = connections[2].handle_nak(999, false, now_ms());
         assert!(!not_found_0);
         assert!(!not_found_1);
         assert!(!not_found_2);
@@ -601,7 +601,7 @@ mod tests {
         // The consequence that matters: a late NAK for a sequence the recovered
         // link carried no longer attributes to it.
         assert_eq!(
-            attribute_nak(&mut connections, &seq_tracker, 100, now),
+            attribute_nak(&mut connections, &seq_tracker, 100, false, now),
             None,
             "a NAK arriving after recovery must not penalize the recovered link"
         );

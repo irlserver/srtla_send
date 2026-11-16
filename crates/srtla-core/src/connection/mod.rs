@@ -309,7 +309,9 @@ pub struct SrtlaConnection {
     pub in_flight_packets: i32,
     /// Packet log: sequence -> send timestamp (ms), or `None` for a resend
     /// (a repeat on this link or a retransmit-flagged copy), whose ACK may
-    /// belong to an earlier copy and so cannot time a round trip.
+    /// belong to an earlier copy and so cannot time a round trip. In enhanced
+    /// mode a NAK for a `None` entry is not a congestion signal, since it
+    /// usually repeats a loss report for an earlier copy.
     /// Uses FxHashMap for O(1) insert/remove instead of O(256) linear scan.
     #[cfg(feature = "test-internals")]
     pub packet_log: FxHashMap<i32, Option<u64>>,

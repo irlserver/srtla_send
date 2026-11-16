@@ -116,15 +116,25 @@ impl SrtlaConnection {
     }
 
     /// Handle NAK for a specific sequence. O(1) remove.
+    ///
+    /// Returns whether this link held `seq`. In enhanced mode a NAK for a
+    /// resend entry only clears it and is not charged as congestion. Classic
+    /// mode charges every NAK it finds.
     #[inline]
-    pub fn handle_nak(&mut self, seq: i32, now_ms: u64) -> bool {
-        let found = self.packet_log.remove(&seq).is_some();
-        if found {
-            self.in_flight_packets = self.packet_log.len() as i32;
+    pub fn handle_nak(&mut self, seq: i32, classic_mode: bool, now_ms: u64) -> bool {
+        let Some(entry) = self.packet_log.remove(&seq) else {
+            return false;
+        };
+        self.in_flight_packets = self.packet_log.len() as i32;
+        // A `None` entry is a resend on this link. The receiver repeats its loss
+        // report until the retransmit arrives, so a NAK here usually restates a
+        // loss that was already charged. Classic mode still charges it to keep
+        // parity with the reference srtla_send.c.
+        if entry.is_some() || classic_mode {
             self.congestion
                 .handle_nak(&mut self.window, seq, &self.label, now_ms);
         }
-        found
+        true
     }
 
     /// Handle SRTLA ACK for a specific sequence. O(1) remove.
@@ -281,7 +291,7 @@ mod tests {
             conn.register_packet(30, 1_000);
             // A reorder NAK clears the original from the log while it is still
             // in flight; SRT resends it with the retransmit flag set.
-            assert!(conn.handle_nak(30, 1_020));
+            assert!(conn.handle_nak(30, false, 1_020));
             let mut packet = [0u8; 16];
             packet[..4].copy_from_slice(&30u32.to_be_bytes());
             srtla_protocol::set_srt_data_retransmit(&mut packet);
@@ -568,5 +578,61 @@ mod tests {
 
         assert!(conn.handle_srtla_ack_specific(42, false, 1_040));
         assert_eq!(conn.rtt.estimated_rtt_ms, 40.0);
+    }
+
+    /// A same-link repeat leaves a resend entry, the shape a retransmit-flagged
+    /// copy also takes in the log.
+    async fn connection_with_resend_entry() -> crate::connection::SrtlaConnection {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(30, 1_000);
+        conn.register_packet(30, 1_010);
+        assert_eq!(conn.packet_log.get(&30), Some(&None));
+        assert_eq!(conn.in_flight_packets, 1);
+        conn
+    }
+
+    #[tokio::test]
+    async fn nak_for_a_resend_entry_is_not_charged_in_enhanced_mode() {
+        let mut conn = connection_with_resend_entry().await;
+        let window = conn.window;
+        let naks = conn.congestion.nak_count;
+
+        assert!(conn.handle_nak(30, false, 1_020));
+
+        assert!(!conn.packet_log.contains_key(&30));
+        assert_eq!(conn.in_flight_packets, 0);
+        assert_eq!(conn.congestion.nak_count, naks);
+        assert_eq!(conn.window, window);
+    }
+
+    #[tokio::test]
+    async fn nak_for_a_resend_entry_is_still_charged_in_classic_mode() {
+        let mut conn = connection_with_resend_entry().await;
+        let window = conn.window;
+        let naks = conn.congestion.nak_count;
+
+        assert!(conn.handle_nak(30, true, 1_020));
+
+        assert!(!conn.packet_log.contains_key(&30));
+        assert_eq!(conn.in_flight_packets, 0);
+        assert_eq!(conn.congestion.nak_count, naks + 1);
+        assert!(conn.window < window);
+    }
+
+    #[tokio::test]
+    async fn nak_for_a_first_send_is_charged_in_both_modes() {
+        for classic_mode in [false, true] {
+            let mut conn = create_test_connection().await;
+            conn.register_packet(31, 1_000);
+            let window = conn.window;
+            let naks = conn.congestion.nak_count;
+
+            assert!(conn.handle_nak(31, classic_mode, 1_020));
+
+            assert!(!conn.packet_log.contains_key(&31));
+            assert_eq!(conn.in_flight_packets, 0);
+            assert_eq!(conn.congestion.nak_count, naks + 1);
+            assert!(conn.window < window);
+        }
     }
 }
