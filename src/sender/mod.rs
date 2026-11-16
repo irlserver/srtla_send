@@ -20,13 +20,11 @@ use anyhow::{Context, Result, anyhow};
 pub(crate) use client_dedup::ClientDedup;
 use client_pin::ClientPin;
 // Re-export connection management functions for tests
-#[allow(unused_imports)]
 pub use connections::{
     PendingConnectionChanges, apply_connection_changes, apply_link_weights,
     create_connections_from_ips, recover_connection,
 };
 // Re-export public items used by tests
-#[allow(unused_imports)]
 pub use housekeeping::GLOBAL_TIMEOUT_MS;
 use housekeeping::handle_housekeeping;
 use no_link_log::NoLinkLog;
@@ -34,15 +32,13 @@ use no_link_log::NoLinkLog;
 pub(crate) use packet_handler::handle_uplink_packet;
 // Re-exported for the NAK-attribution conformance tests so they drive the real
 // production path rather than a mirrored copy.
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use packet_handler::{attribute_nak, note_srt_session_start, process_connection_events};
 use packet_handler::{drain_packet_queue, flush_all_batches, handle_srt_packet};
 // Scripted resolver seam for tests that drive the re-home trigger policy.
 #[cfg(any(test, feature = "test-internals"))]
 pub use rehome::StubResolver;
-#[allow(unused_imports)]
 pub use rehome::{REHOME_MIN_INTERVAL_MS, ReceiverResolver, RehomeGate};
-#[allow(unused_imports)]
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
 use srtla_core::registration::SrtlaRegistrationManager;
@@ -61,7 +57,7 @@ pub use uplink::ConnIoMap;
 pub(crate) use uplink::UplinkPacket;
 use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 // Re-exported so the handshake-sniffing tests drive the real receive path.
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use uplink_recv::process_uplink_packet;
 
 use crate::config::DynamicConfig;
