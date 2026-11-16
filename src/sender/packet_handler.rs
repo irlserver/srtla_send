@@ -521,9 +521,10 @@ pub async fn forward_via_connection(
             if prev_idx < connections.len() {
                 // Deliberately does not flush the previous link's batch. Each
                 // connection owns its BatchSender and drains it with a single
-                // `sendmmsg` on its own size threshold or 15ms timer, so
-                // interleaved routing just fills several per-link batches
-                // concurrently instead of one serially — no syscall is lost.
+                // `sendmmsg` on its own size threshold, on the 15ms timer, or
+                // when another link fills its batch (the ordering flush below).
+                // Interleaved routing therefore fills several per-link batches
+                // concurrently instead of one serially, and no syscall is lost.
                 //
                 // Flushing here emitted a one-packet batch on every switch,
                 // which made per-packet scheduling expensive and is what the
@@ -559,10 +560,27 @@ pub async fn forward_via_connection(
         seq_tracker.insert(s, conn_id, packet_time_ms);
     }
 
-    // Flush if batch threshold reached
-    if needs_flush && let Some(io) = conn_io.get(&connections[sel_idx].conn_id) {
-        let conn = &mut connections[sel_idx];
-        flush_connection(conn, &io.socket, seq_tracker, "batch flush").await;
+    if needs_flush {
+        // Every packet queued on another link was routed before the one that
+        // filled this batch, so it carries an earlier sequence. Left waiting for
+        // the 15ms timer, it reaches the receiver behind this batch, which
+        // reports it lost and charges that link for a reorder. Draining those
+        // queues first keeps the encoder's order on the wire. This runs only on
+        // the size threshold, so it does not bring back the one-packet batches
+        // a flush on every link switch would emit.
+        for (i, conn) in connections.iter_mut().enumerate() {
+            if i == sel_idx || !conn.has_queued_packets() {
+                continue;
+            }
+            if let Some(io) = conn_io.get(&conn.conn_id) {
+                flush_connection(conn, &io.socket, seq_tracker, "ordering flush").await;
+            }
+        }
+
+        if let Some(io) = conn_io.get(&connections[sel_idx].conn_id) {
+            let conn = &mut connections[sel_idx];
+            flush_connection(conn, &io.socket, seq_tracker, "batch flush").await;
+        }
     }
 }
 
@@ -873,5 +891,108 @@ mod tests {
             seq_tracker.get(seq, base + 60),
             Some(connections[1].conn_id)
         );
+    }
+
+    fn data_packet(seq: u32) -> [u8; 24] {
+        let mut pkt = [0u8; 24];
+        pkt[..4].copy_from_slice(&seq.to_be_bytes());
+        pkt[16..].copy_from_slice(b"payload!");
+        pkt
+    }
+
+    /// A packet waiting on a quieter link was routed before the packets that
+    /// fill a busy link's batch. It must reach the wire when that batch does,
+    /// not on the 15ms timer, or the receiver sees a reorder hole.
+    #[tokio::test]
+    async fn full_batch_flushes_older_packets_on_other_links_first() {
+        let mut connections = crate::test_helpers::create_test_connections(2).await;
+        let conn_io = crate::test_helpers::create_test_conn_io_map(&connections);
+        let mut seq_tracker = SequenceTracker::new();
+        let mut last_selected_idx = None;
+        let base = srtla_core::utils::now_ms();
+
+        forward_via_connection(
+            1,
+            &data_packet(100),
+            Some(100),
+            &mut connections,
+            &conn_io,
+            &mut last_selected_idx,
+            &mut seq_tracker,
+            base,
+        )
+        .await;
+        assert!(connections[1].has_queued_packets());
+
+        let mut seq: u32 = 101;
+        loop {
+            assert!(
+                seq < 101 + 64,
+                "link 0 never filled a batch within 64 packets"
+            );
+            forward_via_connection(
+                0,
+                &data_packet(seq),
+                Some(seq),
+                &mut connections,
+                &conn_io,
+                &mut last_selected_idx,
+                &mut seq_tracker,
+                base + u64::from(seq - 100),
+            )
+            .await;
+            seq += 1;
+            if !connections[0].has_queued_packets() {
+                break;
+            }
+        }
+
+        assert!(
+            !connections[1].has_queued_packets(),
+            "the older packet on link 1 must go out with link 0's full batch"
+        );
+        assert!(
+            connections[1].connected,
+            "the ordering flush must not have failed on link 1's socket"
+        );
+        assert_eq!(
+            connections[1].in_flight_packets, 1,
+            "the flush registers the older packet on link 1"
+        );
+    }
+
+    /// Routing that alternates between links below the size threshold leaves
+    /// every batch queued for the timer. Flushing on the switch would emit one
+    /// packet batches again.
+    #[tokio::test]
+    async fn a_link_switch_below_the_threshold_does_not_flush() {
+        let mut connections = crate::test_helpers::create_test_connections(2).await;
+        let conn_io = crate::test_helpers::create_test_conn_io_map(&connections);
+        let mut seq_tracker = SequenceTracker::new();
+        let mut last_selected_idx = None;
+        let base = srtla_core::utils::now_ms();
+
+        for (offset, (idx, seq)) in [(1, 200u32), (0, 201)].into_iter().enumerate() {
+            forward_via_connection(
+                idx,
+                &data_packet(seq),
+                Some(seq),
+                &mut connections,
+                &conn_io,
+                &mut last_selected_idx,
+                &mut seq_tracker,
+                base + offset as u64,
+            )
+            .await;
+        }
+
+        for conn in &connections {
+            assert!(
+                conn.has_queued_packets(),
+                "{} flushed below its threshold",
+                conn.label
+            );
+            assert_eq!(conn.in_flight_packets, 0);
+        }
     }
 }
