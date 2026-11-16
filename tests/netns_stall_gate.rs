@@ -35,8 +35,10 @@ fn test_stall_gate_latches_and_rejoins_after_dwell() {
     // in-flight backlog the stall signal requires.
     common::inject_stream(&stack, 400, Duration::from_secs(2)).expect("warmup stream");
 
+    // Black out both directions, as a real outage does. Shaping only the
+    // sender's egress would still deliver the receiver's SRT ACKs on link 0.
     stack
-        .impair_link(
+        .impair_link_both_ways(
             0,
             ImpairmentConfig {
                 loss_percent: Some(100.0),
@@ -49,8 +51,9 @@ fn test_stall_gate_latches_and_rejoins_after_dwell() {
     // margin while keeping the blackhole shorter than CONN_TIMEOUT.
     common::inject_stream(&stack, 400, Duration::from_secs(3)).expect("stream during blackhole");
 
+    // A default config clears the shaping on both ends.
     stack
-        .impair_link(0, ImpairmentConfig::default())
+        .impair_link_both_ways(0, ImpairmentConfig::default())
         .expect("restore link 0");
 
     // Rejoin dwell is 2x the effective staleness window (3 s here). Keep the

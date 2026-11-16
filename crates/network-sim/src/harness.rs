@@ -705,6 +705,20 @@ impl SrtlaTestTopology {
         apply_impairment(&self.sender_ns, iface, config)
     }
 
+    /// Apply impairment to both ends of the veth link at `idx`.
+    ///
+    /// `impair_link` only shapes the sender's egress, so a one-way blackhole
+    /// still delivers the receiver's SRT ACKs down that uplink. A real outage
+    /// (a tunnel, a lift) kills both directions.
+    pub fn impair_link_both_ways(&self, idx: usize, config: ImpairmentConfig) -> Result<()> {
+        let r_iface = self
+            .receiver_ifaces
+            .get(idx)
+            .with_context(|| format!("link index {idx} out of range"))?;
+        self.impair_link(idx, config.clone())?;
+        apply_impairment(&self.receiver_ns, r_iface, config)
+    }
+
     /// Write sender IPs to a temp file and return the path.
     pub fn write_ip_list(&self) -> Result<PathBuf> {
         let dir = tempfile::tempdir().context("create temp dir for IP list")?;
@@ -1065,6 +1079,11 @@ impl SrtlaTestStack {
     /// Apply impairment to sender-side link at `idx`.
     pub fn impair_link(&self, idx: usize, config: ImpairmentConfig) -> Result<()> {
         self.topo.impair_link(idx, config)
+    }
+
+    /// Apply impairment to both ends of the link at `idx`.
+    pub fn impair_link_both_ways(&self, idx: usize, config: ImpairmentConfig) -> Result<()> {
+        self.topo.impair_link_both_ways(idx, config)
     }
 
     /// Wait until every sender uplink has registered with the receiver.
