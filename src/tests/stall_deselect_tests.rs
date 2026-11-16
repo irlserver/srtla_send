@@ -664,6 +664,46 @@ mod tests {
     }
 
     #[test]
+    fn a_latched_link_rejoins_despite_an_inflated_smoothed_rtt() {
+        // The batch-delayed sample above, through the real latch: the
+        // smoothed RTT says the link misses a 260 ms buffer, the recent floor
+        // says it is an 80 ms path, and the floor decides.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let t0 = now_ms();
+        let config = with_budget(260);
+
+        for i in 0..16 {
+            conns[0].rtt.update_estimate(80, t0 + i * 100);
+        }
+        conns[0].rtt.update_estimate(1_500, t0 + 1_700);
+        assert!(
+            conns[0].get_smooth_rtt_ms() / 2.0 > 260.0,
+            "precondition: the smoothed RTT misses the buffer, got {}",
+            conns[0].get_smooth_rtt_ms()
+        );
+
+        let now = t0 + 1_800;
+        make_stalled(&mut conns[0], now);
+        make_healthy_busy(&mut conns[1], now);
+        let _ = select_connection_idx(&mut conns, None, now, &config);
+        assert!(conns[0].stall_latched(), "precondition: the latch engaged");
+
+        conns[0].in_flight_packets = 0;
+        let mut t = now;
+        while t <= now + dwell_ms() * 3 {
+            t += 100;
+            conns[0].last_ack_or_rtt_sample_ms = t;
+            conns[1].last_ack_or_rtt_sample_ms = t;
+            let _ = select_connection_idx(&mut conns, None, t, &config);
+            if !conns[0].stall_latched() {
+                return;
+            }
+        }
+        panic!("an 80 ms path must rejoin even while one delayed ACK inflates its smoothed RTT");
+    }
+
+    #[test]
     fn a_link_with_only_late_samples_is_still_judged_late() {
         use srtla_core::connection::delivery_proof_is_timely;
 
