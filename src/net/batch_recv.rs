@@ -441,6 +441,7 @@ mod unix_impl {
     mod tests {
         use std::io::{Error, ErrorKind};
         use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+        use std::time::Duration;
 
         use srtla_protocol::MTU;
 
@@ -499,6 +500,33 @@ mod unix_impl {
                 }
             }
             assert_eq!(received, [&b"one"[..], b"two", b"three", b"four"]);
+        }
+
+        // Documents for plan 015 that loopback never applies send backpressure,
+        // so the head-of-line case cannot be reproduced here.
+        #[tokio::test]
+        #[cfg_attr(miri, ignore)]
+        async fn send_batch_does_not_wait_on_loopback_with_a_tiny_send_buffer() {
+            let a = loopback_socket();
+            let b = loopback_socket();
+            a.set_send_buffer_size(1).unwrap();
+            let a = BatchUdpSocket::new(a, local_addr(&b)).unwrap();
+
+            let payload = [0u8; 1316];
+            let batch = [&payload[..]; 32];
+            let mut timeouts = 0;
+            for _ in 0..125 {
+                match tokio::time::timeout(Duration::from_millis(100), a.send_batch(&batch)).await {
+                    Ok(result) => {
+                        result.expect("send_batch failed on loopback");
+                    }
+                    Err(_) => timeouts += 1,
+                }
+            }
+            assert_eq!(
+                timeouts, 0,
+                "send_batch waited past 100ms {timeouts} times on loopback"
+            );
         }
 
         // Exercises the unsafe sockaddr_storage → SocketAddr pointer casts with
