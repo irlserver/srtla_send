@@ -1236,7 +1236,10 @@ mod tests {
         let now = now_ms();
         let conn_id = conns[0].conn_id;
         let mut seq_tracker = SequenceTracker::new();
-        for (seq, sent) in [(100u32, now - 70), (101, now - 2)] {
+        // The handler reads the real clock, so a sample only grows with the
+        // time between that read and this one. Sending 100 long before 101
+        // lets a lower bound alone tell the two samples apart.
+        for (seq, sent) in [(100u32, now - 500), (101, now - 2)] {
             conns[0].register_packet(seq as i32, sent);
             seq_tracker.insert(seq, conn_id, sent);
         }
@@ -1262,7 +1265,7 @@ mod tests {
         assert_eq!(conns[0].in_flight_packets, 1, "101 is still owed");
         let rtt = conns[0].get_smooth_rtt_ms();
         assert!(
-            (69.0..=80.0).contains(&rtt),
+            rtt >= 500.0,
             "the sample must come from 100, the last acknowledged packet, got {rtt}"
         );
     }
