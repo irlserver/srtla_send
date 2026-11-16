@@ -298,6 +298,17 @@ pub struct ProbeRecord {
     pub ambiguous: bool,
 }
 
+/// A first-send NAK on this link that is not charged yet.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingNak {
+    pub sent_ms: u64,
+    pub nak_ms: u64,
+}
+
+/// A NAK left unresolved this long is charged as a loss. This covers a link
+/// that goes quiet before its next SRTLA ACK could settle the NAK.
+pub const PENDING_NAK_TIMEOUT_MS: u64 = 1_000;
+
 pub struct SrtlaConnection {
     pub conn_id: u64,
     // Shell production API: the sender binds egress sockets to this IP and
@@ -311,7 +322,8 @@ pub struct SrtlaConnection {
     /// (a repeat on this link or a retransmit-flagged copy), whose ACK may
     /// belong to an earlier copy and so cannot time a round trip. In enhanced
     /// mode a NAK for a `None` entry is not a congestion signal, since it
-    /// usually repeats a loss report for an earlier copy.
+    /// usually repeats a loss report for an earlier copy. A NAK for a first
+    /// send moves the entry to [`Self::pending_naks`] instead of charging it.
     /// Uses FxHashMap for O(1) insert/remove instead of O(256) linear scan.
     #[cfg(feature = "test-internals")]
     pub packet_log: FxHashMap<i32, Option<u64>>,
@@ -340,6 +352,15 @@ pub struct SrtlaConnection {
     pub probe_log: FxHashMap<i32, ProbeRecord>,
     #[cfg(not(feature = "test-internals"))]
     pub(crate) probe_log: FxHashMap<i32, ProbeRecord>,
+    /// Enhanced mode first-send NAKs that wait for this link's SRTLA ACKs to
+    /// say whether the packet was lost or only reordered across links. They
+    /// leave in-flight accounting at the NAK and are charged to the congestion
+    /// window only once the evidence shows a loss, or after
+    /// [`PENDING_NAK_TIMEOUT_MS`].
+    #[cfg(feature = "test-internals")]
+    pub pending_naks: FxHashMap<i32, PendingNak>,
+    #[cfg(not(feature = "test-internals"))]
+    pub(crate) pending_naks: FxHashMap<i32, PendingNak>,
     /// Highest sequence number that has been cumulatively ACKed, or
     /// [`NO_ACK_YET`] before the first ACK (and after every reset).
     ///
@@ -540,6 +561,7 @@ impl SrtlaConnection {
             in_flight_packets: 0,
             packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
             probe_log: FxHashMap::default(),
+            pending_naks: FxHashMap::default(),
             highest_acked_seq: NO_ACK_YET,
             last_received: None,
             last_sent: None,
@@ -1384,6 +1406,7 @@ impl SrtlaConnection {
         }
         self.packet_log.clear();
         self.probe_log.clear();
+        self.pending_naks.clear();
         self.in_flight_packets = 0;
         self.highest_acked_seq = NO_ACK_YET;
         self.congestion.reset();
@@ -1404,6 +1427,7 @@ impl SrtlaConnection {
         self.in_flight_packets = 0;
         self.packet_log.clear();
         self.probe_log.clear();
+        self.pending_naks.clear();
         self.highest_acked_seq = NO_ACK_YET;
         self.batch_sender.reset();
         self.phase = LinkPhase::Registering;

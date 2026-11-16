@@ -421,6 +421,10 @@ pub async fn run_sender_with_config(
                     $($sighup_branch)*
                     _ = batch_flush_timer.tick() => {
                         flush_all_batches(&mut connections, &conn_io, &mut seq_tracker).await;
+                        let now = srtla_core::utils::now_ms();
+                        for c in connections.iter_mut() {
+                            c.expire_pending_naks(now);
+                        }
                     }
                 }
             }

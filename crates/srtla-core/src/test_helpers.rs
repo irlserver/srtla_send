@@ -35,6 +35,7 @@ fn build_connection(local_ip: IpAddr, label: String) -> SrtlaConnection {
         in_flight_packets: 0,
         packet_log: FxHashMap::with_capacity_and_hasher(PKT_LOG_SIZE, Default::default()),
         probe_log: FxHashMap::default(),
+        pending_naks: FxHashMap::default(),
         highest_acked_seq: NO_ACK_YET,
         last_received: Some(now_ms()),
         last_sent: None,

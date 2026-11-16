@@ -6,6 +6,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use smallvec::SmallVec;
+    use srtla_core::connection::PENDING_NAK_TIMEOUT_MS;
     use srtla_core::mode::SchedulingMode;
     use srtla_core::registration::SrtlaRegistrationManager;
     use srtla_core::selection::{calculate_quality_multiplier, select_connection_idx};
@@ -420,12 +421,14 @@ mod tests {
 
         let found_0 = connections[0].handle_nak(100, false, now_ms());
         assert!(found_0);
+        connections[0].expire_pending_naks(now_ms() + PENDING_NAK_TIMEOUT_MS);
         assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
         assert_eq!(connections[1].congestion.nak_count, initial_counts[1]);
         assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);
 
         let found_1 = connections[1].handle_nak(200, false, now_ms());
         assert!(found_1);
+        connections[1].expire_pending_naks(now_ms() + PENDING_NAK_TIMEOUT_MS);
         assert_eq!(connections[0].congestion.nak_count, initial_counts[0] + 1);
         assert_eq!(connections[1].congestion.nak_count, initial_counts[1] + 1);
         assert_eq!(connections[2].congestion.nak_count, initial_counts[2]);

@@ -1,8 +1,9 @@
 use std::cmp::min;
 
+use smallvec::SmallVec;
 use srtla_protocol::*;
 
-use super::SrtlaConnection;
+use super::{PENDING_NAK_TIMEOUT_MS, PendingNak, SrtlaConnection};
 use crate::seq::{NO_ACK_YET, seq_after, seq_diff, seq_next, seq_normalize};
 
 /// Widest newly-ACKed range that is cleared by walking sequence numbers instead
@@ -117,24 +118,72 @@ impl SrtlaConnection {
 
     /// Handle NAK for a specific sequence. O(1) remove.
     ///
-    /// Returns whether this link held `seq`. In enhanced mode a NAK for a
-    /// resend entry only clears it and is not charged as congestion. Classic
-    /// mode charges every NAK it finds.
+    /// Returns whether this link held `seq`. Classic mode charges every NAK it
+    /// finds at once. In enhanced mode a NAK for a resend entry only clears it,
+    /// and a NAK for a first send is parked in [`Self::pending_naks`] until
+    /// this link's SRTLA ACKs show whether the packet was lost (see
+    /// [`Self::handle_srtla_ack_specific`]) or [`Self::expire_pending_naks`]
+    /// gives up waiting. Either way the entry leaves in-flight accounting now.
     #[inline]
     pub fn handle_nak(&mut self, seq: i32, classic_mode: bool, now_ms: u64) -> bool {
         let Some(entry) = self.packet_log.remove(&seq) else {
             return false;
         };
         self.in_flight_packets = self.packet_log.len() as i32;
-        // A `None` entry is a resend on this link. The receiver repeats its loss
-        // report until the retransmit arrives, so a NAK here usually restates a
-        // loss that was already charged. Classic mode still charges it to keep
-        // parity with the reference srtla_send.c.
-        if entry.is_some() || classic_mode {
+        if classic_mode {
+            // Parity with the reference srtla_send.c, resends included.
             self.congestion
                 .handle_nak(&mut self.window, seq, &self.label, now_ms);
+        } else if let Some(sent_ms) = entry {
+            // The receiver reports a gap as soon as a later sequence arrives on
+            // any link, so a sub-millisecond inversion between two links reads
+            // as a loss here. The charge waits for evidence from this link.
+            self.pending_naks.entry(seq).or_insert(PendingNak {
+                sent_ms,
+                nak_ms: now_ms,
+            });
         }
+        // A `None` entry in enhanced mode is a resend on this link. The
+        // receiver repeats its loss report until the retransmit arrives, so a
+        // NAK here usually restates a loss that was already charged.
         true
+    }
+
+    /// Charge a pending NAK as a loss at the time the NAK arrived, so burst
+    /// detection sees the real spacing between losses.
+    fn charge_pending_nak(&mut self, seq: i32, pending: PendingNak) {
+        self.congestion
+            .handle_nak(&mut self.window, seq, &self.label, pending.nak_ms);
+    }
+
+    /// Remove the pending NAKs `is_lost` selects and charge them in serial
+    /// sequence order.
+    fn charge_pending_naks_where(&mut self, is_lost: impl Fn(i32, &PendingNak) -> bool) {
+        let mut lost: SmallVec<(i32, PendingNak), 8> = self
+            .pending_naks
+            .iter()
+            .filter(|&(&seq, pending)| is_lost(seq, pending))
+            .map(|(&seq, &pending)| (seq, pending))
+            .collect();
+        let Some(&(anchor, _)) = lost.first() else {
+            return;
+        };
+        lost.sort_unstable_by_key(|&(seq, _)| seq_diff(seq, anchor));
+        for (seq, pending) in lost {
+            self.pending_naks.remove(&seq);
+            self.charge_pending_nak(seq, pending);
+        }
+    }
+
+    /// Charge every pending NAK that has waited [`PENDING_NAK_TIMEOUT_MS`]
+    /// without this link's SRTLA ACKs settling it.
+    pub fn expire_pending_naks(&mut self, now_ms: u64) {
+        if self.pending_naks.is_empty() {
+            return;
+        }
+        self.charge_pending_naks_where(|_, pending| {
+            now_ms.saturating_sub(pending.nak_ms) >= PENDING_NAK_TIMEOUT_MS
+        });
     }
 
     /// What this link logged for `seq`: `Some(Some(send_ms))` for a first send,
@@ -158,6 +207,27 @@ impl SrtlaConnection {
             if !probe.ambiguous {
                 self.rtt.record_round_trip(probe.sent_ms, now_ms);
             }
+            return true;
+        }
+
+        // Every SRTLA receiver acknowledges each packet on the link it arrived
+        // on, listing that link's sequences in arrival order (BELABOX
+        // srtla_rec and irlserver srtla_rec both send one ACK per batch of
+        // received packets). So an ACK on this link for a pending NAK proves
+        // the packet arrived and the NAK was a cross-link reorder. An ACK for a
+        // later sequence on this link, while the pending one never shows up,
+        // proves it was lost here, because one link delivers in order.
+        if let Some(pending) = self.pending_naks.remove(&seq) {
+            self.last_ack_or_rtt_sample_ms = now_ms;
+            // A resend logged after the NAK makes the ACK ambiguous between
+            // the two copies, so it yields no round trip.
+            if self.packet_log.remove(&seq).is_some() {
+                self.in_flight_packets = self.packet_log.len() as i32;
+            } else {
+                self.rtt.record_round_trip(pending.sent_ms, now_ms);
+            }
+            // The packet left in-flight accounting at the NAK, so the window
+            // does not grow for it.
             return true;
         }
 
@@ -193,6 +263,10 @@ impl SrtlaConnection {
                     &self.label,
                     now_ms,
                 );
+            }
+
+            if !self.pending_naks.is_empty() {
+                self.charge_pending_naks_where(|pending_seq, _| seq_after(seq, pending_seq));
             }
         }
         logged.is_some()
@@ -232,14 +306,16 @@ impl SrtlaConnection {
     /// `handle_srt_ack` ignore every ACK. `packet_log` goes because its entries
     /// belong to a session the encoder ended. The new session's ACKs can never
     /// prune them, so they would count as in flight until an SRTLA ACK happened
-    /// to arrive for each. `probe_log` goes because its keys are sequences of
-    /// the ended session, so a new-session ACK could match one by accident and
-    /// record a false RTT sample. The congestion window, RTT and phase stay,
-    /// because they describe the link, not the session.
+    /// to arrive for each. `probe_log` and `pending_naks` go because their keys
+    /// are sequences of the ended session, so a new-session ACK could match
+    /// one by accident and record a false RTT sample or a false loss. The
+    /// congestion window, RTT and phase stay, because they describe the link,
+    /// not the session.
     pub fn reset_srt_session(&mut self) {
         self.highest_acked_seq = NO_ACK_YET;
         self.packet_log.clear();
         self.probe_log.clear();
+        self.pending_naks.clear();
         self.in_flight_packets = 0;
     }
 
@@ -257,6 +333,7 @@ impl SrtlaConnection {
 
 #[cfg(test)]
 mod tests {
+    use crate::connection::PENDING_NAK_TIMEOUT_MS;
     use crate::seq::{NO_ACK_YET, SEQ_MASK};
     use crate::test_helpers::create_test_connection;
 
@@ -646,11 +723,142 @@ mod tests {
             let naks = conn.congestion.nak_count;
 
             assert!(conn.handle_nak(31, classic_mode, 1_020));
+            // Enhanced mode charges a first send once the NAK times out.
+            conn.expire_pending_naks(1_020 + PENDING_NAK_TIMEOUT_MS);
 
             assert!(!conn.packet_log.contains_key(&31));
             assert_eq!(conn.in_flight_packets, 0);
             assert_eq!(conn.congestion.nak_count, naks + 1);
             assert!(conn.window < window);
         }
+    }
+
+    #[tokio::test]
+    async fn enhanced_nak_is_not_charged_before_evidence() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        let window = conn.window;
+        let naks = conn.congestion.nak_count;
+
+        assert!(conn.handle_nak(10, false, 1_040));
+
+        assert_eq!(conn.congestion.nak_count, naks);
+        assert_eq!(conn.window, window);
+        assert_eq!(conn.in_flight_packets, 0);
+        assert!(conn.pending_naks.contains_key(&10));
+    }
+
+    #[tokio::test]
+    async fn late_srtla_ack_clears_a_pending_nak_as_reorder() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        let window = conn.window;
+        let naks = conn.congestion.nak_count;
+        assert!(conn.handle_nak(10, false, 1_040));
+
+        assert!(conn.handle_srtla_ack_specific(10, false, 1_045));
+
+        assert!(conn.pending_naks.is_empty());
+        assert_eq!(conn.congestion.nak_count, naks);
+        assert_eq!(conn.window, window);
+        assert_eq!(conn.last_ack_or_rtt_sample_ms, 1_045);
+        // The packet did arrive, so its ACK is a real round trip on this link.
+        assert_eq!(conn.rtt.estimated_rtt_ms, 45.0);
+    }
+
+    #[tokio::test]
+    async fn ack_for_a_later_packet_charges_the_pending_nak() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        conn.register_packet(11, 1_000);
+        let naks = conn.congestion.nak_count;
+        assert!(conn.handle_nak(10, false, 1_040));
+        let window = conn.window;
+
+        assert!(conn.handle_srtla_ack_specific(11, false, 1_050));
+
+        assert_eq!(conn.congestion.nak_count, naks + 1);
+        assert!(conn.window < window);
+        assert!(conn.pending_naks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ack_for_an_earlier_packet_leaves_the_pending_nak() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(9, 1_000);
+        conn.register_packet(10, 1_000);
+        let naks = conn.congestion.nak_count;
+        assert!(conn.handle_nak(10, false, 1_040));
+
+        assert!(conn.handle_srtla_ack_specific(9, false, 1_045));
+
+        assert_eq!(conn.congestion.nak_count, naks);
+        assert!(conn.pending_naks.contains_key(&10));
+    }
+
+    #[tokio::test]
+    async fn pending_naks_across_the_wrap_are_charged_in_serial_order() {
+        let mut conn = create_test_connection().await;
+        for seq in ACROSS_WRAP {
+            conn.register_packet(seq, 1_000);
+        }
+        // NAK times rise with serial order, so charging in that order keeps
+        // the last charge at the latest NAK.
+        for (seq, nak_ms) in [
+            (SEQ_MASK - 1, 1_010),
+            (SEQ_MASK, 1_020),
+            (0, 1_030),
+            (1, 1_040),
+        ] {
+            assert!(conn.handle_nak(seq, false, nak_ms));
+        }
+
+        assert!(conn.handle_srtla_ack_specific(2, false, 1_050));
+
+        assert!(conn.pending_naks.is_empty());
+        assert_eq!(conn.congestion.nak_count, 4);
+        assert_eq!(conn.congestion.last_nak_time_ms, 1_040);
+    }
+
+    #[tokio::test]
+    async fn pending_nak_expires_into_a_charge() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        let naks = conn.congestion.nak_count;
+        assert!(conn.handle_nak(10, false, 1_040));
+
+        conn.expire_pending_naks(1_040 + PENDING_NAK_TIMEOUT_MS - 1);
+        assert_eq!(conn.congestion.nak_count, naks);
+        assert!(conn.pending_naks.contains_key(&10));
+
+        conn.expire_pending_naks(1_040 + PENDING_NAK_TIMEOUT_MS);
+        assert_eq!(conn.congestion.nak_count, naks + 1);
+        assert!(conn.pending_naks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn classic_nak_is_charged_at_once() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        let window = conn.window;
+        let naks = conn.congestion.nak_count;
+
+        assert!(conn.handle_nak(10, true, 1_040));
+
+        assert_eq!(conn.congestion.nak_count, naks + 1);
+        assert!(conn.window < window);
+        assert!(conn.pending_naks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reset_clears_pending_naks() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(10, 1_000);
+        assert!(conn.handle_nak(10, false, 1_040));
+        assert!(!conn.pending_naks.is_empty());
+
+        conn.reset_srt_session();
+
+        assert!(conn.pending_naks.is_empty());
     }
 }
