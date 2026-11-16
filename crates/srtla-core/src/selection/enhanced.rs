@@ -831,6 +831,32 @@ mod tests {
     }
 
     #[test]
+    fn late_link_while_the_healthy_link_is_over_its_cap() {
+        use crate::selection::classifier::WeakReason;
+
+        let mut conns = two_conns();
+        let now = crate::utils::now_ms();
+        conns[0].weak = true;
+        conns[0].weak_reason = WeakReason::HighRtt;
+        conns[1].cc_target_bps = 1_000_000;
+        conns[1].in_flight_packets = 40;
+        assert!(
+            in_flight_cap_exceeded(&conns[1]),
+            "setup must put the healthy link over its in-flight cap"
+        );
+
+        // Documents current behavior for plan 014. With the only healthy link
+        // over its BDP cap, the late link is neither excluded nor penalized and
+        // wins on raw score. Whether that is the intended full-pool fallback is
+        // undecided.
+        assert_eq!(select_connection(&mut conns, None, now, true), Some(0));
+        assert!(
+            !conns[0].is_quality_excluded(),
+            "today the late link is only held out while some link is also under its cap"
+        );
+    }
+
+    #[test]
     fn an_under_used_link_keeps_its_trickle_of_real_traffic() {
         use crate::selection::classifier::WeakReason;
 
@@ -857,6 +883,29 @@ mod tests {
 
         assert_eq!(select_connection(&mut conns, None, now, true), Some(1));
         assert!(conns[0].is_quality_excluded());
+    }
+
+    #[test]
+    fn loss_degraded_link_while_the_healthy_link_is_over_its_cap() {
+        let mut conns = two_conns();
+        let now = crate::utils::now_ms();
+        conns[0].loss_degraded = true;
+        conns[1].cc_target_bps = 1_000_000;
+        conns[1].in_flight_packets = 40;
+        assert!(
+            in_flight_cap_exceeded(&conns[1]),
+            "setup must put the healthy link over its in-flight cap"
+        );
+
+        // Documents current behavior for plan 014. With the only healthy link
+        // over its BDP cap, the late link is neither excluded nor penalized and
+        // wins on raw score. Whether that is the intended full-pool fallback is
+        // undecided.
+        assert_eq!(select_connection(&mut conns, None, now, true), Some(0));
+        assert!(
+            !conns[0].is_quality_excluded(),
+            "today the late link is only held out while some link is also under its cap"
+        );
     }
 
     #[test]
