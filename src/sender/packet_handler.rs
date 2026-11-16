@@ -777,4 +777,71 @@ mod tests {
         assert!(connections[0].last_sent.is_some());
         assert_eq!(seq_tracker.get(7, now), Some(conn_id));
     }
+
+    /// Whichever link carries a retransmit takes over the sequence in the
+    /// tracker, so later NAKs for it resolve to that link. The retransmit's
+    /// own packet log entry only appears at batch flush, which leaves a gap in
+    /// which a NAK resolves to the new link but finds nothing to charge. This
+    /// does not exercise the best-path override that picks the link.
+    #[tokio::test]
+    async fn retransmit_link_switch_moves_tracker_ownership() {
+        let mut connections = crate::test_helpers::create_test_connections(2).await;
+        let conn_io = crate::test_helpers::create_test_conn_io_map(&connections);
+        let mut seq_tracker = SequenceTracker::new();
+        let mut last_selected_idx = None;
+        let base = srtla_core::utils::now_ms();
+        let seq: u32 = 901;
+
+        let mut original = [0u8; 24];
+        original[..4].copy_from_slice(&seq.to_be_bytes());
+        original[16..].copy_from_slice(b"payload!");
+        let mut retransmit = original;
+        retransmit[4] |= 0x04;
+        assert!(!srtla_protocol::is_srt_data_retransmit(&original));
+        assert!(srtla_protocol::is_srt_data_retransmit(&retransmit));
+
+        forward_via_connection(
+            0,
+            &original,
+            Some(seq),
+            &mut connections,
+            &conn_io,
+            &mut last_selected_idx,
+            &mut seq_tracker,
+            base,
+        )
+        .await;
+        assert_eq!(seq_tracker.get(seq, base), Some(connections[0].conn_id));
+
+        forward_via_connection(
+            1,
+            &retransmit,
+            Some(seq),
+            &mut connections,
+            &conn_io,
+            &mut last_selected_idx,
+            &mut seq_tracker,
+            base + 40,
+        )
+        .await;
+        assert_eq!(
+            seq_tracker.get(seq, base + 60),
+            Some(connections[1].conn_id),
+            "the retransmit carrier overwrites the original owner"
+        );
+        assert_eq!(
+            connections[1].in_flight_packets, 0,
+            "the retransmit is only queued, not yet in link 1's packet log"
+        );
+
+        flush_all_batches(&mut connections, &conn_io, &mut seq_tracker).await;
+        assert_eq!(
+            connections[1].in_flight_packets, 1,
+            "the flush registers the retransmit on link 1"
+        );
+        assert_eq!(
+            seq_tracker.get(seq, base + 60),
+            Some(connections[1].conn_id)
+        );
+    }
 }

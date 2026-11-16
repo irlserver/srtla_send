@@ -1222,6 +1222,62 @@ mod tests {
         );
     }
 
+    /// Open question: should a repeated loss report for a sequence whose
+    /// retransmit went out on another link count against that other link?
+    /// Link 0 loses the original, the retransmit rides link 1 (the best-path
+    /// override sends R-flagged packets to the best link), and libsrt repeats
+    /// the loss report while the retransmit is still in flight. This pins what
+    /// the code does today. The repeated NAK resolves to link 1 through the
+    /// tracker and shrinks link 1's window, although link 1 lost nothing.
+    #[tokio::test]
+    async fn repeated_nak_after_retransmit_link_switch_is_charged_to_the_retransmit_link() {
+        let mut connections = create_test_connections(2).await;
+        let base = now_ms();
+        let seq: u32 = 900;
+        let mut seq_tracker = SequenceTracker::new();
+
+        // The original goes out on link 0, which drops it.
+        connections[0].register_packet(seq as i32, base);
+        seq_tracker.insert(seq, connections[0].conn_id, base);
+
+        let first = attribute_nak(&mut connections, &seq_tracker, seq, base + 30);
+        assert_eq!(
+            first,
+            Some(0),
+            "the first loss report charges the link that lost the original"
+        );
+        let link0_naks = connections[0].congestion.nak_count;
+        let link1_naks = connections[1].congestion.nak_count;
+        let link1_window = connections[1].window;
+
+        // The retransmit goes out on link 1. `forward_via_connection` moves the
+        // tracker entry when it queues the packet, and the batch flush then
+        // registers it in link 1's packet log.
+        connections[1].register_packet(seq as i32, base + 40);
+        seq_tracker.insert(seq, connections[1].conn_id, base + 40);
+
+        let repeated = attribute_nak(&mut connections, &seq_tracker, seq, base + 60);
+        assert_eq!(
+            repeated,
+            Some(1),
+            "the repeated loss report resolves to the link that carries the retransmit"
+        );
+        assert_eq!(
+            connections[1].congestion.nak_count,
+            link1_naks + 1,
+            "link 1 is charged a NAK for a loss on link 0"
+        );
+        assert_eq!(
+            connections[0].congestion.nak_count, link0_naks,
+            "link 0 is not charged for the repeated report"
+        );
+        assert_eq!(
+            connections[1].window,
+            link1_window - WINDOW_DECR,
+            "the charge runs the congestion NAK path and shrinks link 1's window"
+        );
+    }
+
     #[tokio::test]
     async fn srt_ack_field_is_the_first_sequence_still_owed() {
         // Issue #25: an SRT ACK carries last-received + 1. That packet is
