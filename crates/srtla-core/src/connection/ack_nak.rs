@@ -137,6 +137,12 @@ impl SrtlaConnection {
         true
     }
 
+    /// What this link logged for `seq`: `Some(Some(send_ms))` for a first send,
+    /// `Some(None)` for a resend, `None` when the link does not hold it.
+    pub fn logged_send(&self, seq: i32) -> Option<Option<u64>> {
+        self.packet_log.get(&seq).copied()
+    }
+
     /// Handle SRTLA ACK for a specific sequence. O(1) remove.
     #[inline]
     pub fn handle_srtla_ack_specific(&mut self, seq: i32, classic_mode: bool, now_ms: u64) -> bool {
@@ -589,6 +595,18 @@ mod tests {
         assert_eq!(conn.packet_log.get(&30), Some(&None));
         assert_eq!(conn.in_flight_packets, 1);
         conn
+    }
+
+    #[tokio::test]
+    async fn logged_send_reports_first_sends_and_resends() {
+        let mut conn = create_test_connection().await;
+        conn.register_packet(5, 1_000);
+        assert_eq!(conn.logged_send(5), Some(Some(1_000)));
+
+        conn.register_packet(5, 1_010);
+        assert_eq!(conn.logged_send(5), Some(None));
+
+        assert_eq!(conn.logged_send(6), None);
     }
 
     #[tokio::test]

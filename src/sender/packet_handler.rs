@@ -42,17 +42,44 @@ pub(crate) fn attribute_nak(
     if let Some(conn_id) = seq_tracker.get(nak, current_time_ms)
         && let Some(pos) = connections.iter().position(|c| c.conn_id == conn_id)
     {
-        return connections[pos]
-            .handle_nak(nak as i32, classic, current_time_ms)
-            .then_some(pos);
+        let conn = &mut connections[pos];
+        let logged = conn.logged_send(nak as i32);
+        let held = conn.handle_nak(nak as i32, classic, current_time_ms);
+        if held {
+            log_attributed_nak(conn, nak, logged, current_time_ms, true);
+        }
+        return held.then_some(pos);
     }
 
     for (i, conn) in connections.iter_mut().enumerate() {
+        let logged = conn.logged_send(nak as i32);
         if conn.handle_nak(nak as i32, classic, current_time_ms) {
+            log_attributed_nak(conn, nak, logged, current_time_ms, false);
             return Some(i);
         }
     }
     None
+}
+
+/// A NAK for a packet younger than the link's RTT cannot be a loss the
+/// receiver had time to detect and report, so `age_ms` next to `rtt_ms`
+/// separates reorder NAKs from real loss.
+fn log_attributed_nak(
+    conn: &SrtlaConnection,
+    nak: u32,
+    logged: Option<Option<u64>>,
+    current_time_ms: u64,
+    from_tracker: bool,
+) {
+    debug!(
+        link = %conn.label,
+        seq = nak,
+        age_ms = ?logged.flatten().map(|sent| current_time_ms.saturating_sub(sent)),
+        rtt_ms = conn.get_smooth_rtt_ms() as u64,
+        resend = logged == Some(None),
+        via = if from_tracker { "tracker" } else { "scan" },
+        "nak attributed"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

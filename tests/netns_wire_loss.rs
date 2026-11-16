@@ -35,6 +35,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
 
@@ -206,6 +207,7 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     // The adaptive sender lives in the stack's caller slot, so stop()
     // kills it along with everything else.
     let output = stack.stop();
+    print_nak_attribution(&output.srtla_send_stdout);
     let _ = std::fs::remove_file(&sock);
 
     // srtla_send runs housekeeping, the weak-link classifier and the CC
@@ -330,4 +332,160 @@ fn wire_loss_link_is_not_ratcheted_out_of_the_bond() {
     // bond_median is logged above for the operator; not asserted, since
     // under oscillation it is not a stable aggregate to threshold on.
     let _ = bond_median;
+}
+
+/// How one link's attributed NAKs split up. An early NAK names a packet sent
+/// less than one RTT before it, which the receiver could not have detected as
+/// lost and reported back in time. That is the fingerprint of a reorder NAK on
+/// a bond, where a later sequence arrives over the other link first.
+#[derive(Debug, Default, PartialEq)]
+struct NakTally {
+    total: usize,
+    resends: usize,
+    early: usize,
+    late: usize,
+}
+
+/// The captured stdout keeps tracing's colour codes, which wrap each field
+/// name and its `=`, so field lookup only works on the stripped line.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// Tallies stripped `nak attributed` lines per link. The link label reads
+/// `host:port via ip` and the host is the same on every link, so the label is
+/// taken whole from `link=` up to ` seq=` rather than split on spaces. A line
+/// whose label cannot be found lands under `?`, so a format change shows up in
+/// the summary instead of silently emptying it.
+fn tally_naks<'a>(lines: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, NakTally> {
+    let mut tallies: BTreeMap<String, NakTally> = BTreeMap::new();
+    for line in lines {
+        let link = line
+            .split_once("link=")
+            .and_then(|(_, rest)| rest.split_once(" seq="))
+            .map_or("?", |(link, _)| link);
+        let tally = tallies.entry(link.to_string()).or_default();
+        tally.total += 1;
+        if field(line, "resend") == Some("true") {
+            tally.resends += 1;
+            continue;
+        }
+        let age = field(line, "age_ms").and_then(|v| {
+            v.strip_prefix("Some(")?
+                .strip_suffix(')')?
+                .parse::<u64>()
+                .ok()
+        });
+        let rtt = field(line, "rtt_ms").and_then(|v| v.parse::<u64>().ok());
+        if let (Some(age), Some(rtt)) = (age, rtt) {
+            if age < rtt {
+                tally.early += 1;
+            } else {
+                tally.late += 1;
+            }
+        }
+    }
+    tallies
+}
+
+/// Prints the evidence for whether the clean link's NAKs are reorder NAKs.
+/// It runs before the assertions so whichever one fails still has it in the
+/// output.
+fn print_nak_attribution(stdout: &[String]) {
+    let lines: Vec<String> = stdout
+        .iter()
+        .filter(|l| l.contains("nak attributed"))
+        .map(|l| strip_ansi(l))
+        .collect();
+
+    eprintln!("--- nak attribution summary ---");
+    for (link, t) in tally_naks(lines.iter().map(String::as_str)) {
+        eprintln!(
+            "  {link}: total={} resends={} early(age<rtt)={} late(age>=rtt)={}",
+            t.total, t.resends, t.early, t.late
+        );
+    }
+
+    const SHOWN: usize = 40;
+    if lines.len() <= 2 * SHOWN {
+        for l in &lines {
+            eprintln!("{l}");
+        }
+    } else {
+        for l in &lines[..SHOWN] {
+            eprintln!("{l}");
+        }
+        eprintln!(
+            "... {} more nak attributed lines ...",
+            lines.len() - 2 * SHOWN
+        );
+        for l in &lines[lines.len() - SHOWN..] {
+            eprintln!("{l}");
+        }
+    }
+}
+
+#[test]
+fn nak_lines_are_tallied_per_link() {
+    let line = |link: &str, age: &str, rtt: u64, resend: bool| {
+        format!(
+            "2026-11-16T10:00:00.000000Z \u{1b}[34mDEBUG\u{1b}[0m nak attributed \
+             \u{1b}[3mlink\u{1b}[0m\u{1b}[2m=\u{1b}[0m{link} \
+             \u{1b}[3mseq\u{1b}[0m\u{1b}[2m=\u{1b}[0m42 \
+             \u{1b}[3mage_ms\u{1b}[0m\u{1b}[2m=\u{1b}[0m{age} \
+             \u{1b}[3mrtt_ms\u{1b}[0m\u{1b}[2m=\u{1b}[0m{rtt} \
+             \u{1b}[3mresend\u{1b}[0m\u{1b}[2m=\u{1b}[0m{resend} \
+             \u{1b}[3mvia\u{1b}[0m\u{1b}[2m=\u{1b}[0m\"tracker\""
+        )
+    };
+    let lossy = "10.0.0.1:5000 via 10.1.0.2";
+    let clean = "10.0.0.1:5000 via 10.2.0.2";
+    let raw = [
+        line(lossy, "Some(80)", 60, false),
+        line(clean, "Some(12)", 60, false),
+        line(clean, "Some(30)", 60, false),
+        line(clean, "None", 60, true),
+        line(clean, "Some(60)", 60, false),
+    ];
+    let stripped: Vec<String> = raw.iter().map(|l| strip_ansi(l)).collect();
+
+    let tallies = tally_naks(stripped.iter().map(String::as_str));
+
+    assert_eq!(tallies.len(), 2);
+    assert_eq!(
+        tallies[lossy],
+        NakTally {
+            total: 1,
+            resends: 0,
+            early: 0,
+            late: 1,
+        }
+    );
+    assert_eq!(
+        tallies[clean],
+        NakTally {
+            total: 4,
+            resends: 1,
+            early: 2,
+            late: 1,
+        }
+    );
 }
