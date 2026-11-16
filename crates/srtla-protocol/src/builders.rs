@@ -20,7 +20,6 @@ pub fn create_reg2_packet(id: &[u8; SRTLA_ID_LEN]) -> [u8; SRTLA_TYPE_REG2_LEN] 
 /// `now` is the monotonic-ms timestamp stamped into the wire packet; the
 /// receiver echoes it back so the sender can measure keepalive RTT. Injected by
 /// the caller (this crate is I/O- and clock-free).
-#[allow(dead_code)]
 pub fn create_keepalive_packet(now: u64) -> [u8; 10] {
     let mut pkt = [0u8; 10];
     pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
@@ -69,7 +68,6 @@ pub fn create_keepalive_packet_ext(
 }
 
 /// Create SRTLA ACK packet (used in tests and receiver implementations)
-#[allow(dead_code)]
 pub fn create_ack_packet(acks: &[u32]) -> SmallVec<u8, 64> {
     // Create packets that match the actual SRTLA receiver format (4-byte header)
     let mut pkt = SmallVec::from_vec(vec![0u8; 4 + 4 * acks.len()]);

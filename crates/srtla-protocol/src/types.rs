@@ -31,28 +31,22 @@ pub struct SrtHandshakeLatency {
     pub snd_ms: Option<u16>,
 }
 
-/// Helper functions for packet type checking (used in tests)
-#[allow(dead_code)]
 pub fn is_srtla_reg1(buf: &[u8]) -> bool {
     buf.len() == SRTLA_TYPE_REG1_LEN && get_packet_type(buf) == Some(SRTLA_TYPE_REG1)
 }
 
-#[allow(dead_code)]
 pub fn is_srtla_reg2(buf: &[u8]) -> bool {
     buf.len() == SRTLA_TYPE_REG2_LEN && get_packet_type(buf) == Some(SRTLA_TYPE_REG2)
 }
 
-#[allow(dead_code)]
 pub fn is_srtla_reg3(buf: &[u8]) -> bool {
     buf.len() == SRTLA_TYPE_REG3_LEN && get_packet_type(buf) == Some(SRTLA_TYPE_REG3)
 }
 
-#[allow(dead_code)]
 pub fn is_srtla_keepalive(buf: &[u8]) -> bool {
     get_packet_type(buf) == Some(SRTLA_TYPE_KEEPALIVE)
 }
 
-#[allow(dead_code)]
 pub fn is_srt_ack(buf: &[u8]) -> bool {
     get_packet_type(buf) == Some(SRT_TYPE_ACK)
 }

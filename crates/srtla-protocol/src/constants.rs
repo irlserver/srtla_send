@@ -6,16 +6,13 @@ pub const SRTLA_TYPE_REG2: u16 = 0x9201;
 pub const SRTLA_TYPE_REG3: u16 = 0x9202;
 pub const SRTLA_TYPE_REG_ERR: u16 = 0x9210;
 pub const SRTLA_TYPE_REG_NGP: u16 = 0x9211;
-#[allow(dead_code)]
 pub const SRTLA_TYPE_REG_NAK: u16 = 0x9212;
 
 // SRT protocol constants (some used in tests or for protocol completeness)
 pub const SRT_TYPE_HANDSHAKE: u16 = 0x8000;
 pub const SRT_TYPE_ACK: u16 = 0x8002;
 pub const SRT_TYPE_NAK: u16 = 0x8003;
-#[allow(dead_code)]
 pub const SRT_TYPE_SHUTDOWN: u16 = 0x8005;
-#[allow(dead_code)]
 pub const SRT_TYPE_DATA: u16 = 0x0000;
 
 // SRT handshake layout, for reading the negotiated TSBPD latency off the wire
@@ -67,7 +64,6 @@ pub const SRT_HS_OPT_TSBPDRCV: u32 = 1 << 1;
 pub const SRTLA_ID_LEN: usize = 256;
 pub const SRTLA_TYPE_REG1_LEN: usize = 2 + SRTLA_ID_LEN;
 pub const SRTLA_TYPE_REG2_LEN: usize = 2 + SRTLA_ID_LEN;
-#[allow(dead_code)]
 pub const SRTLA_TYPE_REG3_LEN: usize = 2;
 
 pub const MTU: usize = 1500;

@@ -133,7 +133,6 @@ pub fn extract_keepalive_timestamp(buf: &[u8]) -> Option<u64> {
 /// - Not a KEEPALIVE packet
 /// - Magic number doesn't match (not an extended keepalive)
 /// - Version doesn't match
-#[allow(dead_code)]
 pub fn extract_keepalive_conn_info(buf: &[u8]) -> Option<ConnectionInfo> {
     if buf.len() < SRTLA_KEEPALIVE_EXT_LEN {
         return None;

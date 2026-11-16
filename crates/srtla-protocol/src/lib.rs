@@ -12,20 +12,17 @@ mod types;
 
 // Constants
 // Builders
-#[allow(unused_imports)]
 pub use builders::{
     create_ack_packet, create_keepalive_packet, create_keepalive_packet_ext, create_reg1_packet,
     create_reg2_packet,
 };
 pub use constants::*;
 // Parsers
-#[allow(unused_imports)]
 pub use parsers::{
     extract_keepalive_conn_info, extract_keepalive_timestamp, parse_srt_ack,
     parse_srt_handshake_latency, parse_srt_nak, parse_srt_session_start, parse_srtla_ack,
 };
 // Types and helpers
-#[allow(unused_imports)]
 pub use types::{
     ConnectionInfo, SrtHandshakeLatency, get_packet_type, get_srt_sequence_number, is_srt_ack,
     is_srt_data_retransmit, is_srtla_keepalive, is_srtla_reg1, is_srtla_reg2, is_srtla_reg3,
