@@ -19,7 +19,7 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 
 - Multi-uplink bonding using local source IPs
 - Registration flow (REG1/REG2/REG3) with ID propagation
-- SRT ACK and NAK handling with correct NAK attribution to sending uplink. In enhanced mode a NAK for a resend (a retransmit copy or a same-link repeat) only clears the entry and does not shrink the window, while classic mode charges it like `srtla_send.c`
+- SRT ACK and NAK handling with correct NAK attribution to sending uplink. In enhanced mode a NAK for a resend (a retransmit copy or a same-link repeat) only clears the entry and does not shrink the window, while classic mode charges it like `srtla_send.c`. In enhanced mode a NAK for a first send is charged only once the link's own SRTLA ACKs show the packet was lost, or after a 1 s fallback
 - Burst NAK penalty for connections experiencing packet loss bursts
 - Keepalives with RTT measurement and time-based window recovery
 - Dynamic path selection: score = window / (in_flight + 1)

@@ -21,17 +21,22 @@ use crate::config::{ConfigSnapshot, DynamicConfig};
 /// Type alias for instant ACK forwarding: (client_addr, packet_data)
 pub type InstantForwarder = UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>;
 
-/// Attribute a NAK to the uplink that sent the lost packet and shrink its window.
+/// Attribute a NAK to the uplink that sent the packet and hand it to that link.
 ///
-/// Prefers the O(1) sequence-tracker mapping (the link that actually sent `nak`);
-/// once that link is found we never fall through, so a duplicate NAK for an
-/// already-cleared sequence can't be re-counted against a different link. Only
-/// when the tracker has no record do we fall back to the first link that still
-/// recognizes the sequence in its own packet log. In enhanced mode a link
-/// whose entry is a resend only clears it and keeps its window, because the
-/// NAK repeats a loss already charged. Returns the index of the link
-/// that counted the NAK, or `None` if none did. Production ignores the return;
-/// it exists so the attribution path is unit-testable directly instead of mirrored.
+/// Classic mode charges the NAK to the link's window at once. Enhanced mode
+/// parks a first send until that link's own SRTLA ACKs show whether the packet
+/// was lost or only reordered, and a NAK for a resend only clears the entry
+/// because it repeats a loss already reported (see
+/// [`SrtlaConnection::handle_nak`]).
+///
+/// Prefers the O(1) sequence-tracker mapping (the link that actually sent
+/// `nak`). Once that link is found we never fall through, so a duplicate NAK
+/// for an already-cleared sequence can't be attributed to a different link.
+/// Only when the tracker has no record do we fall back to the first link that
+/// still recognizes the sequence in its own packet log. Returns the index of
+/// the link that took the NAK, or `None` if none did. Production ignores the
+/// return. It exists so the attribution path is unit-testable directly instead
+/// of mirrored.
 pub(crate) fn attribute_nak(
     connections: &mut [SrtlaConnection],
     seq_tracker: &SequenceTracker,
