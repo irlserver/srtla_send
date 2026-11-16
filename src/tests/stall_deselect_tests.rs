@@ -450,9 +450,11 @@ mod tests {
     // --- Timeliness of the proof itself (librist !375, 6ed9d2a3: delivery on a
     // leg queued deeper than the receiver's buffer is not evidence of anything) ---
 
+    /// Settles the smoothed RTT and the recent minimum alike, as real samples would.
     fn set_rtt(conn: &mut srtla_core::connection::SrtlaConnection, rtt_ms: f64) {
-        for _ in 0..16 {
-            conn.rtt.kalman_rtt.update(rtt_ms);
+        let t0 = now_ms();
+        for i in 0..16 {
+            conn.rtt.update_estimate(rtt_ms as u64, t0 + i);
         }
         assert!(
             (conn.get_smooth_rtt_ms() - rtt_ms).abs() < rtt_ms * 0.1,
@@ -633,6 +635,48 @@ mod tests {
         // check against" rather than grounds to withhold proof.
         assert!(delivery_proof_is_timely(9999.0, 0));
         assert!(delivery_proof_is_timely(0.0, 10));
+    }
+
+    #[test]
+    fn one_batch_delayed_ack_does_not_hold_a_recovered_link_out() {
+        use srtla_core::connection::delivery_proof_is_timely;
+
+        // A receiver that batches SRTLA ACKs holds the ACK for a packet sent
+        // just before an outage until traffic resumes, so one sample comes back
+        // as long as the outage. It drags the smoothed RTT past the buffer,
+        // but the 80 ms path is still there in the recent floor.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let c = &mut conns[0];
+        let t0 = 1_000_000;
+        for i in 0..16 {
+            c.rtt.update_estimate(80, t0 + i * 100);
+        }
+        c.rtt.update_estimate(1_500, t0 + 1_700);
+
+        assert!(
+            c.get_smooth_rtt_ms() / 2.0 > 260.0,
+            "the delayed sample must push the smoothed RTT past the buffer, got {}",
+            c.get_smooth_rtt_ms()
+        );
+        assert!(c.rejoin_rtt_ms() <= 81.0, "got {}", c.rejoin_rtt_ms());
+        assert!(delivery_proof_is_timely(c.rejoin_rtt_ms(), 260));
+    }
+
+    #[test]
+    fn a_link_with_only_late_samples_is_still_judged_late() {
+        use srtla_core::connection::delivery_proof_is_timely;
+
+        // With no fast sample in the window the floor is as late as the link.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let c = &mut conns[0];
+        let t0 = 1_000_000;
+        for i in 0..16 {
+            c.rtt.update_estimate(900, t0 + i * 100);
+        }
+
+        assert!(!delivery_proof_is_timely(c.rejoin_rtt_ms(), 260));
     }
 
     #[test]

@@ -1040,11 +1040,13 @@ impl SrtlaConnection {
         // period (see `STALL_REJOIN_PROOF_FLOOR_MS`).
         let proof_window_ms = stale_ms.max(crate::config_snapshot::STALL_REJOIN_PROOF_FLOOR_MS);
         // Recent *and* fast enough to matter: see `delivery_proof_is_timely`.
-        // Both conditions restart the dwell, so a link only rejoins on a run of
-        // proof that a packet of real payload could have ridden.
+        // Timeliness is judged on the recent RTT floor (`rejoin_rtt_ms`), not
+        // the smoothed RTT. Both conditions restart the dwell, so a link only
+        // rejoins on a run of proof that a packet of real payload could have
+        // ridden.
         let proof_fresh = self.last_ack_or_rtt_sample_ms != 0
             && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) < proof_window_ms
-            && delivery_proof_is_timely(self.get_smooth_rtt_ms(), self.delay_budget_ms);
+            && delivery_proof_is_timely(self.rejoin_rtt_ms(), self.delay_budget_ms);
         if !proof_fresh {
             self.stall_recovery_since_ms = 0;
             return;
@@ -1220,6 +1222,25 @@ impl SrtlaConnection {
             return true;
         }
         false
+    }
+
+    /// The round trip the rejoin timeliness check judges a latched link by:
+    /// the lower of the smoothed RTT and the 3 s windowed minimum. Receivers
+    /// that batch SRTLA ACKs (BELABOX acknowledges every 10 packets per
+    /// connection) hold the ACK for a packet sent before an outage, or for a
+    /// latched link's sparse probes, until the batch fills. That sample comes
+    /// back as long as the outage or the batch and inflates the smoothed RTT
+    /// for seconds. The sample that completes each batch is answered at once,
+    /// so the floor stays at the path RTT, while a genuinely late link has no
+    /// fast samples and its floor stays high.
+    #[inline]
+    pub fn rejoin_rtt_ms(&self) -> f64 {
+        let smooth = self.get_smooth_rtt_ms();
+        if self.rtt.kalman_rtt.is_initialized() && self.rtt.rtt_min_fast_ms > 0.0 {
+            smooth.min(self.rtt.rtt_min_fast_ms)
+        } else {
+            smooth
+        }
     }
 
     /// RTT-scaled window (ms) of total inbound silence after which a loaded
