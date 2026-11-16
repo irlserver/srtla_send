@@ -300,7 +300,6 @@ pub struct ProbeRecord {
 
 pub struct SrtlaConnection {
     pub conn_id: u64,
-    #[allow(dead_code)]
     // Shell production API: the sender binds egress sockets to this IP and
     // reports it in stats, so it is unconditionally public across the crate seam.
     pub local_ip: IpAddr,
