@@ -1180,6 +1180,12 @@ pub const SRT_PAYLOAD_BYTES: usize = 1316;
 /// The loop paces against a wall-clock deadline per packet rather than
 /// sleeping a fixed interval, so send-call overhead does not accumulate
 /// into a drifting, ever-slower rate.
+///
+/// srtla_send only tracks a packet as in flight when its first word is an SRT
+/// data sequence number, so every datagram carries an SRT data header. The
+/// sequence base comes from the clock at 10 ticks per millisecond, so
+/// successive injector processes in one test never reuse a sequence number at
+/// rates up to 10000 packets per second.
 fn udp_stream_script(
     target_ip: &str,
     port: u16,
@@ -1190,19 +1196,21 @@ fn udp_stream_script(
     if packets_per_sec == 0 {
         bail!("packets_per_sec must be > 0");
     }
-    if payload_bytes == 0 {
-        bail!("payload_bytes must be > 0");
+    if payload_bytes < 16 {
+        bail!("payload_bytes must be at least 16 (one SRT header)");
     }
     let interval = 1.0 / f64::from(packets_per_sec);
     let dur_secs = duration.as_secs_f64();
 
     Ok(format!(
-        "import socket,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\ns.\
+        "import socket,struct,time\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\ns.\
          setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.setsockopt(socket.SOL_SOCKET,\
-         socket.SO_REUSEPORT,1)\ns.bind(('0.0.0.0',{ENCODER_SOURCE_PORT}))\nd=b'\\xb8'*\
-         {payload_bytes}\nstart=time.time(); i=0\nwhile True:\n\x20   now=time.time()\n\x20   if \
-         now-start>={dur_secs}: break\n\x20   s.sendto(d,('{target_ip}',{port}))\n\x20   \
-         i+=1\n\x20   nxt=start+i*{interval}\n\x20   slp=nxt-time.time()\n\x20   if slp>0: \
+         socket.SO_REUSEPORT,1)\ns.bind(('0.0.0.0',{ENCODER_SOURCE_PORT}))\nbase=int(time.time()*\
+         10000)&0x7fffffff\nfill=b'\\xb8'*({payload_bytes}-16)\nstart=time.time(); i=0\nwhile \
+         True:\n\x20   now=time.time()\n\x20   if now-start>={dur_secs}: break\n\x20   \
+         d=struct.pack('>IIII',(base+i)&0x7fffffff,0xc0000000|((i+1)&0x03ffffff),int((now-start)*\
+         1e6)&0xffffffff,0)+fill\n\x20   s.sendto(d,('{target_ip}',{port}))\n\x20   i+=1\n\x20   \
+         nxt=start+i*{interval}\n\x20   slp=nxt-time.time()\n\x20   if slp>0: \
          time.sleep(slp)\ns.close()\nprint(f'sent {{i}} packets')"
     ))
 }
@@ -1259,5 +1267,55 @@ mod registration_log_tests {
         .to_vec();
         assert_eq!(registered_uplink_count(&log), 3);
         assert_eq!(registered_uplink_count(&log[..1]), 0);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod stream_script_tests {
+    use std::net::UdpSocket;
+    use std::process::Command;
+    use std::time::Duration;
+
+    use super::{TS_PACKET_BYTES, udp_stream_script};
+
+    #[test]
+    fn stream_script_sends_srt_data_with_increasing_sequence_numbers() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let port = receiver.local_addr().expect("receiver address").port();
+        let script = udp_stream_script(
+            "127.0.0.1",
+            port,
+            200,
+            TS_PACKET_BYTES,
+            Duration::from_millis(100),
+        )
+        .expect("build stream script");
+        let status = Command::new("python3")
+            .args(["-c", &script])
+            .status()
+            .expect("run stream script");
+        assert!(status.success(), "stream script failed: {status}");
+
+        let mut buf = [0u8; 2048];
+        let mut previous_seq: Option<u32> = None;
+        for _ in 0..5 {
+            let len = receiver.recv(&mut buf).expect("receive datagram");
+            assert_eq!(len, TS_PACKET_BYTES);
+            let word0 = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            let word1 = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+            assert_eq!(word0 & 0x8000_0000, 0, "first word must be a data seq");
+            assert_eq!(word1 & 0xc000_0000, 0xc000_0000, "single packet message");
+            assert_eq!(word1 & 0x0400_0000, 0, "retransmit flag must be clear");
+            if let Some(prev) = previous_seq {
+                assert_eq!(word0, (prev + 1) & 0x7fff_ffff);
+            }
+            previous_seq = Some(word0);
+        }
     }
 }
