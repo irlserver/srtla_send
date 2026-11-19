@@ -189,6 +189,18 @@ pub async fn handle_uplink_packet(
     if packet.bytes.is_empty() {
         return;
     }
+    // A datagram the link's previous socket queued before a rebuild belongs to
+    // a peer the link no longer talks to. Counting it (a late REG3, say) would
+    // credit the new socket's address with a registration it never made.
+    if let Some(io) = conn_io.get(&packet.conn_id)
+        && io.socket.generation() != packet.generation
+    {
+        debug!(
+            "dropping a datagram from a retired socket of uplink {}",
+            packet.conn_id
+        );
+        return;
+    }
     if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
         match super::uplink_recv::process_uplink_packet(
             &mut connections[idx],
