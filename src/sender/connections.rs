@@ -668,6 +668,36 @@ mod tests {
         }
     }
 
+    /// An IPv4-mapped IPv6 source (`::ffff:a.b.c.d`) is an IPv4 address in
+    /// IPv6 notation. It gets an IPv4 socket and dials the receiver's IPv4
+    /// answer, so a receiver with only an A record still takes it, and a
+    /// reconnect rebuilds it the same way.
+    #[tokio::test]
+    async fn a_mapped_ipv4_source_dials_the_ipv4_answer() {
+        use crate::net::SourceIpBinder;
+
+        let binder: Arc<dyn UplinkBinder> = Arc::new(SourceIpBinder);
+        let mapped: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        let v4: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let v6: SocketAddr = "[::1]:9000".parse().unwrap();
+        assert_eq!(
+            crate::net::select_remote_for_source(&[v6, v4], mapped).unwrap(),
+            v4
+        );
+
+        let mut io = ConnIoMap::new();
+        let connections =
+            create_connections_from_ips(&[mapped], &[], &[v4], "127.0.0.1", 9000, &binder, &mut io)
+                .await;
+        assert_eq!(connections.len(), 1, "the mapped source must be dialed");
+        let mut conn = connections.into_iter().next().unwrap();
+        let entry = io.get_mut(&conn.conn_id).unwrap();
+        assert_eq!(entry.remote, v4);
+
+        rebuild_uplink_socket(&mut conn, entry, &mut SequenceTracker::new(), 100).unwrap();
+        assert_eq!(entry.remote, v4);
+    }
+
     /// The failure family matching prevents: an IPv4 socket cannot send to an
     /// IPv6 receiver address at all.
     #[cfg(target_os = "linux")]

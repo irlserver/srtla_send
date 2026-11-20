@@ -34,7 +34,9 @@ pub struct SourceIpBinder;
 
 impl UplinkBinder for SourceIpBinder {
     fn bind(&self, sock: &Socket, ip: IpAddr) -> Result<()> {
-        let addr = SocketAddr::new(ip, 0);
+        // An IPv4-mapped source gets an IPv4 socket (see `create_uplink_socket`),
+        // which only binds the plain IPv4 form.
+        let addr = SocketAddr::new(ip.to_canonical(), 0);
         sock.bind(&addr.into()).context("bind socket")
     }
 }
@@ -65,8 +67,11 @@ where
 /// The caller applies an [`UplinkBinder`] and then hands the socket to
 /// `BatchUdpSocket::new` together with the receiver address. The socket is never
 /// connected; see that constructor for why.
+///
+/// An IPv4-mapped IPv6 source (`::ffff:a.b.c.d`) is an IPv4 address and gets an
+/// IPv4 socket, so it reaches IPv4 receivers like any other IPv4 source.
 pub fn create_uplink_socket(domain_for: IpAddr) -> Result<Socket> {
-    let domain = match domain_for {
+    let domain = match domain_for.to_canonical() {
         IpAddr::V4(_) => Domain::IPV4,
         IpAddr::V6(_) => Domain::IPV6,
     };
@@ -111,6 +116,7 @@ pub async fn resolve_remote_all(host: &str, port: u16) -> Result<SmallVec<Socket
 }
 
 /// The first answer in `source`'s address family, keeping DNS order within it.
+/// An IPv4-mapped IPv6 source counts as IPv4.
 ///
 /// A dual-stack receiver answers with both A and AAAA records, and an uplink
 /// socket can only reach the family it was created in: an IPv4 modem handed an
@@ -118,12 +124,13 @@ pub async fn resolve_remote_all(host: &str, port: u16) -> Result<SmallVec<Socket
 /// family assumes the A and AAAA records reach the same receiver group;
 /// reachability is not tested.
 pub fn select_remote_for_source(addrs: &[SocketAddr], source: IpAddr) -> Result<SocketAddr> {
+    let source_is_ipv4 = source.to_canonical().is_ipv4();
     addrs
         .iter()
         .copied()
-        .find(|addr| addr.is_ipv4() == source.is_ipv4())
+        .find(|addr| addr.is_ipv4() == source_is_ipv4)
         .ok_or_else(|| {
-            let family = if source.is_ipv4() { "IPv4" } else { "IPv6" };
+            let family = if source_is_ipv4 { "IPv4" } else { "IPv6" };
             anyhow::anyhow!("receiver has no {family} address for source {source}")
         })
 }
