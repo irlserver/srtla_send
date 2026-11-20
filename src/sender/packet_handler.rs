@@ -131,6 +131,11 @@ pub async fn process_connection_events(
         }
     }
 
+    // The receiver lists a sequence in an SRTLA ACK only on the link the packet
+    // arrived on, so these entries are arrival reports for the arrival link,
+    // whatever the sender's packet logs still hold.
+    connections[idx].note_srtla_ack_arrival(incoming.srtla_ack_numbers.len(), current_time_ms);
+
     for srtla_ack in incoming.srtla_ack_numbers.iter() {
         // Match the arrival link's packet log FIRST. The receiver sends an
         // SRTLA ACK back on the link that delivered the packet, and with

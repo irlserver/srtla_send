@@ -194,6 +194,31 @@ pub struct LinkStats {
     /// `in_flight_cap_packets`). When true and at least one other link
     /// is un-gated, this link is being skipped by Enhanced selection.
     pub in_flight_cap_active: bool,
+
+    // --- Arrival reports (SRTLA ACK entries) ---
+    // The receiver lists a sequence in an SRTLA ACK only on the link the
+    // packet arrived on, so these say which path the receiver heard from.
+    // They are observations, not goodput: the receiver ACKs in batches (10 in
+    // the reference receivers), a lost ACK loses its whole batch, duplicate
+    // ACKs and duplicate arrivals count again, a partial batch on a link that
+    // goes quiet may never be reported, and arrival at the receiver says
+    // nothing about delivery further downstream.
+    /// SRT DATA datagrams queued on this link (first sends, retransmits and
+    /// duplicate probes; forwarded SRT control is not counted). Monotonic for
+    /// the life of this connection object.
+    pub data_packets_queued_total: u64,
+    /// Sequence entries in SRTLA ACKs that arrived on this link while it was
+    /// registered, each entry counted. Monotonic for the life of this
+    /// connection object.
+    pub srtla_ack_entries_total: u64,
+    /// Milliseconds since an SRTLA ACK last arrived on this link in the
+    /// current epoch. Absent before the first one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_srtla_ack_age_ms: Option<u64>,
+    /// Changes when the link's connection is created or its socket replaced,
+    /// and never repeats within the process. Compare the totals and the age
+    /// only between two snapshots with the same epoch.
+    pub srtla_ack_epoch: u64,
 }
 
 /// Aggregate statistics snapshot.
@@ -392,6 +417,10 @@ impl SharedStats {
                 sole_carrier_elections: conn.sole_carrier_elections(),
                 in_flight_cap_packets: in_flight_cap_pkts,
                 in_flight_cap_active,
+                data_packets_queued_total: conn.data_packets_queued_total(),
+                srtla_ack_entries_total: conn.srtla_ack_entries_total(),
+                last_srtla_ack_age_ms: conn.last_srtla_ack_age_ms(current_time_ms),
+                srtla_ack_epoch: conn.srtla_ack_epoch(),
             };
 
             if is_active {
