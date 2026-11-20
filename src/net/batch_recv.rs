@@ -14,6 +14,14 @@
 use srtla_core::connection::BATCH_SEND_SIZE;
 use srtla_protocol::MTU;
 
+/// Source of [`BatchUdpSocket::generation`] values. Starts at 1 so 0 never names
+/// a real socket.
+static NEXT_SOCKET_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_socket_generation() -> u64 {
+    NEXT_SOCKET_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Number of packets to receive in a single `recvmmsg` call.
 /// 32 is a good balance between syscall reduction and memory usage.
 #[cfg(target_os = "linux")]
@@ -71,6 +79,7 @@ mod unix_impl {
     pub struct BatchUdpSocket {
         inner: UdpSocket,
         peer: SockAddr,
+        generation: u64,
     }
 
     impl BatchUdpSocket {
@@ -89,7 +98,15 @@ mod unix_impl {
             Ok(Self {
                 inner: UdpSocket::from_std(socket.into())?,
                 peer: peer.into(),
+                generation: super::next_socket_generation(),
             })
+        }
+
+        /// Process-unique id of this socket. A rebuilt uplink gets a new
+        /// socket and so a new generation, which lets the receive path drop
+        /// datagrams its old socket queued before the rebuild.
+        pub fn generation(&self) -> u64 {
+            self.generation
         }
 
         /// Get the raw file descriptor.
@@ -675,6 +692,7 @@ mod fallback_impl {
     pub struct BatchUdpSocket {
         inner: UdpSocket,
         peer: SocketAddr,
+        generation: u64,
     }
 
     impl BatchUdpSocket {
@@ -688,7 +706,13 @@ mod fallback_impl {
             Ok(Self {
                 inner: UdpSocket::from_std(std_socket)?,
                 peer,
+                generation: super::next_socket_generation(),
             })
+        }
+
+        /// Process-unique id of this socket; see the Linux variant.
+        pub fn generation(&self) -> u64 {
+            self.generation
         }
 
         /// Receive packets (single packet at a time on non-Unix).

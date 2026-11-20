@@ -75,6 +75,7 @@ mod tests {
         async fn receive_on(&mut self, link: usize, data: &[u8]) {
             let packet = UplinkPacket {
                 conn_id: self.connections[link].conn_id,
+                generation: 0,
                 bytes: SmallVec::from_slice_copy(data),
             };
             let client_addr = self.client.local_addr().unwrap();

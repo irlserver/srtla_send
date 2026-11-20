@@ -5,6 +5,9 @@ pub mod connection_tests;
 pub mod registration_tests;
 
 #[cfg(test)]
+pub mod socket_generation_tests;
+
+#[cfg(test)]
 pub mod config_tests;
 
 #[cfg(test)]
@@ -39,3 +42,6 @@ pub mod link_weight_tests;
 
 #[cfg(test)]
 pub mod srt_session_tests;
+
+#[cfg(test)]
+pub mod link_arrival_tests;

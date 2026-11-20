@@ -187,6 +187,45 @@ pub fn render(stats: &SharedStats, config: &DynamicConfig, cw: &CriticalWindow) 
 
     writeln!(
         out,
+        "# HELP srtla_send_link_data_packets_queued_total SRT DATA datagrams queued on the link"
+    )
+    .ok();
+    writeln!(
+        out,
+        "# TYPE srtla_send_link_data_packets_queued_total counter"
+    )
+    .ok();
+    for link in &snap.links {
+        writeln!(
+            out,
+            r#"srtla_send_link_data_packets_queued_total{{ip="{}"}} {}"#,
+            link.ip, link.data_packets_queued_total
+        )
+        .ok();
+    }
+
+    writeln!(
+        out,
+        "# HELP srtla_send_link_srtla_ack_entries_total SRTLA ACK sequence entries that arrived \
+         on the link"
+    )
+    .ok();
+    writeln!(
+        out,
+        "# TYPE srtla_send_link_srtla_ack_entries_total counter"
+    )
+    .ok();
+    for link in &snap.links {
+        writeln!(
+            out,
+            r#"srtla_send_link_srtla_ack_entries_total{{ip="{}"}} {}"#,
+            link.ip, link.srtla_ack_entries_total
+        )
+        .ok();
+    }
+
+    writeln!(
+        out,
         "# HELP srtla_send_link_stall_gate_events cumulative stall-latch engagements"
     )
     .ok();
