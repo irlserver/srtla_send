@@ -254,7 +254,8 @@ uplink to the new address together and re-register from scratch.
   `REHOME_MIN_INTERVAL_MS` (60s), process-wide; the limit covers the DNS probe
   too, since housekeeping ticks every second.
 - **Per-family pick.** Every uplink dials the first answer in its own address
-  family (`net::select_remote_for_source`). Startup resolves the receiver once
+  family (`net::select_remote_for_source`); an IPv4-mapped IPv6 source counts
+  as IPv4 and gets an IPv4 socket. Startup resolves the receiver once
   and every uplink picks from that answer. A reload reuses the address the bond
   is pinned to in each family and looks up only a family the bond lacks (once
   per reload, under the re-home timeout). Re-home picks from its fresh answer.
