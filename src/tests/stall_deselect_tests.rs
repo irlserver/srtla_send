@@ -1010,6 +1010,64 @@ mod tests {
         assert_eq!(conns[1].in_flight_packets, 0);
     }
 
+    #[tokio::test]
+    async fn an_ack_on_another_link_never_proves_a_gated_probe() {
+        // The healthy link 0 carried the unique copy, and a cumulative SRT ACK
+        // already pruned it there by the time its SRTLA ACK arrives (routine:
+        // SRT acks every 10 ms, srtla_rec only every tenth packet). The probe
+        // copy still sits in the dead link 1's probe log. The fallback scan
+        // must not turn link 0's ACK into delivery proof for link 1.
+        use srtla_core::connection::SrtlaIncoming;
+
+        use crate::sender::{SequenceTracker, process_connection_events};
+
+        let mut conns = create_test_connections(2).await;
+        let now = now_ms();
+        let seq: u32 = 4243;
+        let probe = {
+            let mut p = [0u8; 16];
+            p[..4].copy_from_slice(&seq.to_be_bytes());
+            p
+        };
+        conns[1].queue_probe_packet(&probe, seq, now);
+        let _ = conns[1].take_batch(now);
+        conns[1].last_ack_or_rtt_sample_ms = 1;
+        // A payload packet link 1 still owes, which the fallback may settle.
+        conns[1].register_packet(4244, now);
+
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let seq_tracker = SequenceTracker::new();
+        let incoming = SrtlaIncoming {
+            srtla_ack_numbers: smallvec::smallvec![seq, 4244],
+            read_any: true,
+            ..Default::default()
+        };
+        process_connection_events(
+            0,
+            &mut conns,
+            None,
+            &listener,
+            &seq_tracker,
+            false,
+            incoming,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            conns[1].last_ack_or_rtt_sample_ms, 1,
+            "an ACK that came back on link 0 proves nothing about link 1"
+        );
+        assert_eq!(
+            conns[1].in_flight_packets, 0,
+            "accounting still settles the sequence link 1 held"
+        );
+        assert!(
+            conns[1].probe_log.contains_key(&(seq as i32)),
+            "the probe waits for its own ACK on link 1"
+        );
+    }
+
     #[test]
     fn an_srtla_ack_proves_the_link_it_arrived_on() {
         // Link 0 has the much slower return path. The cumulative SRT ACK that
