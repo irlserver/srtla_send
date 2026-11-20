@@ -698,6 +698,98 @@ mod tests {
         assert_eq!(entry.remote, v4);
     }
 
+    /// The written form stays the link's identity, while the socket is bound to
+    /// the plain IPv4 address and its datagrams really reach an IPv4-only
+    /// receiver.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_mapped_ipv4_source_binds_ipv4_and_reaches_an_ipv4_receiver() {
+        use crate::net::SourceIpBinder;
+
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let at = receiver.local_addr().unwrap();
+        let binder: Arc<dyn UplinkBinder> = Arc::new(SourceIpBinder);
+        let mapped: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        let mut io = ConnIoMap::new();
+        let connections = create_connections_from_ips(
+            &[mapped],
+            &[],
+            &[at],
+            "127.0.0.1",
+            at.port(),
+            &binder,
+            &mut io,
+        )
+        .await;
+        assert_eq!(connections.len(), 1);
+        assert_eq!(
+            connections[0].local_ip, mapped,
+            "the written form is the identity"
+        );
+        let entry = &io[&connections[0].conn_id];
+        let local = entry.socket.get_ref().local_addr().unwrap();
+        assert!(local.is_ipv4(), "bound as {local}");
+        entry.socket.send(b"hello").await.unwrap();
+        let mut buf = [0u8; 16];
+        let (n, from) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            receiver.recv_from(&mut buf),
+        )
+        .await
+        .expect("the IPv4 receiver got nothing")
+        .unwrap();
+        assert_eq!(&buf[..n], b"hello");
+        assert_eq!(from.ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    /// A reload that adds a mapped source to an IPv4 bond pins it to the bond's
+    /// IPv4 address without a lookup: the bond already has that family.
+    #[tokio::test]
+    async fn reload_pin_dials_a_mapped_ipv4_source_at_the_bond_address() {
+        let (mut connections, mut conn_io) = pinned_bond().await;
+        let added: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        let new_ips = [connections[0].local_ip, connections[1].local_ip, added];
+        let resolver = super::super::rehome::StubResolver::new(vec![]);
+
+        reload(&mut connections, &mut conn_io, &new_ips, &*resolver).await;
+
+        assert_eq!(connections.len(), 3);
+        assert_eq!(
+            remote_via(&connections, &conn_io, added),
+            Some(bond_remote())
+        );
+        assert_eq!(resolver.calls(), 0, "the bond has an IPv4 address already");
+    }
+
+    /// A reload that adds a mapped source to an IPv6-only bond looks up the
+    /// family new to the bond once, and takes the A record even when the answer
+    /// lists the AAAA record first.
+    #[tokio::test]
+    async fn reload_looks_up_ipv4_for_a_mapped_source_new_to_an_ipv6_bond() {
+        let (mut connections, mut conn_io) = pinned_bond().await;
+        connections.truncate(1);
+        let v6_remote: SocketAddr = "[::1]:7001".parse().unwrap();
+        connections[0].local_ip = "::1".parse().unwrap();
+        connections[0].label = format!("{RELOAD_HOST}:{RELOAD_PORT} via ::1");
+        let id = connections[0].conn_id;
+        conn_io.retain(|k, _| *k == id);
+        conn_io.get_mut(&id).unwrap().remote = v6_remote;
+        let added: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        let resolver = super::super::rehome::StubResolver::new(vec![Some(vec![
+            "[::1]:9999".parse().unwrap(),
+            "127.0.0.1:9999".parse().unwrap(),
+        ])]);
+        let kept = connections[0].local_ip;
+
+        reload(&mut connections, &mut conn_io, &[kept, added], &*resolver).await;
+
+        assert_eq!(resolver.calls(), 1, "IPv4 is new to the bond");
+        assert_eq!(
+            remote_via(&connections, &conn_io, added),
+            Some("127.0.0.1:9999".parse().unwrap())
+        );
+    }
+
     /// The failure family matching prevents: an IPv4 socket cannot send to an
     /// IPv6 receiver address at all.
     #[cfg(target_os = "linux")]
