@@ -1010,6 +1010,120 @@ mod tests {
         assert_eq!(conns[1].in_flight_packets, 0);
     }
 
+    #[test]
+    fn an_srtla_ack_proves_the_link_it_arrived_on() {
+        // Link 0 has the much slower return path. The cumulative SRT ACK that
+        // came back over link 1 already pruned link 0's packet, and a later
+        // retransmit of it went over link 1, so the tracker now names link 1.
+        // Link 0's own SRTLA ACK for it matches nothing there, but still
+        // proves link 0.
+        use srtla_core::connection::SrtlaIncoming;
+
+        use crate::sender::{SequenceTracker, apply_link_feedback};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        let seq: u32 = 500;
+        send_payload(&mut conns[0], seq, 1, now);
+        let mut seq_tracker = SequenceTracker::new();
+        seq_tracker.insert(seq, conns[0].conn_id, now);
+        conns[0].handle_srt_ack(seq as i32, now + 5, false);
+        assert_eq!(conns[0].in_flight_packets, 0);
+        send_payload(&mut conns[1], seq, 1, now + 5);
+        seq_tracker.insert(seq, conns[1].conn_id, now + 5);
+        for c in conns.iter_mut() {
+            c.last_ack_or_rtt_sample_ms = 1;
+        }
+        assert_eq!(conns[0].unproven_sends, 1);
+        let ack = SrtlaIncoming {
+            srtla_ack_numbers: smallvec::smallvec![seq],
+            read_any: true,
+            ..Default::default()
+        };
+
+        apply_link_feedback(0, &mut conns, &seq_tracker, false, &ack, now + 150);
+        assert_eq!(conns[0].last_ack_or_rtt_sample_ms, now + 150);
+        assert_eq!(conns[0].unproven_sends, 0);
+        assert_eq!(
+            conns[1].last_ack_or_rtt_sample_ms, 1,
+            "the arrival link earns the proof, not the link the tracker names"
+        );
+
+        // The same ACK arriving on link 1 is link 1's proof, and only its.
+        conns[0].last_ack_or_rtt_sample_ms = 1;
+        apply_link_feedback(1, &mut conns, &seq_tracker, false, &ack, now + 160);
+        assert_eq!(conns[1].last_ack_or_rtt_sample_ms, now + 160);
+        assert_eq!(conns[0].last_ack_or_rtt_sample_ms, 1);
+    }
+
+    #[test]
+    fn before_reg3_an_unmatched_srtla_ack_proves_nothing_and_a_matched_one_proves_its_packet() {
+        // The parser hands over SRTLA ACK entries for a link the sender has not
+        // seen REG3 for yet. An entry whose packet the log no longer holds must
+        // not stamp the proof the unproven-send rule reads. One that matches a
+        // packet the link sent proves it through the per-sequence path, as it
+        // did before the arrival-link rule. Neither counts as an arrival report.
+        use srtla_core::connection::SrtlaIncoming;
+
+        use crate::sender::{SequenceTracker, apply_link_feedback};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        conns[0].connected = false;
+        conns[0].last_ack_or_rtt_sample_ms = 1;
+        send_payload(&mut conns[0], 500, 1, now);
+        send_payload(&mut conns[0], 600, 1, now);
+        let mut seq_tracker = SequenceTracker::new();
+        seq_tracker.insert(500, conns[0].conn_id, now);
+        seq_tracker.insert(600, conns[0].conn_id, now);
+        // Sequence 500 left the log through a cumulative ACK; 600 is still in it.
+        conns[0].handle_srt_ack(501, now + 5, false);
+        assert_eq!(conns[0].in_flight_packets, 1);
+        let ack = |seq: u32| SrtlaIncoming {
+            srtla_ack_numbers: smallvec::smallvec![seq],
+            read_any: true,
+            ..Default::default()
+        };
+
+        apply_link_feedback(0, &mut conns, &seq_tracker, false, &ack(500), now + 50);
+        assert_eq!(
+            (conns[0].last_ack_or_rtt_sample_ms, conns[0].unproven_sends),
+            (1, 2),
+            "an unmatched ACK before REG3 is no proof"
+        );
+
+        apply_link_feedback(0, &mut conns, &seq_tracker, false, &ack(600), now + 60);
+        assert_eq!(
+            conns[0].in_flight_packets, 0,
+            "a matched ACK before REG3 still settles its packet"
+        );
+        assert_eq!(
+            (conns[0].last_ack_or_rtt_sample_ms, conns[0].unproven_sends),
+            (now + 60, 0),
+            "a matched ACK before REG3 proves the packet it settles"
+        );
+        assert_eq!(
+            (
+                conns[0].srtla_ack_entries_total(),
+                conns[0].last_srtla_ack_age_ms(now + 60)
+            ),
+            (0, None),
+            "no ACK before REG3 is an arrival report"
+        );
+
+        conns[0].connected = true;
+        send_payload(&mut conns[0], 700, 1, now + 70);
+        conns[0].last_ack_or_rtt_sample_ms = 1;
+        apply_link_feedback(0, &mut conns, &seq_tracker, false, &ack(500), now + 80);
+        assert_eq!(
+            (conns[0].last_ack_or_rtt_sample_ms, conns[0].unproven_sends),
+            (now + 80, 0),
+            "once registered, the same unmatched ACK proves the link"
+        );
+    }
+
     // --- Cross-mechanism blackout immunity (librist !375 field lesson,
     // commit 8cf11e11: one leg RTT-muted while the other stalled left the
     // balancer with no carrier at all — a self-sustaining both-legs
@@ -1227,6 +1341,349 @@ mod tests {
             conns[0].stall_gated,
             "after escalation, a single byte must not readmit the link"
         );
+    }
+
+    // --- Unproven sends: payload handed to a link since its last proof ---
+
+    /// Route `n` payload packets onto `conn` through the real send path.
+    fn send_payload(
+        conn: &mut srtla_core::connection::SrtlaConnection,
+        first: u32,
+        n: u32,
+        now: u64,
+    ) {
+        for seq in first..first + n {
+            let mut pkt = [0u8; 16];
+            pkt[..4].copy_from_slice(&seq.to_be_bytes());
+            conn.queue_data_packet(&pkt, Some(seq), now);
+        }
+        let _ = conn.take_batch(now);
+    }
+
+    /// Route `n` payload packets onto `conn` at `at`, then let a cumulative
+    /// SRT ACK (arriving over a sibling) clear them from its log: the link
+    /// owes their proof, but carries no backlog.
+    fn send_drained(
+        conn: &mut srtla_core::connection::SrtlaConnection,
+        first: u32,
+        n: u32,
+        at: u64,
+    ) {
+        send_payload(conn, first, n, at);
+        conn.handle_srt_ack((first + n - 1) as i32, at, false);
+        assert_eq!(conn.in_flight_packets, 0);
+    }
+
+    #[test]
+    fn a_dead_link_drained_by_naks_and_acks_still_stalls() {
+        // The field failure: NAKs and cumulative SRT ACKs reach the sender
+        // over the healthy link and prune the dead link's packet log, so its
+        // backlog never reaches the in-flight threshold. What it was handed
+        // since its last proof does not drain.
+        use srtla_core::config_snapshot::STALL_MIN_UNPROVEN_SENDS;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        conns[0].last_ack_or_rtt_sample_ms = now.saturating_sub(STALL_ACK_STALE_MS + 1000);
+        send_payload(&mut conns[0], 100, STALL_MIN_UNPROVEN_SENDS, now - 1_000);
+        for seq in 100..110 {
+            conns[0].handle_nak(seq, false, now);
+        }
+        conns[0].handle_srt_ack(100 + STALL_MIN_UNPROVEN_SENDS as i32 - 1, now, false);
+        assert_eq!(conns[0].in_flight_packets, 0, "the backlog has drained");
+        make_healthy_busy(&mut conns[1], now);
+
+        let selected = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert_eq!(selected, Some(1));
+        assert!(conns[0].stall_gated, "unproven payload must gate the link");
+        assert!(conns[0].stall_latched());
+    }
+
+    #[test]
+    fn unproven_payload_waits_out_a_late_keepalive_echo() {
+        // A link whose only steady proof is the 1 s keepalive echo: one echo
+        // 100 ms late must not hold it out, one missing echo plus margin must.
+        use srtla_core::config_snapshot::{
+            STALL_MIN_UNPROVEN_SENDS, STALL_UNPROVEN_STALE_FLOOR_MS,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        conns[0].rtt.update_estimate(7, now);
+        send_drained(&mut conns[0], 100, STALL_MIN_UNPROVEN_SENDS, now - 1_000);
+        make_healthy_busy(&mut conns[1], now);
+
+        conns[0].last_ack_or_rtt_sample_ms = now - 1_100;
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(
+            !conns[0].stall_gated,
+            "an echo 100 ms late is jitter, not a dead path"
+        );
+
+        conns[0].last_ack_or_rtt_sample_ms = now - STALL_UNPROVEN_STALE_FLOOR_MS;
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(conns[0].stall_gated);
+    }
+
+    #[test]
+    fn a_pull_on_unproven_sends_alone_waits_for_the_floor_and_releases_on_an_echo() {
+        // Two live 20 ms links. Link 0 sends a full count over 120 ms, link
+        // 1's cumulative ACK clears it at 140 ms, then link 0's return traffic
+        // pauses until a keepalive echo at 1.1 s. The fast pull may take it out
+        // for that gap, but the gap is not a dead path: no latch, and the echo
+        // gives it back at once.
+        use srtla_core::config_snapshot::STALL_MIN_UNPROVEN_SENDS;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let t = now_ms();
+        conns[0].rtt.update_estimate(20, t);
+        conns[0].last_ack_or_rtt_sample_ms = t;
+        for i in 0..STALL_MIN_UNPROVEN_SENDS {
+            send_payload(
+                &mut conns[0],
+                100 + i,
+                1,
+                t + (i as u64 * 120) / STALL_MIN_UNPROVEN_SENDS as u64,
+            );
+        }
+        conns[0].handle_srt_ack((100 + STALL_MIN_UNPROVEN_SENDS - 1) as i32, t + 140, false);
+        conns[0].last_received = Some(t + 140);
+        assert_eq!(conns[0].in_flight_packets, 0);
+
+        let select_at = |conns: &mut smallvec::SmallVec<_, 4>, at: u64| {
+            make_healthy_busy(&mut conns[1], at);
+            conns[1].last_received = Some(at);
+            let _ = select_connection_idx(conns, None, at, &enhanced());
+        };
+        select_at(&mut conns, t + 400);
+        assert!(
+            conns[0].stall_gated,
+            "the fast pull takes the silent link out"
+        );
+        assert_eq!(conns[0].silence_pulls(), 1);
+
+        select_at(&mut conns, t + 1_000);
+        assert!(
+            !conns[0].stall_latched(),
+            "a pull on unproven sends alone must not latch before the floor"
+        );
+
+        let ka = conns[0].keepalive_packet(t + 1_080);
+        conns[0].handle_keepalive_echo(&ka, t + 1_100);
+        conns[0].last_received = Some(t + 1_100);
+        select_at(&mut conns, t + 1_100);
+        assert!(!conns[0].stall_gated, "the echo gives the link back");
+        assert_eq!(conns[0].stall_gate_events(), 0);
+        assert_eq!(conns[0].silence_pulls(), 1);
+    }
+
+    #[test]
+    fn a_pull_on_a_full_backlog_keeps_the_rtt_window_after_draining() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let t = now_ms();
+        conns[0].rtt.update_estimate(20, t);
+        conns[0].last_ack_or_rtt_sample_ms = t;
+        send_payload(&mut conns[0], 100, STALL_MIN_IN_FLIGHT_PACKETS as u32, t);
+        conns[0].last_received = Some(t);
+        make_healthy_busy(&mut conns[1], t + 300);
+        conns[1].last_received = Some(t + 300);
+        let _ = select_connection_idx(&mut conns, None, t + 300, &enhanced());
+        assert!(conns[0].stall_gated);
+
+        conns[0].handle_srt_ack(100 + STALL_MIN_IN_FLIGHT_PACKETS - 1, t + 500, false);
+        make_healthy_busy(&mut conns[1], t + 1_000);
+        conns[1].last_received = Some(t + 1_000);
+        let _ = select_connection_idx(&mut conns, None, t + 1_000, &enhanced());
+        assert!(
+            conns[0].stall_latched(),
+            "a backlog pull still escalates once proof is one staleness window old"
+        );
+    }
+
+    #[test]
+    fn a_burst_on_a_quiet_link_waits_one_feedback_round_trip() {
+        // A low-share 50 ms link lost its last keepalive echo (proof 1.6 s
+        // old) and is handed a keyframe burst. No ACK for the burst can be
+        // back yet, so it must not count until a round trip (and the margin)
+        // has passed; after that, with still no proof, it does.
+        use srtla_core::config_snapshot::{
+            STALL_MIN_UNPROVEN_SENDS, STALL_UNPROVEN_FEEDBACK_RTT_MULT,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let t = now_ms();
+        conns[0].rtt.update_estimate(50, t - 2_000);
+        conns[0].last_ack_or_rtt_sample_ms = t - 1_600;
+        send_drained(&mut conns[0], 100, STALL_MIN_UNPROVEN_SENDS, t);
+        let select_at = |conns: &mut smallvec::SmallVec<_, 4>, at: u64| {
+            make_healthy_busy(&mut conns[1], at);
+            conns[0].last_received = Some(at);
+            conns[1].last_received = Some(at);
+            let _ = select_connection_idx(conns, None, at, &enhanced());
+        };
+
+        select_at(&mut conns, t + 1);
+        assert!(
+            !conns[0].stall_gated,
+            "the burst cannot have been answered yet"
+        );
+        let rtt = conns[0].get_smooth_rtt_ms() as u64;
+        select_at(&mut conns, t + rtt * STALL_UNPROVEN_FEEDBACK_RTT_MULT + 1);
+        assert!(
+            conns[0].stall_latched(),
+            "unanswered after a round trip, it counts"
+        );
+    }
+
+    #[test]
+    fn a_short_stale_override_does_not_shorten_the_unproven_floor() {
+        // `--stall-ack-stale-ms 750` caps the backlog window, not the
+        // unproven-send floor.
+        use srtla_core::config_snapshot::{
+            STALL_MIN_UNPROVEN_SENDS, STALL_UNPROVEN_STALE_FLOOR_MS,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        conns[0].rtt.update_estimate(7, now - 2_000);
+        send_drained(&mut conns[0], 100, STALL_MIN_UNPROVEN_SENDS, now - 1_400);
+        make_healthy_busy(&mut conns[1], now);
+        let short = ConfigSnapshot {
+            stall_ack_stale_ms: 750,
+            ..enhanced()
+        };
+
+        conns[0].last_ack_or_rtt_sample_ms = now - 1_000;
+        let _ = select_connection_idx(&mut conns, None, now, &short);
+        assert!(!conns[0].stall_gated);
+
+        conns[0].last_ack_or_rtt_sample_ms = now - STALL_UNPROVEN_STALE_FLOOR_MS;
+        let _ = select_connection_idx(&mut conns, None, now, &short);
+        assert!(conns[0].stall_gated);
+    }
+
+    #[test]
+    fn fewer_unproven_sends_than_the_threshold_do_not_stall() {
+        use srtla_core::config_snapshot::STALL_MIN_UNPROVEN_SENDS;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        conns[0].last_ack_or_rtt_sample_ms = now.saturating_sub(STALL_ACK_STALE_MS + 1000);
+        send_drained(
+            &mut conns[0],
+            100,
+            STALL_MIN_UNPROVEN_SENDS - 1,
+            now - 1_000,
+        );
+        make_healthy_busy(&mut conns[1], now);
+
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(!conns[0].stall_gated);
+        assert_eq!(conns[0].stall_gate_events(), 0);
+    }
+
+    #[test]
+    fn any_delivery_proof_clears_the_unproven_count() {
+        use srtla_core::config_snapshot::STALL_MIN_UNPROVEN_SENDS;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+
+        // A keepalive echo.
+        send_payload(&mut conns[0], 100, STALL_MIN_UNPROVEN_SENDS, now - 1_000);
+        let ka = conns[0].keepalive_packet(now);
+        conns[0].handle_keepalive_echo(&ka, now + 5);
+        assert_eq!(conns[0].unproven_sends, 0);
+
+        // An SRTLA ACK for a packet this link carried.
+        send_payload(&mut conns[0], 200, STALL_MIN_UNPROVEN_SENDS, now);
+        assert!(conns[0].handle_srtla_ack_specific(210, false, now + 5));
+        assert_eq!(conns[0].unproven_sends, 0);
+
+        // NAKs, cumulative ACKs and ACKs that came back on another link are
+        // not proof and leave the count alone.
+        send_payload(&mut conns[0], 300, STALL_MIN_UNPROVEN_SENDS, now);
+        conns[0].handle_nak(300, false, now);
+        conns[0].handle_srt_ack(305, now, true);
+        assert!(conns[0].handle_srtla_ack_foreign(310));
+        assert_eq!(conns[0].unproven_sends, STALL_MIN_UNPROVEN_SENDS);
+    }
+
+    #[test]
+    fn probes_on_a_gated_link_are_not_unproven_payload() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        let now = now_ms();
+        for seq in 0..100u32 {
+            let mut pkt = [0u8; 16];
+            pkt[..4].copy_from_slice(&seq.to_be_bytes());
+            conns[0].queue_probe_packet(&pkt, seq, now);
+        }
+        let _ = conns[0].take_batch(now);
+        assert_eq!(conns[0].unproven_sends, 0);
+    }
+
+    #[test]
+    fn a_link_reset_forgets_its_unproven_sends() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(1));
+        send_payload(&mut conns[0], 0, 50, now_ms());
+        conns[0].mark_for_recovery();
+        assert_eq!(conns[0].unproven_sends, 0);
+    }
+
+    #[test]
+    fn registration_clears_unproven_sends() {
+        // The shell can forward payload before REG3. Those packets owe no
+        // proof once the link registers: a freshly warming link with nothing
+        // in flight must not be pulled for them.
+        use srtla_core::config_snapshot::STALL_MIN_UNPROVEN_SENDS;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let t = now_ms();
+        send_payload(&mut conns[0], 100, STALL_MIN_UNPROVEN_SENDS, t - 1_000);
+        conns[0].clear_pre_registration_state(t - 500);
+        assert_eq!(conns[0].unproven_sends, 0);
+        conns[0].last_received = Some(t - 251);
+        make_healthy_busy(&mut conns[1], t);
+        conns[1].last_received = Some(t);
+        let _ = select_connection_idx(&mut conns, None, t, &enhanced());
+        assert_eq!(conns[0].silence_pulls(), 0);
+        assert!(!conns[0].stall_gated);
+    }
+
+    #[test]
+    fn a_silent_link_with_unproven_payload_is_pulled() {
+        // A full blackhole: nothing at all comes back, and the backlog has
+        // been drained by NAKs arriving over the healthy link.
+        use srtla_core::config_snapshot::STALL_MIN_UNPROVEN_SENDS;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut conns = rt.block_on(create_test_connections(2));
+        let now = now_ms();
+        conns[0].last_ack_or_rtt_sample_ms = now;
+        conns[0].last_received = Some(now - 300);
+        send_payload(&mut conns[0], 100, STALL_MIN_UNPROVEN_SENDS, now - 1_000);
+        for seq in 100..100 + STALL_MIN_UNPROVEN_SENDS as i32 {
+            conns[0].handle_nak(seq, false, now);
+        }
+        make_healthy_busy(&mut conns[1], now);
+
+        let _ = select_connection_idx(&mut conns, None, now, &enhanced());
+        assert!(
+            conns[0].stall_gated,
+            "a mute link owed proof must be pulled"
+        );
+        assert_eq!(conns[0].silence_pulls(), 1);
     }
 
     // --- Runtime-scaled liveness timeout (librist c7a578d1's slow half) ---

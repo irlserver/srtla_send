@@ -33,7 +33,9 @@ pub(crate) use packet_handler::handle_uplink_packet;
 // Re-exported for the NAK-attribution conformance tests so they drive the real
 // production path rather than a mirrored copy.
 #[cfg(test)]
-pub(crate) use packet_handler::{attribute_nak, note_srt_session_start, process_connection_events};
+pub(crate) use packet_handler::{
+    apply_link_feedback, attribute_nak, note_srt_session_start, process_connection_events,
+};
 use packet_handler::{drain_packet_queue, flush_all_batches, handle_srt_packet};
 // Scripted resolver seam for tests that drive the re-home trigger policy.
 #[cfg(any(test, feature = "test-internals"))]

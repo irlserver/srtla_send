@@ -87,21 +87,24 @@ struct Cli {
     no_quality: bool,
 
     /// Disable the stalled-link deselect guard (on by default). The guard skips
-    /// a link whose in-flight backlog is high while its last delivery proof has
-    /// gone stale, provided a healthier link can carry the traffic. While
+    /// a link whose in-flight backlog is high, or that was handed 50 payload
+    /// packets since its last delivery proof, while that proof has gone stale,
+    /// provided a healthier link can carry the traffic. While
     /// gated the link carries keepalives plus a sparse duplicate-packet probe
     /// trickle; it rejoins after delivery proof has been sustained for the
     /// rejoin dwell (quick to drop, conservative to rejoin).
     #[arg(long = "no-stall-deselect")]
     no_stall_deselect: bool,
     /// In-flight packet backlog at or above which a link becomes a stall
-    /// candidate for `--no-stall-deselect`.
+    /// candidate for `--no-stall-deselect`. A link handed 50 payload packets
+    /// since its last delivery proof is a candidate whatever its backlog.
     #[arg(long = "stall-min-in-flight", default_value_t = config::STALL_MIN_IN_FLIGHT_PACKETS)]
     stall_min_in_flight: i32,
     /// Ceiling (ms) on the delivery-proof staleness window after which a
     /// stall-candidate link is deselected. The effective window is
     /// RTT-adaptive (4x smoothed RTT, floored at 1000 ms) and this value caps
-    /// it; links without an RTT baseline use the ceiling directly.
+    /// it; links without an RTT baseline use the ceiling directly. The
+    /// 50-packet condition waits for the larger of that window and 1500 ms.
     #[arg(long = "stall-ack-stale-ms", default_value_t = config::STALL_ACK_STALE_MS)]
     stall_ack_stale_ms: u64,
     /// Per-link liveness timeout (ms): silence past this tears the link down
