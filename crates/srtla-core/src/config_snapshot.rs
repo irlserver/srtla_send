@@ -11,6 +11,52 @@ use crate::mode::SchedulingMode;
 /// under the `stall_deselect` guard (default on).
 pub const STALL_MIN_IN_FLIGHT_PACKETS: i32 = 32;
 
+/// How many data packets the receiver takes in on one link before it answers
+/// with an SRTLA ACK (`RECV_ACK_INT` in `srtla_rec`). Any ten consecutive
+/// packets a link delivers produce at least one ACK on that link.
+pub const RECEIVER_ACK_INTERVAL_PACKETS: u32 = 10;
+
+/// Payload packets a link may be handed after its last delivery proof before
+/// it is a stall candidate, whatever its in-flight backlog.
+///
+/// The backlog alone cannot see a dead path at moderate rates: NAKs and
+/// cumulative SRT ACKs, both of which reach the sender over the healthy links,
+/// prune the dead link's packet log within a round trip, so its in-flight
+/// count stays far below [`STALL_MIN_IN_FLIGHT_PACKETS`] while every packet it
+/// carries is lost. This counter only resets on proof the link itself earned.
+///
+/// Five receiver ACK intervals. A live link earns an SRTLA ACK for every ten
+/// packets it delivers and a keepalive echo once a second, so reaching this
+/// count with [`STALL_UNPROVEN_STALE_FLOOR_MS`] elapsed takes a keepalive echo
+/// and several SRTLA ACKs in a row going missing. With fewer, a link carrying
+/// 15 to 30 packets/s with a few percent loss on both links could be held out
+/// on one lost echo and two lost ACKs, because at that rate the count and the
+/// floor are reached at about the same time. A dead link is not caught later
+/// at higher rates: the retransmits routed to it fill the count quickly.
+pub const STALL_MIN_UNPROVEN_SENDS: u32 = 5 * RECEIVER_ACK_INTERVAL_PACKETS;
+
+/// Floor (ms) on the staleness window for the unproven-send arm of the stall
+/// signal: one keepalive period plus half of one.
+///
+/// A link that carries little payload may have the keepalive echo as its only
+/// steady proof, and echoes arrive a keepalive period apart plus round-trip
+/// and timer jitter. A window equal to that period gated such links on jitter
+/// alone. The margin matches [`STALL_REJOIN_PROOF_FLOOR_MS`], which judges a
+/// held-out link on the same echoes. It costs about half a second of detection
+/// against the 1 s RTT-scaled floor: a dead link is held out about 1.5 s after
+/// its last proof. The backlog arm keeps the RTT-scaled window.
+pub const STALL_UNPROVEN_STALE_FLOOR_MS: u64 = srtla_protocol::IDLE_TIME * 1000 + 500;
+
+/// Time a burst of unproven sends must have had to draw feedback before it
+/// counts: this multiple of the smoothed RTT, measured from the oldest
+/// unproven send, and at least [`STALL_UNPROVEN_FEEDBACK_FLOOR_MS`]. One
+/// round trip plus the same again for the receiver's ACK batching and jitter.
+pub const STALL_UNPROVEN_FEEDBACK_RTT_MULT: u64 = 2;
+
+/// Floor (ms) on that feedback time, for links with a very short or not yet
+/// measured round trip.
+pub const STALL_UNPROVEN_FEEDBACK_FLOOR_MS: u64 = 100;
+
 /// Ceiling (ms) on the delivery-proof staleness window under
 /// `stall_deselect`. The effective window is RTT-adaptive —
 /// `clamp(STALL_STALE_RTT_MULT x smoothed RTT, STALL_STALE_FLOOR_MS, this)` —

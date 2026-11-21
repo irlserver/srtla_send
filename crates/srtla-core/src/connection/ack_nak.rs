@@ -202,7 +202,7 @@ impl SrtlaConnection {
         // release. Checked first — the sweep-proof log is where a slow link's
         // probes actually survive to be answered.
         if let Some(probe) = self.probe_log.remove(&seq) {
-            self.last_ack_or_rtt_sample_ms = now_ms;
+            self.note_delivery_proof(now_ms);
             // A sequence probed twice on this link has no unambiguous send time.
             if !probe.ambiguous {
                 self.rtt.record_round_trip(probe.sent_ms, now_ms);
@@ -218,7 +218,7 @@ impl SrtlaConnection {
         // later sequence on this link, while the pending one never shows up,
         // proves it was lost here, because one link delivers in order.
         if let Some(pending) = self.pending_naks.remove(&seq) {
-            self.last_ack_or_rtt_sample_ms = now_ms;
+            self.note_delivery_proof(now_ms);
             // A resend logged after the NAK makes the ACK ambiguous between
             // the two copies, so it yields no round trip.
             if self.packet_log.remove(&seq).is_some() {
@@ -236,10 +236,11 @@ impl SrtlaConnection {
             self.in_flight_packets = self.packet_log.len() as i32;
 
             // Delivery proof for `stall_deselect`: this link OWNED the acked seq,
-            // the strongest per-link proof it is still moving data. Stamped here
-            // and at the keepalive-RTT site only (see `packet_io.rs`), never on
-            // generic inbound bytes, so a stalled-but-echoing link stays stale.
-            self.last_ack_or_rtt_sample_ms = now_ms;
+            // the strongest per-link proof it is still moving data. The other
+            // proof sites are an SRTLA ACK arriving on a registered link
+            // (`note_srtla_ack_proof`) and a keepalive echo
+            // (`handle_keepalive_echo`), never generic inbound bytes.
+            self.note_delivery_proof(now_ms);
 
             // ...and the same ACK is a per-link round trip: we sent this exact
             // sequence on this exact socket and the receiver acknowledged it
