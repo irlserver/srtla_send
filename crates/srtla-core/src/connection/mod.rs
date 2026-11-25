@@ -8,14 +8,13 @@ mod rtt;
 
 use std::net::IpAddr;
 
-pub use batch_send::{BATCH_SEND_SIZE, BatchSender, DrainedPacket};
+pub use batch_send::{BATCH_SEND_SIZE, BatchSender, DrainedBatch, DrainedPacket};
 pub use bitrate::BitrateTracker;
 pub use congestion::CongestionControl;
 pub use incoming::SrtlaIncoming;
 pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
 use srtla_protocol::*;
 use tracing::debug;
 
@@ -755,6 +754,12 @@ impl SrtlaConnection {
         self.batch_sender.has_queued_packets()
     }
 
+    /// Check if there are any pending NAKs awaiting timeout or SRTLA ACK settlement.
+    #[inline]
+    pub fn has_pending_naks(&self) -> bool {
+        !self.pending_naks.is_empty()
+    }
+
     /// Drain the batch queue for transmission.
     ///
     /// Pure builder: registers each tracked packet as in-flight and returns the
@@ -774,17 +779,17 @@ impl SrtlaConnection {
     /// Does **not** stamp `last_sent`: that records when bytes actually reached
     /// the socket, so the shell stamps it with [`Self::note_sent`] once the I/O
     /// is confirmed. Empty when nothing was queued.
-    pub fn take_batch(&mut self, now: u64) -> SmallVec<DrainedPacket, 32> {
+    pub fn take_batch(&mut self, now: u64) -> DrainedBatch {
         let batch = self.batch_sender.drain(now);
         if batch.is_empty() {
             return batch;
         }
-        for (data, seq, send_time_ms) in &batch {
+        for (data, seq, send_time_ms) in batch.iter() {
             if let Some(s) = seq {
-                let seq = *s as i32;
-                self.register_packet(seq, *send_time_ms);
+                let seq = s as i32;
+                self.register_packet(seq, send_time_ms);
                 if self.unproven_sends == 0 {
-                    self.first_unproven_send_ms = *send_time_ms;
+                    self.first_unproven_send_ms = send_time_ms;
                 }
                 self.unproven_sends = self.unproven_sends.saturating_add(1);
                 // A NAK usually clears the original from the log before SRT
@@ -796,6 +801,13 @@ impl SrtlaConnection {
             }
         }
         batch
+    }
+
+    /// Return a drained batch's backing buffers to this connection's `BatchSender`
+    /// so subsequent flushes reuse the allocation without hitting the allocator.
+    #[inline]
+    pub fn recycle_batch(&mut self, batch: DrainedBatch) {
+        self.batch_sender.recycle(batch);
     }
 
     /// Build an extended keepalive packet and record that it was sent.

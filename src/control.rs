@@ -375,10 +375,9 @@ fn handle_method(
         "get_stats" => {
             let stats = stats
                 .ok_or_else(|| ErrorObject::new(INTERNAL_ERROR, "stats provider not registered"))?;
-            let json_str = stats.to_json();
-            serde_json::from_str(&json_str).map_err(|e| ErrorObject {
+            serde_json::to_value(stats.get()).map_err(|e| ErrorObject {
                 code: INTERNAL_ERROR,
-                message: "failed to re-parse stats JSON".into(),
+                message: "failed to serialize stats".into(),
                 data: Some(Value::String(e.to_string())),
             })
         }

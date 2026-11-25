@@ -55,7 +55,9 @@ pub fn spawn_listener(
                         );
                     }
                     trace!(window_ms = applied_ms, "critical window extended");
-                    if let Some(ref hub) = hub {
+                    if let Some(ref hub) = hub
+                        && hub.has_subscribers()
+                    {
                         hub.publish(
                             "priority.window",
                             serde_json::json!({

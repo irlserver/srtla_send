@@ -1,11 +1,12 @@
-//! Zero-allocation sequence tracking using a fixed-size ring buffer.
+//! Zero-allocation-per-packet sequence tracking using a fixed-size ring buffer.
 //!
-//! This replaces the HashMap + VecDeque approach with a fixed array indexed
-//! by sequence number modulo, providing:
-//! - Zero allocations in hot path
-//! - O(1) insert and lookup
-//! - Cache-friendly sequential memory access
-//! - No cleanup needed (old entries naturally overwritten)
+//! Indexes directly by sequence number modulo buffer size, providing:
+//! - O(1) insert, lookup, and connection removal
+//! - Cache-friendly 16-byte entries (4 per 64-byte cache line)
+//! - Lazy direct-heap allocation so idle instances use no ring memory
+//! - No periodic cleanup needed (old entries are overwritten on wraparound)
+
+use smallvec::SmallVec;
 
 /// Size of the sequence tracking ring buffer (power of 2 for fast modulo).
 /// 16384 entries covers ~5 seconds at 3000 packets/sec.
@@ -17,15 +18,15 @@ const SEQ_TRACKING_MASK: usize = SEQ_TRACKING_SIZE - 1;
 /// Maximum age in milliseconds for a sequence tracking entry to be valid.
 pub const SEQUENCE_TRACKING_MAX_AGE_MS: u64 = 5000;
 
-/// A single entry in the sequence tracking ring buffer.
+/// A single 16-byte entry in the sequence tracking ring buffer.
 #[derive(Clone, Copy, Default)]
 pub struct SequenceTrackingEntry {
-    /// The connection ID that sent this packet. 0 = empty/invalid.
-    pub conn_id: u64,
     /// Timestamp when the packet was sent (milliseconds since epoch).
     pub timestamp_ms: u64,
     /// The actual sequence number stored (for collision detection).
     seq: u32,
+    /// 1-based slot into `SequenceTracker::conn_ids`. 0 = empty/invalid.
+    conn_slot: u16,
 }
 
 impl SequenceTrackingEntry {
@@ -38,20 +39,24 @@ impl SequenceTrackingEntry {
     /// Check if this entry is valid (non-empty and not expired).
     #[inline]
     fn is_valid(&self, seq: u32, current_time_ms: u64) -> bool {
-        self.conn_id != 0 && self.seq == seq && !self.is_expired(current_time_ms)
+        self.conn_slot != 0 && self.seq == seq && !self.is_expired(current_time_ms)
     }
 }
 
-/// Zero-allocation sequence tracker using a fixed-size ring buffer.
+/// Sequence tracker using a lazily allocated fixed-size ring buffer.
 ///
 /// Uses the sequence number modulo buffer size as the index.
 /// Collisions are handled by storing the actual sequence number and
 /// checking it on lookup. Stale entries are detected by timestamp.
+/// Connection IDs are interned to compact 16-bit slots so entries stay 16 bytes
+/// and connection removal is O(1).
 #[allow(clippy::len_without_is_empty)]
 pub struct SequenceTracker {
-    entries: Box<[SequenceTrackingEntry; SEQ_TRACKING_SIZE]>,
-    /// Number of valid (non-expired) entries - approximate, for logging only.
-    count: usize,
+    entries: Option<Box<[SequenceTrackingEntry]>>,
+    /// Maps `(slot - 1)` to the owning `conn_id`, or `0` once invalidated.
+    conn_ids: Vec<u64>,
+    /// Currently active `(conn_id, slot)` pairs (typically 2-6 uplinks).
+    active_slots: SmallVec<(u64, u16), 8>,
 }
 
 impl Default for SequenceTracker {
@@ -61,60 +66,83 @@ impl Default for SequenceTracker {
 }
 
 impl SequenceTracker {
-    /// Create a new empty sequence tracker.
+    /// Create a new empty sequence tracker (allocates ring lazily on first insert).
     pub fn new() -> Self {
         Self {
-            entries: Box::new([SequenceTrackingEntry::default(); SEQ_TRACKING_SIZE]),
-            count: 0,
+            entries: None,
+            conn_ids: Vec::new(),
+            active_slots: SmallVec::new(),
         }
     }
 
+    #[inline]
+    fn slot_for(&mut self, conn_id: u64) -> u16 {
+        if let Some(&(_, slot)) = self.active_slots.iter().find(|&&(id, _)| id == conn_id) {
+            return slot;
+        }
+        if self.conn_ids.len() >= u16::MAX as usize {
+            // Saturated all 65,535 historical slots: clear the ring and compact
+            // active connections down to slots 1..=active.
+            if let Some(entries) = self.entries.as_deref_mut() {
+                entries.fill(SequenceTrackingEntry::default());
+            }
+            self.conn_ids.clear();
+            for (idx, (id, slot)) in self.active_slots.iter_mut().enumerate() {
+                self.conn_ids.push(*id);
+                *slot = (idx + 1) as u16;
+            }
+        }
+        self.conn_ids.push(conn_id);
+        let slot = self.conn_ids.len() as u16;
+        self.active_slots.push((conn_id, slot));
+        slot
+    }
+
     /// Insert a sequence number mapping.
-    ///
-    /// This is O(1) and never allocates.
     #[inline]
     pub fn insert(&mut self, seq: u32, conn_id: u64, timestamp_ms: u64) {
-        let idx = (seq as usize) & SEQ_TRACKING_MASK;
-        let entry = &mut self.entries[idx];
-
-        // Track approximate count (for logging purposes only)
-        if entry.conn_id == 0 {
-            self.count = self.count.saturating_add(1);
+        if conn_id == 0 {
+            return;
         }
-
-        *entry = SequenceTrackingEntry {
-            conn_id,
+        let conn_slot = self.slot_for(conn_id);
+        let entries = self.entries.get_or_insert_with(|| {
+            vec![SequenceTrackingEntry::default(); SEQ_TRACKING_SIZE].into_boxed_slice()
+        });
+        let idx = (seq as usize) & SEQ_TRACKING_MASK;
+        entries[idx] = SequenceTrackingEntry {
             timestamp_ms,
             seq,
+            conn_slot,
         };
     }
 
     /// Look up a sequence number and return the connection ID if valid.
     ///
     /// Returns None if:
-    /// - Entry is empty (conn_id == 0)
+    /// - Entry is empty (conn_slot == 0)
     /// - Entry has a different sequence number (collision)
     /// - Entry has expired
+    /// - The owning connection was removed
     #[inline]
     pub fn get(&self, seq: u32, current_time_ms: u64) -> Option<u64> {
+        let entries = self.entries.as_deref()?;
         let idx = (seq as usize) & SEQ_TRACKING_MASK;
-        let entry = &self.entries[idx];
+        let entry = &entries[idx];
 
         if entry.is_valid(seq, current_time_ms) {
-            Some(entry.conn_id)
+            let conn_id = *self.conn_ids.get((entry.conn_slot - 1) as usize)?;
+            (conn_id != 0).then_some(conn_id)
         } else {
             None
         }
     }
 
-    /// Remove entries for a specific connection ID.
-    ///
-    /// This is O(n) but only called during connection removal, not in hot path.
+    /// Remove entries for a specific connection ID in O(1).
     pub fn remove_connection(&mut self, conn_id: u64) {
-        for entry in self.entries.iter_mut() {
-            if entry.conn_id == conn_id {
-                *entry = SequenceTrackingEntry::default();
-                self.count = self.count.saturating_sub(1);
+        if let Some(pos) = self.active_slots.iter().position(|&(id, _)| id == conn_id) {
+            let (_, slot) = self.active_slots.swap_remove(pos);
+            if let Some(id_slot) = self.conn_ids.get_mut((slot - 1) as usize) {
+                *id_slot = 0;
             }
         }
     }

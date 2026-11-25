@@ -114,33 +114,23 @@ mod unix_impl {
             self.inner.as_raw_fd()
         }
 
-        /// Poll for readability and receive multiple packets.
+        /// Poll for readability and receive multiple packets (with source addresses).
         pub fn poll_recv_batch(
             &self,
             cx: &mut Context<'_>,
             buffer: &mut RecvMmsgBuffer,
         ) -> Poll<std::io::Result<usize>> {
-            loop {
-                ready!(self.inner.poll_recv_ready(cx))?;
+            poll_udp_recv_batch(&self.inner, cx, buffer, true)
+        }
 
-                let fd = self.as_raw_fd();
-                match self
-                    .inner
-                    .try_io(Interest::READABLE, || buffer.recvmmsg(fd))
-                {
-                    Ok(count) => return Poll::Ready(Ok(count)),
-                    Err(e) => match recv_retry_action(&e) {
-                        // EINTR: re-issue without dropping readiness (the fd is
-                        // still ready, so the next poll returns immediately). A
-                        // signal — e.g. our own SIGHUP — must not kill the reader.
-                        RecvAction::Retry => continue,
-                        // `try_io` already cleared readiness, so the next poll
-                        // parks until the reactor reports the fd readable.
-                        RecvAction::WouldBlock => continue,
-                        RecvAction::Hard => return Poll::Ready(Err(e)),
-                    },
-                }
-            }
+        /// Poll for readability and receive multiple packets without copying
+        /// source addresses out of the kernel.
+        pub fn poll_recv_batch_no_addr(
+            &self,
+            cx: &mut Context<'_>,
+            buffer: &mut RecvMmsgBuffer,
+        ) -> Poll<std::io::Result<usize>> {
+            poll_udp_recv_batch(&self.inner, cx, buffer, false)
         }
 
         /// Receive multiple packets asynchronously.
@@ -149,6 +139,17 @@ mod unix_impl {
         /// via `buffer.iter()`.
         pub async fn recv_batch(&self, buffer: &mut RecvMmsgBuffer) -> std::io::Result<usize> {
             std::future::poll_fn(|cx| self.poll_recv_batch(cx, buffer)).await
+        }
+
+        /// Receive multiple packets asynchronously without decoding source addresses.
+        ///
+        /// Returns the number of packets received. Packets can be accessed via
+        /// `buffer.iter_payloads()`.
+        pub async fn recv_batch_no_addr(
+            &self,
+            buffer: &mut RecvMmsgBuffer,
+        ) -> std::io::Result<usize> {
+            std::future::poll_fn(|cx| self.poll_recv_batch_no_addr(cx, buffer)).await
         }
 
         /// Send data to the peer asynchronously.
@@ -203,26 +204,30 @@ mod unix_impl {
                 return Ok(0);
             }
 
-            // SAFETY: `mmsghdr` and `iovec` are plain C structs whose all-zero
-            // bit pattern is a valid (empty) message; every field we rely on is
-            // overwritten below before the syscall reads it.
-            let mut iov: [libc::iovec; BATCH_SEND_SIZE] = unsafe { std::mem::zeroed() };
-            let mut msgs: [libc::mmsghdr; BATCH_SEND_SIZE] = unsafe { std::mem::zeroed() };
+            // Only initialize the `0..n` slots we actually send.
+            let mut iov: [std::mem::MaybeUninit<libc::iovec>; BATCH_SEND_SIZE] =
+                [const { std::mem::MaybeUninit::uninit() }; BATCH_SEND_SIZE];
+            let mut msgs: [std::mem::MaybeUninit<libc::mmsghdr>; BATCH_SEND_SIZE] =
+                [const { std::mem::MaybeUninit::uninit() }; BATCH_SEND_SIZE];
 
             for i in 0..n {
-                iov[i] = libc::iovec {
+                let iov_ptr = iov[i].write(libc::iovec {
                     // sendmmsg only reads through this pointer; the cast to
                     // *mut is required by the C signature, not by us.
                     iov_base: bufs[i].as_ptr() as *mut libc::c_void,
                     iov_len: bufs[i].len(),
-                };
+                });
+                // SAFETY: `mmsghdr` is a plain C struct whose all-zero bit
+                // pattern is valid; every field we rely on is populated below.
+                let mut msg: libc::mmsghdr = unsafe { std::mem::zeroed() };
                 // The socket is unconnected, so every datagram carries its
                 // destination. `sendmmsg` only reads through msg_name; the cast
                 // to *mut is required by the C signature.
-                msgs[i].msg_hdr.msg_name = self.peer.as_ptr() as *mut libc::c_void;
-                msgs[i].msg_hdr.msg_namelen = self.peer.len();
-                msgs[i].msg_hdr.msg_iov = std::ptr::addr_of_mut!(iov[i]);
-                msgs[i].msg_hdr.msg_iovlen = 1;
+                msg.msg_hdr.msg_name = self.peer.as_ptr() as *mut libc::c_void;
+                msg.msg_hdr.msg_namelen = self.peer.len();
+                msg.msg_hdr.msg_iov = iov_ptr;
+                msg.msg_hdr.msg_iovlen = 1;
+                msgs[i].write(msg);
             }
 
             // SAFETY: `msgs[..n]` is initialised above and each `msg_iov` points
@@ -231,7 +236,7 @@ mod unix_impl {
             let ret = unsafe {
                 libc::sendmmsg(
                     self.as_raw_fd(),
-                    msgs.as_mut_ptr(),
+                    msgs.as_mut_ptr() as *mut libc::mmsghdr,
                     n as libc::c_uint,
                     0, // no flags: match the semantics of the old per-packet send()
                 )
@@ -264,10 +269,52 @@ mod unix_impl {
         }
     }
 
+    fn poll_udp_recv_batch(
+        socket: &UdpSocket,
+        cx: &mut Context<'_>,
+        buffer: &mut RecvMmsgBuffer,
+        want_addr: bool,
+    ) -> Poll<std::io::Result<usize>> {
+        loop {
+            ready!(socket.poll_recv_ready(cx))?;
+
+            let fd = socket.as_raw_fd();
+            match socket.try_io(Interest::READABLE, || {
+                if want_addr {
+                    buffer.recvmmsg(fd)
+                } else {
+                    buffer.recvmmsg_no_addr(fd)
+                }
+            }) {
+                Ok(count) => return Poll::Ready(Ok(count)),
+                Err(e) => match recv_retry_action(&e) {
+                    // EINTR: re-issue without dropping readiness (the fd is
+                    // still ready, so the next poll returns immediately). A
+                    // signal — e.g. our own SIGHUP — must not kill the reader.
+                    RecvAction::Retry => continue,
+                    // `try_io` already cleared readiness, so the next poll
+                    // parks until the reactor reports the fd readable.
+                    RecvAction::WouldBlock => continue,
+                    RecvAction::Hard => return Poll::Ready(Err(e)),
+                },
+            }
+        }
+    }
+
+    /// Receive a batch of datagrams (with source addresses) from any tokio
+    /// `UdpSocket` using a single `recvmmsg` syscall.
+    pub async fn recv_udp_batch(
+        socket: &UdpSocket,
+        buffer: &mut RecvMmsgBuffer,
+    ) -> std::io::Result<usize> {
+        std::future::poll_fn(|cx| poll_udp_recv_batch(socket, cx, buffer, true)).await
+    }
+
     /// Buffer for batch receiving multiple UDP packets via `recvmmsg`.
     ///
-    /// The value may be moved freely, because the pointers the kernel uses
-    /// are rebuilt on every `recvmmsg` call.
+    /// The value may be moved freely: `init_for` compares `self`'s address
+    /// against `initialized_addr` and rebuilds the self-referential pointers
+    /// whenever the value has moved or switched address mode.
     pub struct RecvMmsgBuffer {
         /// Storage for source addresses
         addr_storage: [libc::sockaddr_storage; BATCH_RECV_SIZE],
@@ -277,55 +324,100 @@ mod unix_impl {
         mmsghdr: [libc::mmsghdr; BATCH_RECV_SIZE],
         /// Packet data buffers
         buffers: [[u8; MTU]; BATCH_RECV_SIZE],
+        /// Address of `self` when pointers were last initialised (0 = uninit).
+        initialized_addr: usize,
         /// Number of packets received in last call
         nrecv: u32,
+        /// Number of leading `mmsghdr` entries whose `msg_namelen` needs reset.
+        dirty_count: u32,
+        /// Whether pointers were last initialised with `msg_name` populated.
+        initialized_with_addr: bool,
     }
 
     // Safety: the struct holds raw pointers into its own fields and nothing
-    // else. `init` rewrites them before every syscall, so moving the value
-    // to another thread between calls is sound.
+    // else. `init_for` detects any address change and rewrites them before the
+    // syscall, so moving the value to another thread between calls is sound.
     unsafe impl Send for RecvMmsgBuffer {}
 
     impl RecvMmsgBuffer {
-        /// Create a new batch receive buffer.
-        ///
-        /// This allocates the buffer on the heap due to its large size (~50KB).
+        /// Create a new batch receive buffer directly on the heap (~56KB)
+        /// without staging a zeroed copy on the stack.
         pub fn new() -> Box<Self> {
-            // Safety: every field is valid when zeroed (integers, byte arrays
-            // and null raw pointers). `init` points the headers at this value
-            // before each syscall, so the kernel never sees a null pointer.
-            Box::new(unsafe { std::mem::zeroed() })
+            let layout = std::alloc::Layout::new::<Self>();
+            // Safety: `RecvMmsgBuffer` is non-zero-sized and every field is
+            // valid when zeroed (integers, byte arrays, bool, null pointers).
+            // `init_for` points the headers at this value before each syscall.
+            let ptr = unsafe { std::alloc::alloc_zeroed(layout) as *mut Self };
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            unsafe { Box::from_raw(ptr) }
         }
 
-        /// Point every header at this buffer's current address and reset
-        /// `msg_namelen`. Runs before every syscall, because the value may
-        /// have moved since the last call.
+        /// Point every header at this buffer's current address (with source
+        /// addresses enabled) and reset `msg_namelen`.
+        #[cfg(test)]
         fn init(&mut self) {
-            let buffers = self.buffers.as_mut_ptr();
-
-            self.iov.iter_mut().enumerate().for_each(|(index, iov)| {
-                let buffer = unsafe { &mut *buffers.add(index) };
-                iov.iov_base = buffer.as_mut_ptr() as *mut libc::c_void;
-                iov.iov_len = buffer.len();
-            });
-
-            let addrs = self.addr_storage.as_mut_ptr();
-            let iov = self.iov.as_mut_ptr();
-
-            self.mmsghdr.iter_mut().enumerate().for_each(|(index, h)| {
-                h.msg_hdr.msg_name = unsafe { addrs.add(index) as *mut libc::c_void };
-                h.msg_hdr.msg_namelen = SOCKADDR_STORAGE_LENGTH;
-                h.msg_hdr.msg_iov = unsafe { iov.add(index) };
-                h.msg_hdr.msg_iovlen = 1;
-            });
+            self.init_for(true);
         }
 
-        /// Receive multiple packets using recvmmsg.
+        /// Ensure every header points at this buffer's current address in the
+        /// requested address-capture mode, doing only minimal `msg_namelen`
+        /// resets on steady-state calls where `self` did not move.
+        fn init_for(&mut self, want_addr: bool) {
+            let self_addr = self as *const Self as usize;
+            if self.initialized_addr != self_addr || self.initialized_with_addr != want_addr {
+                let buffers = self.buffers.as_mut_ptr();
+
+                self.iov.iter_mut().enumerate().for_each(|(index, iov)| {
+                    let buffer = unsafe { &mut *buffers.add(index) };
+                    iov.iov_base = buffer.as_mut_ptr() as *mut libc::c_void;
+                    iov.iov_len = buffer.len();
+                });
+
+                let addrs = self.addr_storage.as_mut_ptr();
+                let iov = self.iov.as_mut_ptr();
+
+                self.mmsghdr.iter_mut().enumerate().for_each(|(index, h)| {
+                    if want_addr {
+                        h.msg_hdr.msg_name = unsafe { addrs.add(index) as *mut libc::c_void };
+                        h.msg_hdr.msg_namelen = SOCKADDR_STORAGE_LENGTH;
+                    } else {
+                        h.msg_hdr.msg_name = std::ptr::null_mut();
+                        h.msg_hdr.msg_namelen = 0;
+                    }
+                    h.msg_hdr.msg_iov = unsafe { iov.add(index) };
+                    h.msg_hdr.msg_iovlen = 1;
+                });
+
+                self.initialized_addr = self_addr;
+                self.initialized_with_addr = want_addr;
+                self.dirty_count = 0;
+            } else if want_addr && self.dirty_count > 0 {
+                let reset_n = (self.dirty_count as usize).min(BATCH_RECV_SIZE);
+                for h in &mut self.mmsghdr[..reset_n] {
+                    h.msg_hdr.msg_namelen = SOCKADDR_STORAGE_LENGTH;
+                }
+                self.dirty_count = 0;
+            }
+        }
+
+        /// Receive multiple packets using recvmmsg (capturing source addresses).
         ///
         /// Returns Ok(count) with the number of packets received, or Err if the syscall failed.
         /// WouldBlock errors indicate no data is available (non-blocking socket).
         pub fn recvmmsg(&mut self, fd: RawFd) -> std::io::Result<usize> {
-            self.init();
+            self.recvmmsg_inner(fd, true)
+        }
+
+        /// Receive multiple packets using recvmmsg without copying source
+        /// addresses out of the kernel.
+        pub fn recvmmsg_no_addr(&mut self, fd: RawFd) -> std::io::Result<usize> {
+            self.recvmmsg_inner(fd, false)
+        }
+
+        fn recvmmsg_inner(&mut self, fd: RawFd, want_addr: bool) -> std::io::Result<usize> {
+            self.init_for(want_addr);
 
             let result = unsafe {
                 libc::recvmmsg(
@@ -342,13 +434,26 @@ mod unix_impl {
                 return Err(std::io::Error::last_os_error());
             }
 
-            self.nrecv = result as u32;
+            let count = result as u32;
+            self.nrecv = count;
+            if want_addr {
+                self.dirty_count = count;
+            }
             Ok(result as usize)
         }
 
-        /// Get an iterator over the received packets.
+        /// Get an iterator over the received packets with source addresses.
         pub fn iter(&self) -> RecvMmsgIter<'_> {
             RecvMmsgIter {
+                buffer: self,
+                current: 0,
+            }
+        }
+
+        /// Get an iterator over the received packet payloads without decoding
+        /// source addresses.
+        pub fn iter_payloads(&self) -> RecvMmsgPayloadIter<'_> {
+            RecvMmsgPayloadIter {
                 buffer: self,
                 current: 0,
             }
@@ -425,6 +530,28 @@ mod unix_impl {
             let len = (msg.msg_len as usize).min(MTU);
             let data = &self.buffer.buffers[idx][..len];
             Some((addr, data))
+        }
+    }
+
+    /// Iterator over received packet payloads in a RecvMmsgBuffer (no sockaddr decode).
+    pub struct RecvMmsgPayloadIter<'a> {
+        buffer: &'a RecvMmsgBuffer,
+        current: u32,
+    }
+
+    impl<'a> Iterator for RecvMmsgPayloadIter<'a> {
+        type Item = &'a [u8];
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.current >= self.buffer.nrecv {
+                return None;
+            }
+
+            let idx = self.current as usize;
+            self.current += 1;
+
+            let len = (self.buffer.mmsghdr[idx].msg_len as usize).min(MTU);
+            Some(&self.buffer.buffers[idx][..len])
         }
     }
 
@@ -715,20 +842,18 @@ mod fallback_impl {
             self.generation
         }
 
-        /// Receive packets (single packet at a time on non-Unix).
+        /// Receive packets (single packet at a time on non-Linux).
         pub async fn recv_batch(&self, buffer: &mut RecvMmsgBuffer) -> std::io::Result<usize> {
-            match self.inner.recv_from(&mut buffer.buffer).await {
-                Ok((n, addr)) => {
-                    buffer.len = n;
-                    buffer.addr = Some(addr);
-                    buffer.has_packet = true;
-                    Ok(1)
-                }
-                Err(e) => {
-                    buffer.has_packet = false;
-                    Err(e)
-                }
-            }
+            recv_udp_batch(&self.inner, buffer).await
+        }
+
+        /// Receive packets without decoding source addresses (same as
+        /// `recv_batch` on non-Linux).
+        pub async fn recv_batch_no_addr(
+            &self,
+            buffer: &mut RecvMmsgBuffer,
+        ) -> std::io::Result<usize> {
+            recv_udp_batch(&self.inner, buffer).await
         }
 
         /// Send data to the peer.
@@ -777,6 +902,26 @@ mod fallback_impl {
         }
     }
 
+    /// Receive a datagram from any tokio `UdpSocket` (single-packet fallback
+    /// on non-Linux).
+    pub async fn recv_udp_batch(
+        socket: &UdpSocket,
+        buffer: &mut RecvMmsgBuffer,
+    ) -> std::io::Result<usize> {
+        match socket.recv_from(&mut buffer.buffer).await {
+            Ok((n, addr)) => {
+                buffer.len = n;
+                buffer.addr = Some(addr);
+                buffer.has_packet = true;
+                Ok(1)
+            }
+            Err(e) => {
+                buffer.has_packet = false;
+                Err(e)
+            }
+        }
+    }
+
     /// Fallback buffer for non-Unix platforms.
     pub struct RecvMmsgBuffer {
         /// Single packet buffer
@@ -804,6 +949,10 @@ mod fallback_impl {
                 buffer: self,
                 yielded: false,
             }
+        }
+
+        pub fn iter_payloads(&self) -> impl Iterator<Item = &'_ [u8]> {
+            self.iter().map(|(_, data)| data)
         }
 
         #[cfg(test)]
@@ -848,9 +997,9 @@ mod fallback_impl {
 
 // Re-export the appropriate implementation
 #[cfg(not(target_os = "linux"))]
-pub use fallback_impl::{BatchUdpSocket, RecvMmsgBuffer};
+pub use fallback_impl::{BatchUdpSocket, RecvMmsgBuffer, recv_udp_batch};
 #[cfg(target_os = "linux")]
-pub use unix_impl::{BatchUdpSocket, RecvMmsgBuffer};
+pub use unix_impl::{BatchUdpSocket, RecvMmsgBuffer, recv_udp_batch};
 
 #[cfg(test)]
 mod tests {

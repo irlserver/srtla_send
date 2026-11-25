@@ -34,7 +34,7 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 - **CLI**: clap with derive features
 - **Logging**: tracing + tracing-subscriber with env-filter
 - **Networking**: socket2 for low-level socket operations, tokio::net for async UDP
-- **Other dependencies**: anyhow (errors), rand, serde and serde_json (control protocol, stats), toml (config file), smallvec, rustc-hash (srtla-core maps), mimalloc (default allocator)
+- **Other dependencies**: anyhow (errors), rand, serde and serde_json (control protocol, stats), toml (config file), smallvec, rustc-hash (srtla-core maps)
 
 ### Build Profiles
 

@@ -345,60 +345,52 @@ pub fn select_connection(
     current_time_ms: u64,
     enable_quality: bool,
 ) -> Option<usize> {
-    // First pass: discover whether at least one un-gated connection
-    // can carry the packet. The classifier marks links weak when their
-    // RTT busts the chosen delay tier (sustained, not a single blip),
-    // when a queue is building, or when they fall below the entering
-    // throughput-share threshold. The loss gate uses `loss_degraded` —
-    // the 4s-sustained, hysteretic loss latch — rather than the raw
-    // per-window `cc_backing_off`, so a single noisy loss window doesn't
-    // demote routing weight (cc_backing_off still drives the CC
-    // controller's own bitrate backoff; it just no longer gates routing).
-    // The in-flight cap gates a link whose in-flight packets already
-    // exceed its bandwidth-delay product (plus headroom), so the
-    // scheduler doesn't pile more on while the link drains. If any
-    // un-gated link is schedulable, the gated ones are excluded from
-    // ranking. Otherwise we fall back to the full pool — better to send
-    // on a gated link than to drop the packet.
-    let any_unconstrained = conns.iter().any(|c| {
-        !c.is_timed_out(current_time_ms)
+    // First pass: discover in a single sweep whether at least one un-gated
+    // connection can carry the packet (`any_unconstrained`) and whether at
+    // least one link passes the sustained quality gates (`any_quality_ok`).
+    //
+    // The classifier marks links weak when their RTT busts the chosen delay
+    // tier (sustained, not a single blip), when a queue is building, or when
+    // they fall below the entering throughput-share threshold. The loss gate
+    // uses `loss_degraded` — the 4s-sustained, hysteretic loss latch — rather
+    // than the raw per-window `cc_backing_off`, so a single noisy loss window
+    // doesn't demote routing weight. The in-flight cap gates a link whose
+    // in-flight packets already exceed its bandwidth-delay product (plus
+    // headroom), so the scheduler doesn't pile more on while the link drains.
+    // Sole-carrier election keys on the quality gates alone, excluding the
+    // transient in-flight cap.
+    let mut any_unconstrained = false;
+    let mut any_quality_ok = false;
+    for c in conns.iter() {
+        if !c.is_timed_out(current_time_ms)
             && c.is_schedulable()
             && !c.weak
             && !c.loss_degraded
             && !c.stall_gated
-            && !in_flight_cap_exceeded(c)
-    });
-
-    // Sole-carrier election. Keyed on the quality gates alone, deliberately
-    // excluding the in-flight cap: the cap is a transient that clears as the
-    // link drains, and pinning the whole stream to one link because every link
-    // is momentarily over its BDP would make a saturated pool worse. Only
-    // sustained delay/loss verdicts — the states librist muted on — justify
-    // committing to a single carrier.
-    let any_quality_ok = conns.iter().any(|c| {
-        !c.is_timed_out(current_time_ms)
-            && c.is_schedulable()
-            && !c.weak
-            && !c.loss_degraded
-            && !c.stall_gated
-    });
+        {
+            any_quality_ok = true;
+            if !any_unconstrained && !in_flight_cap_exceeded(c) {
+                any_unconstrained = true;
+                break;
+            }
+        }
+    }
     let sole_carrier = elect_sole_carrier(conns, current_time_ms, any_quality_ok);
 
     // Decide who is held out of the payload rotation entirely, as opposed to
-    // merely demoted. Two cases, both about latency rather than capacity:
+    // merely demoted, and score the remaining candidates in the same pass.
     //
+    // Two cases are held out completely, both about latency rather than capacity:
     //  - A *late* link (delay-weak, or loss-degraded) while a healthy link can
-    //    carry. Every unique sequence number committed to a link running a
-    //    second behind is a hole the receiver's reorder buffer has to wait on,
-    //    so the demoted-but-still-carrying trickle is itself the glitch. Such
-    //    a link is instead probed with duplicates by the shell, which costs
-    //    the receiver nothing (it dedups by sequence) and still earns the ACK
-    //    and RTT samples the recovery decision needs.
+    //    carry.
     //  - Anyone who lost the sole-carrier election.
     //
     // A link that is weak only for *share* reasons keeps its crushed-score
-    // trickle: it is not late, it is under-used, and unique traffic is exactly
-    // what it needs to earn back the throughput share that clears the verdict.
+    // trickle so it can earn back the throughput share that clears the verdict.
+    let mut best_idx: Option<usize> = None;
+    let mut best_score: f64 = -1.0;
+    let mut current_score: Option<f64> = None;
+
     for (i, c) in conns.iter_mut().enumerate() {
         let schedulable = !c.is_timed_out(current_time_ms) && c.is_schedulable() && !c.stall_gated;
         let late = c.loss_degraded || (c.weak && c.weak_reason.is_delay());
@@ -406,34 +398,13 @@ pub fn select_connection(
             && ((any_unconstrained && late) || (sole_carrier.is_some() && Some(i) != sole_carrier));
         // Falling edge: a link that was held out drained its backlog while its
         // window kept recovering, so it comes back holding the same unearned
-        // score the stall gate ramps away. Ramp it too, or the gate that was
-        // protecting the stream hands the stream straight back to the link it
-        // was protecting it from.
+        // score the stall gate ramps away.
         if c.quality_excluded && !excluded {
             c.arm_rejoin_ramp(current_time_ms, HELD_OUT_REJOIN_RAMP_MS, false);
         }
         c.quality_excluded = excluded;
-    }
 
-    // Score connections by base score; apply quality multiplier if enabled.
-    //
-    // Only the best link is tracked; nothing consumes the runner-up's rank.
-    let mut best_idx: Option<usize> = None;
-    let mut best_score: f64 = -1.0;
-    let mut current_score: Option<f64> = None;
-
-    for (i, c) in conns.iter_mut().enumerate() {
-        // A stall-gated link is a black hole with a healthier alternative
-        // available (see `apply_stall_gate`); hard-skip it like a timed-out link
-        // rather than crushing its score, since a trickle would only add latency.
-        if c.is_timed_out(current_time_ms) || !c.is_schedulable() || c.stall_gated {
-            continue;
-        }
-        // Held out on quality grounds: a late link while a healthy one can
-        // carry, or a loser of the sole-carrier election. Both cases are
-        // computed above and both guarantee some other link is still
-        // rankable, so this can never empty the candidate pool.
-        if c.quality_excluded {
+        if !schedulable || excluded {
             continue;
         }
         // Hard-skip only the in-flight cap: it bounds queueing delay and
@@ -444,25 +415,13 @@ pub fn select_connection(
         }
         // Whatever weak links are left here are weak for share reasons only
         // — the late ones were held out above. Crush the score but keep them
-        // rankable: the resulting trickle of real traffic is what lets a
-        // share-weak link earn back the share that clears the verdict, and
-        // without it the classifier reads the starvation it caused as more
-        // evidence of weakness.
+        // rankable.
         let quality_gated = any_unconstrained && c.weak;
         let gate_mult = if quality_gated {
             GATED_LINK_PENALTY
         } else {
             1.0
         };
-        // The phase weight de-rates a warming link rather than excluding it. At
-        // go-live every link is warming, so an exclusion here would empty the
-        // candidate pool and drop the stream; an equal de-rating leaves the
-        // relative ranking intact and traffic flows immediately.
-        // The rejoin ramp de-rates a link that just came out of a stall gate.
-        // Its score is inflated by the gating itself — no payload means the
-        // in-flight count drained to zero while time-based window recovery
-        // kept growing the window — so without the ramp it wins the first
-        // packet after release outright and refills the queue it just drained.
         let base =
             c.get_score() as f64 * c.phase_weight() * c.rejoin_ramp_multiplier(current_time_ms);
         let cap_mult = cc_soft_cap_multiplier(c);
@@ -473,8 +432,11 @@ pub fn select_connection(
             let quality_mult = c.get_cached_quality_multiplier(current_time_ms);
             let final_score = base * quality_mult * cap_mult * gate_mult;
 
-            // Log quality issues and recoveries for debugging (cold path)
-            log_quality_state(c, quality_mult, base, final_score, current_time_ms);
+            // Only enter the #[cold] #[inline(never)] logger when quality is
+            // actually below 1.0 and debug logging is enabled.
+            if quality_mult < 1.0 && tracing::enabled!(tracing::Level::DEBUG) {
+                log_quality_state(c, quality_mult, base, final_score, current_time_ms);
+            }
 
             final_score
         };

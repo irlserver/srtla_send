@@ -218,14 +218,14 @@ const SRT_NAK_MAX_LOSS_IDS: usize = 1000;
 /// logger — so a legitimately huge range is truncated rather than reported. A
 /// receiver that still needs those ids will NAK them again.
 #[inline]
-pub fn parse_srt_nak(buf: &[u8]) -> SmallVec<u32, 4> {
+pub fn parse_srt_nak(buf: &[u8]) -> SmallVec<u32, 8> {
     if buf.len() < SRT_CONTROL_HEADER_LEN + 4 {
         return SmallVec::new();
     }
     if get_packet_type(buf) != Some(SRT_TYPE_NAK) {
         return SmallVec::new();
     }
-    let mut out: SmallVec<u32, 4> = SmallVec::new();
+    let mut out: SmallVec<u32, 8> = SmallVec::new();
     let mut i = SRT_CONTROL_HEADER_LEN;
     while i + 3 < buf.len() {
         let id = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
@@ -267,14 +267,14 @@ pub fn parse_srt_nak(buf: &[u8]) -> SmallVec<u32, 4> {
 }
 
 #[inline]
-pub fn parse_srtla_ack(buf: &[u8]) -> SmallVec<u32, 4> {
+pub fn parse_srtla_ack(buf: &[u8]) -> SmallVec<u32, 16> {
     if buf.len() < 8 {
         return SmallVec::new();
     }
     if get_packet_type(buf) != Some(SRTLA_TYPE_ACK) {
         return SmallVec::new();
     }
-    let mut out = SmallVec::new();
+    let mut out: SmallVec<u32, 16> = SmallVec::new();
 
     // Match original C implementation behavior: skip first 4 bytes, not 2
     // The C code does: uint32_t *acks = (uint32_t *)buf; for (int i = 1; ...)
