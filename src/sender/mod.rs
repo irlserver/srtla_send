@@ -268,11 +268,11 @@ pub async fn run_sender_with_config(
                         match res {
                             Ok(count) if count > 0 => {
                                 let config_snap = config.snapshot();
-                                let batch_time_ms = srtla_core::utils::now_ms();
                                 for (src, pkt) in local_recv_buf.iter() {
                                     let Some(src) = src else {
                                         continue;
                                     };
+                                    let packet_time_ms = srtla_core::utils::now_ms();
                                     handle_srt_datagram(
                                         pkt,
                                         src,
@@ -286,7 +286,7 @@ pub async fn run_sender_with_config(
                                         reg.has_connected,
                                         &config_snap,
                                         &critical_window,
-                                        batch_time_ms,
+                                        packet_time_ms,
                                     )
                                     .await;
                                 }

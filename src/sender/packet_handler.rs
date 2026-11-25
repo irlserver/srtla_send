@@ -387,11 +387,10 @@ pub async fn drain_packet_queue(
     // Process up to MAX_DRAIN_PACKETS to prevent CPU spikes from large queue bursts.
     // Remaining packets will be processed on the next event loop iteration.
     let mut processed = 0;
-    let mut batch_now_ms: Option<u64> = None;
     while processed < MAX_DRAIN_PACKETS {
         match packet_rx.try_recv() {
             Ok(packet) => {
-                let now_ms = *batch_now_ms.get_or_insert_with(srtla_core::utils::now_ms);
+                let now_ms = srtla_core::utils::now_ms();
                 handle_uplink_packet_at(
                     packet,
                     connections,
@@ -819,7 +818,7 @@ async fn send_connection_batch(
     };
     conn.recycle_batch(batch);
     result?;
-    conn.note_sent(now);
+    conn.note_sent(srtla_core::utils::now_ms());
     Ok(())
 }
 
@@ -887,10 +886,18 @@ pub(crate) async fn flush_all_batches_at(
 
     // Now do the actual flush for connections that need it
     for conn in connections.iter_mut() {
-        if (conn.needs_batch_flush(now) || conn.has_queued_packets())
+        let conn_now = srtla_core::utils::now_ms();
+        if (conn.needs_batch_flush(conn_now) || conn.has_queued_packets())
             && let Some(io) = conn_io.get(&conn.conn_id)
         {
-            flush_connection(conn, &io.socket, seq_tracker, "periodic batch flush", now).await;
+            flush_connection(
+                conn,
+                &io.socket,
+                seq_tracker,
+                "periodic batch flush",
+                conn_now,
+            )
+            .await;
         }
     }
 }
