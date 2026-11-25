@@ -1,10 +1,10 @@
 //! Runtime configuration for SRTLA sender.
 //!
 //! `DynamicConfig` holds atomic state that can be flipped at runtime. The
-//! actual wire protocol lives in [`crate::control`] — this module exposes
-//! plain getters/setters that the control dispatcher calls into.
+//! actual wire protocol and transports live in [`crate::control`] and
+//! [`crate::control_socket`] — this module stays strictly below the control
+//! plane.
 
-use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -17,10 +17,24 @@ pub use srtla_core::config_snapshot::{
     STALL_MIN_IN_FLIGHT_PACKETS,
 };
 use srtla_core::mode::SchedulingMode;
-use srtla_core::priority::CriticalWindow;
 
-use crate::control::dispatch;
-use crate::stats::SharedStats;
+/// A validated runtime configuration mutation issued by the control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigChange {
+    Mode(SchedulingMode),
+    QualityEnabled(bool),
+    StallDeselect(bool),
+    ConnTimeoutMs(u64),
+}
+
+/// Applied outcome of a [`ConfigChange`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppliedChange {
+    Mode(SchedulingMode),
+    QualityEnabled(bool),
+    StallDeselect(bool),
+    ConnTimeoutMs(u64),
+}
 
 /// Dynamic configuration that can be modified at runtime.
 /// Uses atomic types for lock-free concurrent access.
@@ -133,19 +147,32 @@ impl DynamicConfig {
         SchedulingMode::from_u8(self.mode.load(Ordering::Relaxed))
     }
 
+    /// Apply a runtime configuration change from the control plane and return
+    /// the applied value (clamped where bounded).
+    pub fn apply_change(&self, change: ConfigChange) -> AppliedChange {
+        match change {
+            ConfigChange::Mode(mode) => {
+                self.mode.store(mode.as_u8(), Ordering::Relaxed);
+                AppliedChange::Mode(mode)
+            }
+            ConfigChange::QualityEnabled(enabled) => {
+                self.quality_enabled.store(enabled, Ordering::Relaxed);
+                AppliedChange::QualityEnabled(enabled)
+            }
+            ConfigChange::StallDeselect(enabled) => {
+                self.stall_deselect.store(enabled, Ordering::Relaxed);
+                AppliedChange::StallDeselect(enabled)
+            }
+            ConfigChange::ConnTimeoutMs(ms) => {
+                let applied = self.set_conn_timeout_ms(ms);
+                AppliedChange::ConnTimeoutMs(applied)
+            }
+        }
+    }
+
     /// Set the scheduling mode.
     pub fn set_mode(&self, mode: SchedulingMode) {
         self.mode.store(mode.as_u8(), Ordering::Relaxed);
-    }
-
-    /// Set whether quality scoring is enabled.
-    pub fn set_quality_enabled(&self, enabled: bool) {
-        self.quality_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    /// Toggle the stalled-link deselect guard at runtime.
-    pub fn set_stall_deselect(&self, enabled: bool) {
-        self.stall_deselect.store(enabled, Ordering::Relaxed);
     }
 
     /// Set the per-link liveness timeout at runtime, clamped to
@@ -158,27 +185,6 @@ impl DynamicConfig {
         self.conn_timeout_ms.store(applied, Ordering::Relaxed);
         applied
     }
-}
-
-/// Spawn the stdin command reader in a std::thread. Stdin on Linux
-/// doesn't have a clean async story — easier to stay blocking here.
-/// The Unix control socket, which actually needs subscriptions, lives
-/// in an async tokio task launched by main instead.
-pub fn spawn_stdin_listener(
-    config: DynamicConfig,
-    stats: SharedStats,
-    critical_window: CriticalWindow,
-) {
-    std::thread::spawn(move || {
-        let reader = BufReader::new(std::io::stdin());
-        for line in reader.lines().map_while(Result::ok) {
-            if let Some(resp) = dispatch(&config, Some(&stats), Some(&critical_window), line.trim())
-            {
-                // Responses on stdin just go to stdout so scripts can pipe.
-                println!("{}", resp.to_json());
-            }
-        }
-    });
 }
 
 #[cfg(test)]

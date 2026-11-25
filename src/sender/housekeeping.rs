@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
 use smallvec::SmallVec;
-use srtla_core::connection::{STARTUP_GRACE_MS, SrtlaConnection};
+use srtla_core::connection::SrtlaConnection;
 use srtla_core::registration::SrtlaRegistrationManager;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
 use super::connections::{reconnect_uplink, recover_connection};
-use super::rehome::{RehomeGate, try_rehome};
+use super::rehome::RehomeGate;
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
 
@@ -45,7 +45,7 @@ pub async fn handle_housekeeping(
             && let Some(selected) = reg.selected_conn_id()
             && let Some(conn) = connections.iter_mut().find(|c| c.conn_id == selected)
         {
-            conn.reconnection.startup_grace_deadline_ms = current_ms + STARTUP_GRACE_MS;
+            conn.reset_startup_grace(current_ms);
             debug!(
                 "{}: Reset grace period after being selected for initial registration",
                 conn.label
@@ -57,10 +57,9 @@ pub async fn handle_housekeeping(
     for conn in connections.iter_mut() {
         // Simple reconnect-on-timeout, then allow reg driver to proceed
         if conn.is_timed_out(current_ms) {
-            if conn.should_attempt_reconnect(current_ms) {
+            if conn.try_begin_reconnect(current_ms) {
                 let label = conn.label.clone();
-                conn.record_reconnect_attempt(current_ms);
-                if conn.connection_established_ms() == 0 {
+                if conn.telemetry(current_ms).connection_established_ms == 0 {
                     debug!("{} initial registration timed out; retrying", label);
                 } else {
                     warn!("{} timed out; attempting full socket reconnection", label);
@@ -89,11 +88,10 @@ pub async fn handle_housekeeping(
                     Some(id) if id == conn.conn_id => {
                         info!("{} marked for recovery; re-sending REG1", label);
                         let pkt = reg.build_reg1_for(conn.conn_id, current_ms);
-                        if let Some(io) = conn_io.get(&conn.conn_id) {
-                            match io.socket.send(&pkt).await {
-                                Ok(_) => conn.note_sent(current_ms),
-                                Err(e) => warn!("Failed to send REG1 to {label}: {e:?}"),
-                            }
+                        if let Some(io) = conn_io.get(&conn.conn_id)
+                            && let Err(e) = io.socket.send(&pkt).await
+                        {
+                            warn!("Failed to send REG1 to {label}: {e:?}");
                         }
                     }
                     Some(_) => {
@@ -105,11 +103,10 @@ pub async fn handle_housekeeping(
                     None => {
                         info!("{} marked for recovery; re-sending REG2", label);
                         let pkt = reg.build_reg2(conn.conn_id);
-                        if let Some(io) = conn_io.get(&conn.conn_id) {
-                            match io.socket.send(&pkt).await {
-                                Ok(_) => conn.note_sent(current_ms),
-                                Err(e) => warn!("Failed to send REG2 to {label}: {e:?}"),
-                            }
+                        if let Some(io) = conn_io.get(&conn.conn_id)
+                            && let Err(e) = io.socket.send(&pkt).await
+                        {
+                            warn!("Failed to send REG2 to {label}: {e:?}");
                         }
                     }
                 }
@@ -119,28 +116,11 @@ pub async fn handle_housekeeping(
             continue;
         }
 
-        if conn.needs_keepalive(current_ms) {
-            let ka = conn.keepalive_packet(current_ms);
-            if let Some(io) = conn_io.get(&conn.conn_id) {
-                let _ = io.socket.send(&ka).await;
-            }
+        if let Some(ka) = conn.housekeeping_tick(classic, current_ms)
+            && let Some(io) = conn_io.get(&conn.conn_id)
+        {
+            let _ = io.socket.send(&ka).await;
         }
-        if conn.needs_rtt_measurement(current_ms) {
-            let ka = conn.keepalive_packet(current_ms);
-            if let Some(io) = conn_io.get(&conn.conn_id) {
-                let _ = io.socket.send(&ka).await;
-            }
-        }
-        if !classic {
-            conn.perform_window_recovery(current_ms);
-        }
-        // Update bitrate calculation
-        conn.calculate_bitrate(current_ms);
-        // Drive link lifecycle phase transitions
-        conn.update_phase(current_ms);
-        // Adapt the per-connection batch-send regime to the observed
-        // load. Cheap; no-op when the regime hasn't changed.
-        conn.recompute_batch_regime();
 
         // The reader task self-heals via CONN_TIMEOUT, but a task death
         // (panic / early return) would otherwise go undetected until that window.
@@ -162,20 +142,17 @@ pub async fn handle_housekeeping(
     // drive registration (send REG1/REG2 as needed)
     let sends = reg.reg_driver_pending_sends(connections, current_ms);
     if let Some((conn_id, pkt)) = sends.reg1
-        && let Some(conn) = connections.iter_mut().find(|c| c.conn_id == conn_id)
+        && let Some(conn) = connections.iter().find(|c| c.conn_id == conn_id)
         && let Some(io) = conn_io.get(&conn.conn_id)
+        && let Err(e) = io.socket.send(&pkt).await
     {
-        match io.socket.send(&pkt).await {
-            Ok(_) => conn.note_sent(current_ms),
-            Err(e) => warn!("Failed to send REG1 to uplink {conn_id:x}: {e:?}"),
-        }
+        warn!("Failed to send REG1 to uplink {conn_id:x}: {e:?}");
     }
     if let Some(pkt) = sends.broadcast_reg2 {
-        for (i, conn) in connections.iter_mut().enumerate() {
+        for (i, conn) in connections.iter().enumerate() {
             if let Some(io) = conn_io.get(&conn.conn_id)
                 && io.socket.send(&pkt).await.is_ok()
             {
-                conn.note_sent(current_ms);
                 debug!("REG2 → uplink #{i} sent");
             }
         }
@@ -215,19 +192,19 @@ pub async fn handle_housekeeping(
             // an attempt; `false` means nothing changed and the existing
             // behaviour below stands.
             let dead_for_ms = current_ms.saturating_sub(*failed_at);
-            if try_rehome(
-                rehome,
-                connections,
-                conn_io,
-                reg,
-                seq_tracker,
-                reader_handles,
-                packet_tx,
-                receiver_host,
-                dead_for_ms,
-                current_ms,
-            )
-            .await
+            if rehome
+                .try_rehome(
+                    connections,
+                    conn_io,
+                    reg,
+                    seq_tracker,
+                    reader_handles,
+                    packet_tx,
+                    receiver_host,
+                    dead_for_ms,
+                    current_ms,
+                )
+                .await
             {
                 // The bond now points somewhere new and is re-registering from
                 // REG1. Re-arm the timer so the fresh handshake gets a full
@@ -261,7 +238,7 @@ mod tests {
     use srtla_core::utils::now_ms;
 
     use super::*;
-    use crate::sender::rehome::StubResolver;
+    use crate::net::StubResolver;
     use crate::sender::uplink::{create_uplink_channel, sync_readers};
     use crate::test_helpers::{
         create_test_conn_io_map, create_test_connection, create_test_connections,
@@ -454,7 +431,7 @@ mod tests {
             for conn in self.connections.iter_mut() {
                 conn.connected = true;
                 conn.last_received = Some(now);
-                conn.reconnection.startup_grace_deadline_ms = now + STARTUP_GRACE_MS;
+                conn.reset_startup_grace(now);
             }
         }
 

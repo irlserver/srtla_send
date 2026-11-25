@@ -12,7 +12,7 @@ pub mod kalman;
 pub mod mode;
 pub mod priority;
 pub mod registration;
-// Scheduler / link selection. Core logic (mutually dependent with `connection`).
+// Scheduler / link selection (layered strictly above `connection`).
 pub mod selection;
 // Serial (wrap-aware) arithmetic for 31-bit SRT sequence numbers.
 pub mod seq;

@@ -70,7 +70,7 @@ mod tests {
     #[tokio::test]
     async fn keepalive_reply_does_not_rescue_a_recovering_link() {
         let mut conn = recovering_link().await;
-        deliver(&mut conn, &create_keepalive_packet(now_ms())).await;
+        deliver(&mut conn, &Keepalive::encode(now_ms())).await;
         assert!(conn.is_timed_out(now_ms()));
     }
 

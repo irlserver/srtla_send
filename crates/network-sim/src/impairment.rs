@@ -115,6 +115,70 @@ impl ImpairmentConfig {
 
         args
     }
+    /// Apply this impairment config to `interface` inside `ns`.
+    ///
+    /// Always removes the existing root qdisc first (clean slate). With
+    /// `tbf_shaping`, installs TBF as root for real bandwidth enforcement
+    /// and chains netem as a child. Without it, netem is the root qdisc.
+    pub fn apply(&self, ns: &Namespace, interface: &str) -> Result<()> {
+        // Always start clean
+        let _ = ns.exec("tc", &["qdisc", "del", "dev", interface, "root"]);
+
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        if self.tbf_shaping {
+            self.apply_tbf_with_netem(ns, interface)
+        } else {
+            self.apply_netem_root(ns, interface)
+        }
+    }
+
+    /// TBF as root (bandwidth enforcement) + netem as child (delay/loss).
+    fn apply_tbf_with_netem(&self, ns: &Namespace, iface: &str) -> Result<()> {
+        let rate = self
+            .rate_kbit
+            .ok_or_else(|| anyhow::anyhow!("tbf_shaping requires rate_kbit"))?;
+
+        // burst = max(rate_bytes/10, 1540) — at least one MTU
+        let rate_bytes_per_sec = rate * 1000 / 8;
+        let burst = rate_bytes_per_sec.max(15400) / 10;
+        let rate_arg = format!("{rate}kbit");
+        let burst_arg = burst.to_string();
+
+        tc_checked(
+            ns,
+            iface,
+            &[
+                "qdisc", "add", "dev", iface, "root", "handle", "1:", "tbf", "rate", &rate_arg,
+                "burst", &burst_arg, "latency", "1s",
+            ],
+            "apply TBF qdisc",
+        )?;
+
+        if self.has_netem_params() {
+            let netem_params = self.netem_args(false);
+            let mut args = vec![
+                "qdisc", "add", "dev", iface, "parent", "1:1", "handle", "10:", "netem",
+            ];
+            let netem_strs: Vec<&str> = netem_params.iter().map(|s| s.as_str()).collect();
+            args.extend_from_slice(&netem_strs);
+            tc_checked(ns, iface, &args, "apply netem child qdisc")?;
+        }
+
+        Ok(())
+    }
+
+    /// Netem as root qdisc (no real bandwidth enforcement).
+    fn apply_netem_root(&self, ns: &Namespace, iface: &str) -> Result<()> {
+        let netem_params = self.netem_args(true);
+        let mut args = vec!["qdisc", "add", "dev", iface, "root", "netem"];
+        let netem_strs: Vec<&str> = netem_params.iter().map(|s| s.as_str()).collect();
+        args.extend_from_slice(&netem_strs);
+        tc_checked(ns, iface, &args, "apply netem qdisc")?;
+        Ok(())
+    }
 }
 
 /// Apply impairment to `interface` inside `ns`.
@@ -123,63 +187,7 @@ impl ImpairmentConfig {
 /// `tbf_shaping`, installs TBF as root for real bandwidth enforcement
 /// and chains netem as a child. Without it, netem is the root qdisc.
 pub fn apply_impairment(ns: &Namespace, interface: &str, config: ImpairmentConfig) -> Result<()> {
-    // Always start clean
-    let _ = ns.exec("tc", &["qdisc", "del", "dev", interface, "root"]);
-
-    if config.is_empty() {
-        return Ok(());
-    }
-
-    if config.tbf_shaping {
-        apply_tbf_with_netem(ns, interface, &config)
-    } else {
-        apply_netem_root(ns, interface, &config)
-    }
-}
-
-/// TBF as root (bandwidth enforcement) + netem as child (delay/loss).
-fn apply_tbf_with_netem(ns: &Namespace, iface: &str, config: &ImpairmentConfig) -> Result<()> {
-    let rate = config
-        .rate_kbit
-        .ok_or_else(|| anyhow::anyhow!("tbf_shaping requires rate_kbit"))?;
-
-    // burst = max(rate_bytes/10, 1540) — at least one MTU
-    let rate_bytes_per_sec = rate * 1000 / 8;
-    let burst = rate_bytes_per_sec.max(15400) / 10;
-    let rate_arg = format!("{rate}kbit");
-    let burst_arg = burst.to_string();
-
-    tc_checked(
-        ns,
-        iface,
-        &[
-            "qdisc", "add", "dev", iface, "root", "handle", "1:", "tbf", "rate", &rate_arg,
-            "burst", &burst_arg, "latency", "1s",
-        ],
-        "apply TBF qdisc",
-    )?;
-
-    if config.has_netem_params() {
-        let netem_params = config.netem_args(false);
-        let mut args = vec![
-            "qdisc", "add", "dev", iface, "parent", "1:1", "handle", "10:", "netem",
-        ];
-        let netem_strs: Vec<&str> = netem_params.iter().map(|s| s.as_str()).collect();
-        args.extend_from_slice(&netem_strs);
-        tc_checked(ns, iface, &args, "apply netem child qdisc")?;
-    }
-
-    Ok(())
-}
-
-/// Netem as root qdisc (no real bandwidth enforcement).
-fn apply_netem_root(ns: &Namespace, iface: &str, config: &ImpairmentConfig) -> Result<()> {
-    let netem_params = config.netem_args(true);
-    let mut args = vec!["qdisc", "add", "dev", iface, "root", "netem"];
-    let netem_strs: Vec<&str> = netem_params.iter().map(|s| s.as_str()).collect();
-    args.extend_from_slice(&netem_strs);
-    tc_checked(ns, iface, &args, "apply netem qdisc")?;
-    Ok(())
+    config.apply(ns, interface)
 }
 
 /// Run `tc` inside `ns`, bailing with stderr + the full command on failure.

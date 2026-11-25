@@ -99,7 +99,7 @@ mod tests {
         use smallvec::SmallVec;
         use srtla_core::registration::SrtlaRegistrationManager;
         use srtla_core::test_helpers::create_test_connection;
-        use srtla_protocol::create_ack_packet;
+        use srtla_protocol::SrtlaAck;
         use tokio::net::UdpSocket;
         use tokio::sync::mpsc::unbounded_channel;
 
@@ -133,7 +133,7 @@ mod tests {
             let packet = UplinkPacket {
                 conn_id,
                 generation,
-                bytes: create_ack_packet(&acks),
+                bytes: SrtlaAck::encode(&acks),
             };
             handle_uplink_packet(
                 packet,

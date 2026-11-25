@@ -64,21 +64,22 @@ pub fn calculate_quality_multiplier(conn: &SrtlaConnection, current_time_ms: u64
 /// Internal uncached quality multiplier calculation.
 #[inline(always)]
 fn calculate_quality_multiplier_uncached(conn: &SrtlaConnection, current_time_ms: u64) -> f64 {
+    let metrics = conn.telemetry(current_time_ms);
     // Startup grace period: first 30 seconds after connection establishment
     // During this time, use simple scoring like original C version to go live fast
     // This prevents early NAKs from permanently degrading connections
-    let connection_age_ms = current_time_ms.saturating_sub(conn.connection_established_ms());
+    let connection_age_ms = current_time_ms.saturating_sub(metrics.connection_established_ms);
     if connection_age_ms < STARTUP_GRACE_PERIOD_MS {
         // During startup grace period, only apply light penalties to prevent permanent
         // degradation
-        return if conn.total_nak_count() == 0 {
+        return if metrics.nak_count == 0 {
             PERFECT_CONNECTION_BONUS
         } else {
             STARTUP_NAK_PENALTY
         };
     }
 
-    let quality_mult = if let Some(nak_age_ms) = conn.time_since_last_nak_ms(current_time_ms) {
+    let quality_mult = if let Some(nak_age_ms) = metrics.time_since_last_nak_ms {
         // Exponential decay for smooth, gradual recovery from NAKs
         // This replaces the step function with a continuous curve
         // Exponential decay formula: penalty = max_penalty * e^(-age/half_life)
@@ -94,11 +95,11 @@ fn calculate_quality_multiplier_uncached(conn: &SrtlaConnection, current_time_ms
 
         // Extra penalty for burst NAKs (multiple NAKs in short time)
         // Only apply if burst was significant and recent
-        if conn.nak_burst_count() >= NAK_BURST_THRESHOLD && nak_age_ms < NAK_BURST_MAX_AGE_MS {
+        if metrics.nak_burst_count >= NAK_BURST_THRESHOLD && nak_age_ms < NAK_BURST_MAX_AGE_MS {
             mult *= NAK_BURST_PENALTY;
         }
         mult
-    } else if conn.total_nak_count() == 0 {
+    } else if metrics.nak_count == 0 {
         // Small bonus for connections that have never had NAKs
         PERFECT_CONNECTION_BONUS
     } else {
@@ -108,7 +109,7 @@ fn calculate_quality_multiplier_uncached(conn: &SrtlaConnection, current_time_ms
 
     // RTT-Aware Scoring: Add small bonus for lower RTT connections
     // This helps differentiate connections when NAK patterns are similar
-    let rtt_bonus = calculate_rtt_bonus(conn);
+    let rtt_bonus = calculate_rtt_bonus(metrics.rtt_ms);
     quality_mult * rtt_bonus
 }
 
@@ -117,9 +118,7 @@ fn calculate_quality_multiplier_uncached(conn: &SrtlaConnection, current_time_ms
 /// Returns a multiplier between 1.0 (slow RTT) and MAX_RTT_BONUS (fast RTT)
 /// Bonus is very small to avoid causing instability
 #[inline(always)]
-fn calculate_rtt_bonus(conn: &SrtlaConnection) -> f64 {
-    let smooth_rtt = conn.get_smooth_rtt_ms();
-
+fn calculate_rtt_bonus(smooth_rtt: f64) -> f64 {
     // Only apply RTT bonus if we have valid RTT measurements
     if smooth_rtt <= 0.0 {
         return 1.0; // No RTT data yet

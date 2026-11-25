@@ -3,6 +3,7 @@ use srtla_core::utils::now_ms;
 use srtla_protocol::PKT_LOG_SIZE;
 use tracing::{info, warn};
 
+use super::uplink::ConnIoMap;
 use crate::config::DynamicConfig;
 
 /// Comprehensive status monitoring for connections
@@ -14,6 +15,7 @@ use crate::config::DynamicConfig;
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn log_connection_status(
     connections: &[SrtlaConnection],
+    conn_io: &ConnIoMap,
     last_selected_idx: Option<usize>,
     config: &DynamicConfig,
 ) {
@@ -36,7 +38,7 @@ pub(crate) fn log_connection_status(
         if !conn.is_timed_out(now) {
             active_connections += 1;
         }
-        total_bitrate_mbps += conn.current_bitrate_mbps();
+        total_bitrate_mbps += conn.telemetry(now).bitrate_mbps;
         total_in_flight += conn.in_flight_packets as usize;
     }
 
@@ -105,7 +107,8 @@ pub(crate) fn log_connection_status(
         } else {
             "ACTIVE"
         };
-        let score = conn.get_score();
+        let t = conn.telemetry(now);
+        let score = t.base_score;
 
         // Avoid String allocation for common score cases
         let score_desc: std::borrow::Cow<'static, str> = match score {
@@ -115,14 +118,15 @@ pub(crate) fn log_connection_status(
         };
 
         // Elapsed since the monotonic ms stamp.
-        let last_recv = conn
-            .last_received
-            .map(|t| format!("{:.1}s ago", now.saturating_sub(t) as f64 / 1000.0))
+        let last_recv = t
+            .last_received_ms
+            .map(|ts| format!("{:.1}s ago", now.saturating_sub(ts) as f64 / 1000.0))
             .unwrap_or_else(|| "never".into());
 
-        let last_send = conn
-            .last_sent
-            .map(|t| format!("{:.1}s ago", now.saturating_sub(t) as f64 / 1000.0))
+        let last_send = conn_io
+            .get(&conn.conn_id)
+            .and_then(|io| io.socket.last_sent_ms())
+            .map(|ts| format!("{:.1}s ago", now.saturating_sub(ts) as f64 / 1000.0))
             .unwrap_or_else(|| "never".into());
 
         info!(
@@ -136,18 +140,18 @@ pub(crate) fn log_connection_status(
             last_send,
             conn.window,
             conn.in_flight_packets,
-            conn.current_bitrate_mbps()
+            t.bitrate_mbps
         );
 
-        if conn.rtt.estimated_rtt_ms > 0.0 {
+        if t.estimated_rtt_ms > 0.0 {
             info!(
                 "        RTT: kalman={:.1}ms, velocity={:.2}ms/s, jitter={:.1}ms, stable={} \
                  (last: {:.1}s ago)",
-                conn.get_smooth_rtt_ms(),
-                conn.get_rtt_velocity(),
-                conn.get_rtt_jitter_ms(),
-                conn.is_rtt_stable(),
-                (now_ms().saturating_sub(conn.rtt.last_rtt_measurement_ms) as f64) / 1000.0
+                t.rtt_ms,
+                t.rtt_velocity,
+                t.rtt_jitter_ms,
+                t.rtt_stable,
+                (now_ms().saturating_sub(t.last_rtt_measurement_ms) as f64) / 1000.0
             );
         }
     }

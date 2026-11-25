@@ -886,21 +886,17 @@ impl LinkCcController {
         let mut alive: HashMap<u64, LinkCcSnapshot> = HashMap::with_capacity(connections.len());
         for conn in connections {
             let entry = self.per_conn.entry(conn.conn_id).or_default();
-            let rtt_ms = conn.get_smooth_rtt_ms();
-            if rtt_ms > 0.0 {
-                entry.record_rtt(rtt_ms, now_ms);
+            let t = conn.telemetry(now_ms);
+            if t.rtt_ms > 0.0 {
+                entry.record_rtt(t.rtt_ms, now_ms);
             }
             // Loss path: cumulative bytes-sent and NAK count from the
             // connection — `observe_traffic` computes per-tick deltas
             // and forwards to `record_loss`. Before this wiring landed,
             // the loss window stayed empty and CcState::BackingOff was
             // unreachable in production.
-            entry.observe_traffic(
-                conn.bitrate.bytes_sent_total,
-                conn.total_nak_count(),
-                now_ms,
-            );
-            let observed_bps = conn.bitrate.current_bitrate_bps.max(0.0) as u64;
+            entry.observe_traffic(t.bytes_sent_total, t.nak_count, now_ms);
+            let observed_bps = t.bitrate_bps.max(0.0) as u64;
             entry.tick(observed_bps, now_ms);
             alive.insert(conn.conn_id, entry.snapshot());
         }

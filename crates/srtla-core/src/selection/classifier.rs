@@ -242,9 +242,10 @@ impl WeakLinkFilter {
             if !conn.connected {
                 continue;
             }
+            let t = conn.telemetry(0);
             connected_count += 1;
-            total_bps += conn.bitrate.current_bitrate_bps.max(0.0);
-            let rtt_ms = conn.get_smooth_rtt_ms() as u32;
+            total_bps += t.bitrate_bps.max(0.0);
+            let rtt_ms = t.rtt_ms as u32;
             if rtt_ms > longest_rtt_ms {
                 longest_rtt_ms = rtt_ms;
             }
@@ -284,8 +285,9 @@ impl WeakLinkFilter {
             if !conn.connected {
                 continue;
             }
-            let bps = conn.bitrate.current_bitrate_bps.max(0.0);
-            let rtt_ms = conn.get_smooth_rtt_ms() as u32;
+            let t = conn.telemetry(0);
+            let bps = t.bitrate_bps.max(0.0);
+            let rtt_ms = t.rtt_ms as u32;
             if rtt_ms <= target_best {
                 bytes_per_sec_best += bps;
             }
@@ -324,8 +326,9 @@ impl WeakLinkFilter {
                 continue;
             }
 
-            let rtt_ms = conn.get_smooth_rtt_ms() as u32;
-            let bps = conn.bitrate.current_bitrate_bps.max(0.0);
+            let t = conn.telemetry(0);
+            let rtt_ms = t.rtt_ms as u32;
+            let bps = t.bitrate_bps.max(0.0);
             let share_permille = if total_bps > 0.0 {
                 ((bps * 1000.0) / total_bps).clamp(0.0, 1000.0) as u32
             } else {
@@ -347,7 +350,7 @@ impl WeakLinkFilter {
             // WEAK_SUSTAIN_TICKS, filtering one-tick blips.
             let delay_signal = if rtt_ms > selected_delay {
                 Some(WeakReason::HighRtt)
-            } else if conn.queue_building_suspected() {
+            } else if t.queue_building_suspected {
                 Some(WeakReason::QueueBuilding)
             } else {
                 None

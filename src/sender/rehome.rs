@@ -46,16 +46,13 @@
 //! bond moved to. Neither order can leave uplinks split across two receivers.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
 use srtla_core::connection::SrtlaConnection;
 use srtla_core::registration::SrtlaRegistrationManager;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use super::connections::{
@@ -63,63 +60,13 @@ use super::connections::{
 };
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIoMap, ConnectionId, ReaderHandle, UplinkPacket, restart_reader_for};
-use crate::net::{resolve_remote_all, select_remote_for_source};
+use crate::net::{DnsResolver, ReceiverResolver, ResolvedAddrs, select_remote_for_source};
 
 /// At most one re-home *attempt* per minute, process-wide. The limit covers the
 /// DNS probe as well as the migration: housekeeping runs every second, and a
 /// dead bond would otherwise mean a receiver lookup every second for as long as
 /// the outage lasts.
 pub const REHOME_MIN_INTERVAL_MS: u64 = 60_000;
-
-/// Ceiling on a receiver lookup made from housekeeping. Housekeeping is the main
-/// event loop's tick, so a resolver that hangs must not hang the sender with it.
-/// Blocking the tick briefly is acceptable for both callers. Re-home only looks
-/// up a bond that is already dead. A reload only reaches DNS when it adds an
-/// uplink in an address family the bond has no receiver address for.
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Addresses a receiver hostname currently answers with.
-pub type ResolvedAddrs = SmallVec<SocketAddr, 4>;
-
-type ResolveFuture = Pin<Box<dyn Future<Output = Option<ResolvedAddrs>> + Send>>;
-
-/// Re-resolution of the receiver hostname, behind a seam so the trigger policy
-/// is testable without a live resolver.
-pub trait ReceiverResolver: Send + Sync {
-    /// `None` means the lookup failed, timed out, or answered with nothing. All
-    /// three are explicitly **not** drift: they told us nothing about where the
-    /// receiver is, so the bond stays where it is and keeps retrying normal
-    /// reconnects.
-    fn resolve(&self, host: String, port: u16) -> ResolveFuture;
-}
-
-/// The production resolver: a plain `getaddrinfo` under a timeout.
-pub struct DnsResolver;
-
-impl ReceiverResolver for DnsResolver {
-    fn resolve(&self, host: String, port: u16) -> ResolveFuture {
-        Box::pin(async move {
-            match tokio::time::timeout(RESOLVE_TIMEOUT, resolve_remote_all(&host, port)).await {
-                Ok(Ok(addrs)) if !addrs.is_empty() => Some(addrs),
-                Ok(Ok(_)) => {
-                    debug!("receiver lookup of {host} returned no addresses; staying put");
-                    None
-                }
-                Ok(Err(e)) => {
-                    debug!("receiver lookup of {host} failed ({e}); staying put");
-                    None
-                }
-                Err(_) => {
-                    warn!(
-                        "receiver lookup of {host} timed out after {:?}; staying put",
-                        RESOLVE_TIMEOUT
-                    );
-                    None
-                }
-            }
-        })
-    }
-}
 
 /// Trigger-policy state for whole-bond re-home: the opt-out switch, the rate
 /// limit, and the resolver seam.
@@ -159,6 +106,92 @@ impl RehomeGate {
         self.last_probe_ms = Some(now);
         true
     }
+
+    /// Try to migrate the whole bond to a freshly-resolved receiver address.
+    ///
+    /// Called only from the dead-bond branch of housekeeping, which supplies the
+    /// "every uplink has been down for longer than the all-failed window" half of
+    /// the trigger; this method supplies the rate limit and the DNS-drift half.
+    /// Returns `true` only when the bond was actually repointed, in which case the
+    /// caller re-arms the all-failed timer to give the fresh registration a full
+    /// window before the bond is declared unrecoverable.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn try_rehome(
+        &mut self,
+        connections: &mut SmallVec<SrtlaConnection, 4>,
+        conn_io: &mut ConnIoMap,
+        reg: &mut SrtlaRegistrationManager,
+        seq_tracker: &mut SequenceTracker,
+        reader_handles: &mut HashMap<ConnectionId, ReaderHandle>,
+        packet_tx: &UnboundedSender<UplinkPacket>,
+        receiver_host: &str,
+        dead_for_ms: u64,
+        now: u64,
+    ) -> bool {
+        // Every address the bond is currently pinned to. Startup dials every uplink
+        // from one answer and a reload reuses the bond's address per family, so
+        // this normally holds at most one address per family.
+        let current: ResolvedAddrs = pinned_remotes(connections, conn_io);
+        let Some(&pinned) = current.first() else {
+            return false;
+        };
+
+        if !self.claim_probe(now) {
+            return false;
+        }
+
+        let Some(fresh) = self
+            .resolver
+            .resolve(receiver_host.to_string(), pinned.port())
+            .await
+        else {
+            return false;
+        };
+
+        if !receiver_moved(&current, &fresh) {
+            debug!(
+                "bond down for {dead_for_ms}ms but {receiver_host} still resolves to it; not \
+                 re-homing, normal reconnects continue"
+            );
+            return false;
+        }
+
+        let answers: SmallVec<String, 4> = fresh.iter().map(ToString::to_string).collect();
+        // An answer that no uplink can reach is not somewhere to move. Migrating
+        // would drop every link and leave nothing for a later re-home to repoint.
+        if !connections
+            .iter()
+            .any(|conn| select_remote_for_source(&fresh, conn.local_ip).is_ok())
+        {
+            warn!(
+                "{receiver_host} now resolves to [{}], but no uplink has an address in those \
+                 families; not re-homing",
+                answers.join(", ")
+            );
+            return false;
+        }
+        warn!(
+            "re-homing the whole bond: {receiver_host} no longer resolves to {pinned} and every \
+             uplink has been down for {dead_for_ms}ms; moving {} uplink(s) to [{}] and \
+             re-registering from scratch",
+            connections.len(),
+            answers.join(", ")
+        );
+
+        rehome_bond(
+            connections,
+            conn_io,
+            reg,
+            seq_tracker,
+            reader_handles,
+            packet_tx,
+            &fresh,
+            now,
+        )
+        .await;
+        self.rehomes = self.rehomes.saturating_add(1);
+        true
+    }
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -177,134 +210,6 @@ impl RehomeGate {
     pub fn rehome_count(&self) -> u64 {
         self.rehomes
     }
-}
-
-/// Test seam: answers a scripted queue of lookups and counts how many it was
-/// asked for, so a test can assert not just the outcome but whether the trigger
-/// policy even reached DNS.
-#[cfg(any(test, feature = "test-internals"))]
-pub struct StubResolver {
-    answers: std::sync::Mutex<Vec<Option<ResolvedAddrs>>>,
-    calls: std::sync::atomic::AtomicUsize,
-}
-
-#[cfg(any(test, feature = "test-internals"))]
-impl StubResolver {
-    /// `answers` are consumed in order; `None` models a failed or empty lookup.
-    /// Once exhausted, every further lookup fails.
-    pub fn new(answers: Vec<Option<Vec<SocketAddr>>>) -> Arc<Self> {
-        Arc::new(Self {
-            answers: std::sync::Mutex::new(
-                answers
-                    .into_iter()
-                    .rev()
-                    .map(|a| a.map(SmallVec::from_vec))
-                    .collect(),
-            ),
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        })
-    }
-
-    pub fn calls(&self) -> usize {
-        self.calls.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-#[cfg(any(test, feature = "test-internals"))]
-impl ReceiverResolver for StubResolver {
-    fn resolve(&self, _host: String, _port: u16) -> ResolveFuture {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // `pop` off a reversed vec = FIFO.
-        let answer = self.answers.lock().unwrap().pop().flatten();
-        Box::pin(async move { answer })
-    }
-}
-
-/// Try to migrate the whole bond to a freshly-resolved receiver address.
-///
-/// Called only from the dead-bond branch of housekeeping, which supplies the
-/// "every uplink has been down for longer than the all-failed window" half of
-/// the trigger; this function supplies the rate limit and the DNS-drift half.
-/// Returns `true` only when the bond was actually repointed, in which case the
-/// caller re-arms the all-failed timer to give the fresh registration a full
-/// window before the bond is declared unrecoverable.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn try_rehome(
-    gate: &mut RehomeGate,
-    connections: &mut SmallVec<SrtlaConnection, 4>,
-    conn_io: &mut ConnIoMap,
-    reg: &mut SrtlaRegistrationManager,
-    seq_tracker: &mut SequenceTracker,
-    reader_handles: &mut HashMap<ConnectionId, ReaderHandle>,
-    packet_tx: &UnboundedSender<UplinkPacket>,
-    receiver_host: &str,
-    dead_for_ms: u64,
-    now: u64,
-) -> bool {
-    // Every address the bond is currently pinned to. Startup dials every uplink
-    // from one answer and a reload reuses the bond's address per family, so
-    // this normally holds at most one address per family.
-    let current: ResolvedAddrs = pinned_remotes(connections, conn_io);
-    let Some(&pinned) = current.first() else {
-        return false;
-    };
-
-    if !gate.claim_probe(now) {
-        return false;
-    }
-
-    let Some(fresh) = gate
-        .resolver
-        .resolve(receiver_host.to_string(), pinned.port())
-        .await
-    else {
-        return false;
-    };
-
-    if !receiver_moved(&current, &fresh) {
-        debug!(
-            "bond down for {dead_for_ms}ms but {receiver_host} still resolves to it; not \
-             re-homing, normal reconnects continue"
-        );
-        return false;
-    }
-
-    let answers: SmallVec<String, 4> = fresh.iter().map(ToString::to_string).collect();
-    // An answer that no uplink can reach is not somewhere to move. Migrating
-    // would drop every link and leave nothing for a later re-home to repoint.
-    if !connections
-        .iter()
-        .any(|conn| select_remote_for_source(&fresh, conn.local_ip).is_ok())
-    {
-        warn!(
-            "{receiver_host} now resolves to [{}], but no uplink has an address in those \
-             families; not re-homing",
-            answers.join(", ")
-        );
-        return false;
-    }
-    warn!(
-        "re-homing the whole bond: {receiver_host} no longer resolves to {pinned} and every \
-         uplink has been down for {dead_for_ms}ms; moving {} uplink(s) to [{}] and re-registering \
-         from scratch",
-        connections.len(),
-        answers.join(", ")
-    );
-
-    rehome_bond(
-        connections,
-        conn_io,
-        reg,
-        seq_tracker,
-        reader_handles,
-        packet_tx,
-        &fresh,
-        now,
-    )
-    .await;
-    gate.rehomes = gate.rehomes.saturating_add(1);
-    true
 }
 
 /// Repoint every uplink at the first `new_remotes` answer in its own address
@@ -401,6 +306,7 @@ mod tests {
     use srtla_core::utils::now_ms;
 
     use super::*;
+    use crate::net::StubResolver;
     use crate::sender::uplink::create_uplink_channel;
     use crate::test_helpers::{create_test_conn_io_map, create_test_connection};
 
@@ -451,8 +357,7 @@ mod tests {
 
     async fn run_try_rehome(bond: &mut Bond, gate: &mut RehomeGate, now: u64) -> bool {
         let (packet_tx, _packet_rx) = create_uplink_channel();
-        try_rehome(
-            gate,
+        gate.try_rehome(
             &mut bond.connections,
             &mut bond.conn_io,
             &mut bond.reg,

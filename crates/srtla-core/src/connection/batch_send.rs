@@ -224,9 +224,14 @@ impl BatchSender {
         self.entries.len() >= self.regime.batch_size()
     }
 
-    /// Update the batch regime. Called from housekeeping each tick
-    /// based on the connection's observed bitrate. No effect when the
-    /// regime hasn't actually changed.
+    /// Update the batch regime from the connection's observed bitrate (bps).
+    /// Called from housekeeping each tick; cheap when unchanged.
+    pub fn update_regime_for_bps(&mut self, bps: f64) {
+        self.regime = BatchRegime::from_bps(bps);
+    }
+
+    /// Update the batch regime directly (tests only).
+    #[cfg(test)]
     pub fn set_regime(&mut self, regime: BatchRegime) {
         self.regime = regime;
     }

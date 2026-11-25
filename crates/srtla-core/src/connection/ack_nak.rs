@@ -378,7 +378,7 @@ mod tests {
             assert!(conn.handle_nak(30, false, 1_020));
             let mut packet = [0u8; 16];
             packet[..4].copy_from_slice(&30u32.to_be_bytes());
-            srtla_protocol::set_srt_data_retransmit(&mut packet);
+            srtla_protocol::SrtData::set_retransmit(&mut packet);
             conn.queue_data_packet(&packet, Some(30), 1_029);
             assert_eq!(conn.take_batch(1_029).len(), 1);
             conn.register_packet(31, 1_030);

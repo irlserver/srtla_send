@@ -41,13 +41,13 @@ mod tests {
             bitrate_bytes_per_sec: 3_125_000,
         };
 
-        let pkt = create_keepalive_packet_ext(info, srtla_core::utils::now_ms());
+        let pkt = Keepalive::encode_ext(info, srtla_core::utils::now_ms());
         assert_eq!(pkt.len(), SRTLA_KEEPALIVE_EXT_LEN);
-        assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
-        assert!(is_srtla_keepalive(&pkt));
+        assert_eq!(ControlPacket::packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
+        assert!(Keepalive::is_keepalive(&pkt));
 
         // Telemetry round-trip: every ConnectionInfo field preserved.
-        let parsed = extract_keepalive_conn_info(&pkt).expect("extended conn info parses");
+        let parsed = Keepalive::conn_info(&pkt).expect("extended conn info parses");
         assert_eq!(parsed, info, "ConnectionInfo must round-trip byte-for-byte");
         assert_eq!(parsed.rtt_ms, 87, "rtt_ms field preserved across the wire");
 
@@ -60,7 +60,7 @@ mod tests {
         assert!(tracker.waiting_for_keepalive_response);
 
         let sent_ts = T0.saturating_sub(50);
-        let mut echo = create_keepalive_packet_ext(info, srtla_core::utils::now_ms());
+        let mut echo = Keepalive::encode_ext(info, srtla_core::utils::now_ms());
         echo[2..10].copy_from_slice(&sent_ts.to_be_bytes());
 
         let measured = tracker
@@ -93,13 +93,16 @@ mod tests {
         let bare: [u8; 2] = SRTLA_TYPE_KEEPALIVE.to_be_bytes();
 
         // Recognised as a keepalive by the discriminator…
-        assert_eq!(get_packet_type(&bare), Some(SRTLA_TYPE_KEEPALIVE));
-        assert!(is_srtla_keepalive(&bare));
+        assert_eq!(
+            ControlPacket::packet_type(&bare),
+            Some(SRTLA_TYPE_KEEPALIVE)
+        );
+        assert!(Keepalive::is_keepalive(&bare));
 
         // …but too short to carry a timestamp or extended telemetry: both
         // return None, gracefully (no panic, no unwrap).
-        assert_eq!(extract_keepalive_timestamp(&bare), None);
-        assert!(extract_keepalive_conn_info(&bare).is_none());
+        assert_eq!(Keepalive::timestamp(&bare), None);
+        assert!(Keepalive::conn_info(&bare).is_none());
 
         // The real receive path tolerates the bare echo: no RTT sample, no
         // panic, and the waiting flag is cleared so the next keepalive cycle
@@ -132,9 +135,9 @@ mod tests {
             }
 
             // None of these may panic at any length.
-            let _ = get_packet_type(&buf);
-            let _ = extract_keepalive_timestamp(&buf);
-            let _ = extract_keepalive_conn_info(&buf);
+            let _ = ControlPacket::packet_type(&buf);
+            let _ = Keepalive::timestamp(&buf);
+            let _ = Keepalive::conn_info(&buf);
 
             // The receive path must never panic on a malformed echo. Re-arm
             // before each call so the guard branch is actually exercised.
@@ -144,10 +147,10 @@ mod tests {
             // Length-specific contract: a timestamp needs >= 10 bytes; the
             // extended telemetry needs the full 38-byte frame (magic+version).
             if len < 10 {
-                assert_eq!(extract_keepalive_timestamp(&buf), None);
+                assert_eq!(Keepalive::timestamp(&buf), None);
             }
             if len < SRTLA_KEEPALIVE_EXT_LEN {
-                assert!(extract_keepalive_conn_info(&buf).is_none());
+                assert!(Keepalive::conn_info(&buf).is_none());
             }
         }
 
@@ -159,10 +162,13 @@ mod tests {
         oversized[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
         let ts = T0.saturating_sub(20);
         oversized[2..10].copy_from_slice(&ts.to_be_bytes());
-        assert_eq!(get_packet_type(&oversized), Some(SRTLA_TYPE_KEEPALIVE));
-        assert!(extract_keepalive_timestamp(&oversized).is_some());
+        assert_eq!(
+            ControlPacket::packet_type(&oversized),
+            Some(SRTLA_TYPE_KEEPALIVE)
+        );
+        assert!(Keepalive::timestamp(&oversized).is_some());
         assert!(
-            extract_keepalive_conn_info(&oversized).is_none(),
+            Keepalive::conn_info(&oversized).is_none(),
             "oversized frame without the 0xC01F magic must not parse as extended"
         );
     }

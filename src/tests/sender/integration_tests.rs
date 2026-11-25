@@ -11,25 +11,31 @@ use srtla_protocol::*;
 async fn test_protocol_packet_roundtrip() {
     // Test REG1 packet creation and validation
     let id = [0x42; SRTLA_ID_LEN];
-    let reg1_packet = create_reg1_packet(&id);
+    let reg1_packet = RegPacket::reg1(&id);
 
-    assert!(is_srtla_reg1(&reg1_packet));
-    assert_eq!(get_packet_type(&reg1_packet), Some(SRTLA_TYPE_REG1));
+    assert!(RegPacket::is_reg1(&reg1_packet));
+    assert_eq!(
+        ControlPacket::packet_type(&reg1_packet),
+        Some(SRTLA_TYPE_REG1)
+    );
 
     // Test REG2 packet creation and validation
-    let reg2_packet = create_reg2_packet(&id);
-    assert!(is_srtla_reg2(&reg2_packet));
-    assert_eq!(get_packet_type(&reg2_packet), Some(SRTLA_TYPE_REG2));
+    let reg2_packet = RegPacket::reg2(&id);
+    assert!(RegPacket::is_reg2(&reg2_packet));
+    assert_eq!(
+        ControlPacket::packet_type(&reg2_packet),
+        Some(SRTLA_TYPE_REG2)
+    );
 
     // Test keepalive packet creation and timestamp extraction
-    let keepalive_packet = create_keepalive_packet(srtla_core::utils::now_ms());
-    assert!(is_srtla_keepalive(&keepalive_packet));
+    let keepalive_packet = Keepalive::encode(srtla_core::utils::now_ms());
+    assert!(Keepalive::is_keepalive(&keepalive_packet));
     assert_eq!(
-        get_packet_type(&keepalive_packet),
+        ControlPacket::packet_type(&keepalive_packet),
         Some(SRTLA_TYPE_KEEPALIVE)
     );
 
-    let timestamp = extract_keepalive_timestamp(&keepalive_packet);
+    let timestamp = Keepalive::timestamp(&keepalive_packet);
     assert!(timestamp.is_some());
     assert!(timestamp.unwrap() > 0);
 }
@@ -41,8 +47,8 @@ async fn test_srt_ack_nak_parsing() {
     ack_packet[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
     ack_packet[16..20].copy_from_slice(&54321u32.to_be_bytes());
 
-    assert_eq!(parse_srt_ack(&ack_packet), Some(54321));
-    assert!(is_srt_ack(&ack_packet));
+    assert_eq!(ControlPacket::parse_srt_ack(&ack_packet), Some(54321));
+    assert!(ControlPacket::is_srt_ack(&ack_packet));
 
     // Test SRT NAK packet parsing - single NAK. The loss list is the control
     // packet's CIF, so entries start after the 16-byte control header.
@@ -50,7 +56,7 @@ async fn test_srt_ack_nak_parsing() {
     nak_packet[0..2].copy_from_slice(&SRT_TYPE_NAK.to_be_bytes());
     nak_packet[16..20].copy_from_slice(&12345u32.to_be_bytes());
 
-    let naks = parse_srt_nak(&nak_packet);
+    let naks = ControlPacket::parse_srt_nak(&nak_packet);
     assert_eq!(naks.as_slice(), &[12345]);
 
     // Test SRT NAK packet parsing - range NAK
@@ -60,18 +66,21 @@ async fn test_srt_ack_nak_parsing() {
     range_nak_packet[16..20].copy_from_slice(&range_start.to_be_bytes());
     range_nak_packet[20..24].copy_from_slice(&1003u32.to_be_bytes());
 
-    let range_naks = parse_srt_nak(&range_nak_packet);
+    let range_naks = ControlPacket::parse_srt_nak(&range_nak_packet);
     assert_eq!(range_naks.as_slice(), &[1000, 1001, 1002, 1003]);
 }
 
 #[tokio::test]
 async fn test_srtla_ack_roundtrip() {
     let original_acks = vec![100u32, 200, 300, 400];
-    let ack_packet = create_ack_packet(&original_acks);
+    let ack_packet = SrtlaAck::encode(&original_acks);
 
-    assert_eq!(get_packet_type(&ack_packet), Some(SRTLA_TYPE_ACK));
+    assert_eq!(
+        ControlPacket::packet_type(&ack_packet),
+        Some(SRTLA_TYPE_ACK)
+    );
 
-    let parsed_acks = parse_srtla_ack(&ack_packet);
+    let parsed_acks = SrtlaAck::parse(&ack_packet);
     assert_eq!(parsed_acks.as_slice(), original_acks.as_slice());
 }
 
@@ -79,15 +88,15 @@ async fn test_srtla_ack_roundtrip() {
 async fn test_sequence_number_parsing() {
     // Valid sequence number (control bit clear)
     let data_packet = [0x00, 0x00, 0x12, 0x34];
-    assert_eq!(get_srt_sequence_number(&data_packet), Some(0x1234));
+    assert_eq!(SrtData::sequence_number(&data_packet), Some(0x1234));
 
     // Invalid sequence number (control bit set)
     let control_packet = [0x80, 0x00, 0x12, 0x34];
-    assert_eq!(get_srt_sequence_number(&control_packet), None);
+    assert_eq!(SrtData::sequence_number(&control_packet), None);
 
     // Maximum valid sequence number
     let max_seq_packet = [0x7f, 0xff, 0xff, 0xff];
-    assert_eq!(get_srt_sequence_number(&max_seq_packet), Some(0x7fffffff));
+    assert_eq!(SrtData::sequence_number(&max_seq_packet), Some(0x7fffffff));
 }
 
 #[test]
@@ -142,7 +151,7 @@ fn test_large_nak_range_limit() {
     large_range_packet[16..20].copy_from_slice(&range_start.to_be_bytes());
     large_range_packet[20..24].copy_from_slice(&2000u32.to_be_bytes());
 
-    let naks = parse_srt_nak(&large_range_packet);
+    let naks = ControlPacket::parse_srt_nak(&large_range_packet);
     assert!(
         naks.len() <= 1000,
         "NAK range should be limited to 1000 items"
@@ -152,18 +161,18 @@ fn test_large_nak_range_limit() {
 #[test]
 fn test_malformed_packet_handling() {
     // Test handling of packets that are too short
-    assert_eq!(get_packet_type(&[]), None);
-    assert_eq!(get_packet_type(&[0x90]), None);
+    assert_eq!(ControlPacket::packet_type(&[]), None);
+    assert_eq!(ControlPacket::packet_type(&[0x90]), None);
 
-    assert_eq!(get_srt_sequence_number(&[]), None);
-    assert_eq!(get_srt_sequence_number(&[0x00, 0x00]), None);
+    assert_eq!(SrtData::sequence_number(&[]), None);
+    assert_eq!(SrtData::sequence_number(&[0x00, 0x00]), None);
 
     // Test handling of malformed NAK packets
     let short_nak = [0x80, 0x03, 0x00, 0x00]; // Too short for any NAK data
-    assert!(parse_srt_nak(&short_nak).is_empty());
+    assert!(ControlPacket::parse_srt_nak(&short_nak).is_empty());
 
     let wrong_type = [0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x12, 0x34]; // ACK, not NAK
-    assert!(parse_srt_nak(&wrong_type).is_empty());
+    assert!(ControlPacket::parse_srt_nak(&wrong_type).is_empty());
 }
 
 #[test]
@@ -173,8 +182,8 @@ fn test_keepalive_timestamp_edge_cases() {
     min_keepalive[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
     // Timestamp is all zeros
 
-    assert!(is_srtla_keepalive(&min_keepalive));
-    assert_eq!(extract_keepalive_timestamp(&min_keepalive), Some(0));
+    assert!(Keepalive::is_keepalive(&min_keepalive));
+    assert_eq!(Keepalive::timestamp(&min_keepalive), Some(0));
 
     // Test keepalive with maximum timestamp
     let mut max_keepalive = vec![0u8; 10];
@@ -183,23 +192,23 @@ fn test_keepalive_timestamp_edge_cases() {
         max_keepalive[i] = 0xff;
     }
 
-    assert_eq!(extract_keepalive_timestamp(&max_keepalive), Some(u64::MAX));
+    assert_eq!(Keepalive::timestamp(&max_keepalive), Some(u64::MAX));
 
     // Test with wrong packet type
     let mut wrong_type = min_keepalive.clone();
     wrong_type[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
-    assert_eq!(extract_keepalive_timestamp(&wrong_type), None);
+    assert_eq!(Keepalive::timestamp(&wrong_type), None);
 }
 
 #[tokio::test]
 async fn test_empty_ack_packet() {
     let empty_acks: SmallVec<u32, 4> = SmallVec::new();
-    let packet = create_ack_packet(&empty_acks);
+    let packet = SrtlaAck::encode(&empty_acks);
 
     assert_eq!(packet.len(), 4); // Packet type + padding
-    assert_eq!(get_packet_type(&packet), Some(SRTLA_TYPE_ACK));
+    assert_eq!(ControlPacket::packet_type(&packet), Some(SRTLA_TYPE_ACK));
 
-    let parsed = parse_srtla_ack(&packet);
+    let parsed = SrtlaAck::parse(&packet);
     assert!(parsed.is_empty());
 }
 
@@ -207,47 +216,47 @@ async fn test_empty_ack_packet() {
 fn test_packet_validators_comprehensive() {
     // Create valid packets of each type
     let reg1_id = [0x11; SRTLA_ID_LEN];
-    let reg1_packet = create_reg1_packet(&reg1_id);
+    let reg1_packet = RegPacket::reg1(&reg1_id);
 
     let reg2_id = [0x22; SRTLA_ID_LEN];
-    let reg2_packet = create_reg2_packet(&reg2_id);
+    let reg2_packet = RegPacket::reg2(&reg2_id);
 
     let reg3_packet = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
-    let keepalive_packet = create_keepalive_packet(srtla_core::utils::now_ms());
+    let keepalive_packet = Keepalive::encode(srtla_core::utils::now_ms());
 
     let mut ack_packet = vec![0u8; 20];
     ack_packet[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
 
     // Test cross-validation - each validator should only accept its own type
-    assert!(is_srtla_reg1(&reg1_packet));
-    assert!(!is_srtla_reg1(&reg2_packet));
-    assert!(!is_srtla_reg1(&reg3_packet));
-    assert!(!is_srtla_reg1(&keepalive_packet));
-    assert!(!is_srtla_reg1(&ack_packet));
+    assert!(RegPacket::is_reg1(&reg1_packet));
+    assert!(!RegPacket::is_reg1(&reg2_packet));
+    assert!(!RegPacket::is_reg1(&reg3_packet));
+    assert!(!RegPacket::is_reg1(&keepalive_packet));
+    assert!(!RegPacket::is_reg1(&ack_packet));
 
-    assert!(!is_srtla_reg2(&reg1_packet));
-    assert!(is_srtla_reg2(&reg2_packet));
-    assert!(!is_srtla_reg2(&reg3_packet));
-    assert!(!is_srtla_reg2(&keepalive_packet));
-    assert!(!is_srtla_reg2(&ack_packet));
+    assert!(!RegPacket::is_reg2(&reg1_packet));
+    assert!(RegPacket::is_reg2(&reg2_packet));
+    assert!(!RegPacket::is_reg2(&reg3_packet));
+    assert!(!RegPacket::is_reg2(&keepalive_packet));
+    assert!(!RegPacket::is_reg2(&ack_packet));
 
-    assert!(!is_srtla_reg3(&reg1_packet));
-    assert!(!is_srtla_reg3(&reg2_packet));
-    assert!(is_srtla_reg3(&reg3_packet));
-    assert!(!is_srtla_reg3(&keepalive_packet));
-    assert!(!is_srtla_reg3(&ack_packet));
+    assert!(!RegPacket::is_reg3(&reg1_packet));
+    assert!(!RegPacket::is_reg3(&reg2_packet));
+    assert!(RegPacket::is_reg3(&reg3_packet));
+    assert!(!RegPacket::is_reg3(&keepalive_packet));
+    assert!(!RegPacket::is_reg3(&ack_packet));
 
-    assert!(!is_srtla_keepalive(&reg1_packet));
-    assert!(!is_srtla_keepalive(&reg2_packet));
-    assert!(!is_srtla_keepalive(&reg3_packet));
-    assert!(is_srtla_keepalive(&keepalive_packet));
-    assert!(!is_srtla_keepalive(&ack_packet));
+    assert!(!Keepalive::is_keepalive(&reg1_packet));
+    assert!(!Keepalive::is_keepalive(&reg2_packet));
+    assert!(!Keepalive::is_keepalive(&reg3_packet));
+    assert!(Keepalive::is_keepalive(&keepalive_packet));
+    assert!(!Keepalive::is_keepalive(&ack_packet));
 
-    assert!(!is_srt_ack(&reg1_packet));
-    assert!(!is_srt_ack(&reg2_packet));
-    assert!(!is_srt_ack(&reg3_packet));
-    assert!(!is_srt_ack(&keepalive_packet));
-    assert!(is_srt_ack(&ack_packet));
+    assert!(!ControlPacket::is_srt_ack(&reg1_packet));
+    assert!(!ControlPacket::is_srt_ack(&reg2_packet));
+    assert!(!ControlPacket::is_srt_ack(&reg3_packet));
+    assert!(!ControlPacket::is_srt_ack(&keepalive_packet));
+    assert!(ControlPacket::is_srt_ack(&ack_packet));
 }
 
 #[test]

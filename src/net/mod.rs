@@ -20,9 +20,11 @@ pub use batch_recv::{BatchUdpSocket, RecvMmsgBuffer, recv_udp_batch};
 // only: it binds by raw fd, which Windows does not have.
 #[cfg(unix)]
 pub use socket::CallbackBinder;
+#[cfg(any(test, feature = "test-internals"))]
+pub use socket::StubResolver;
 pub use socket::{
-    SourceIpBinder, UplinkBinder, create_uplink_socket, resolve_remote_all,
-    select_remote_for_source,
+    DnsResolver, ReceiverResolver, ResolvedAddrs, SourceIpBinder, UplinkBinder,
+    create_uplink_socket, resolve_remote_all, select_remote_for_source,
 };
 use srtla_core::connection::BATCH_SEND_SIZE;
 
