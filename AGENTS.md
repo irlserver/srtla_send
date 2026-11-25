@@ -30,7 +30,7 @@ SRTLA Sender is a Rust implementation of the SRTLA bonding sender. SRTLA is a SR
 
 - **Language**: Rust (Edition 2024). `rust-toolchain.toml` pins the stable toolchain; nightly is used only for rustfmt
 - **Minimum Rust Version**: the `rust-version` in `Cargo.toml`, checked by the CI MSRV job
-- **Async Runtime**: Tokio (multi-threaded runtime with macros, net, time, io-util, signal, sync)
+- **Async Runtime**: Tokio (`current_thread` runtime with macros, net, time, io-util, signal, sync). The packet loop owns all bonding state, so worker threads only add a cross-thread wake per received packet. Tests still build runtimes with `Runtime::new()`, which is why `rt-multi-thread` is a dev-dependency feature
 - **CLI**: clap with derive features
 - **Logging**: tracing + tracing-subscriber with env-filter
 - **Networking**: socket2 for low-level socket operations, tokio::net for async UDP
