@@ -107,8 +107,8 @@ async fn test_protocol_message_flow() {
     }
 
     // Step 1: Create REG1 packet
-    let reg1_packet = create_reg1_packet(&sender_id);
-    assert!(is_srtla_reg1(&reg1_packet));
+    let reg1_packet = RegPacket::reg1(&sender_id);
+    assert!(RegPacket::is_reg1(&reg1_packet));
     assert_eq!(reg1_packet.len(), SRTLA_TYPE_REG1_LEN);
 
     // Step 2: Simulate server modifying the ID for REG2 response
@@ -118,8 +118,8 @@ async fn test_protocol_message_flow() {
         *byte = byte.wrapping_add(0x80); // Server modification
     }
 
-    let reg2_packet = create_reg2_packet(&server_id);
-    assert!(is_srtla_reg2(&reg2_packet));
+    let reg2_packet = RegPacket::reg2(&server_id);
+    assert!(RegPacket::is_reg2(&reg2_packet));
     assert_eq!(reg2_packet.len(), SRTLA_TYPE_REG2_LEN);
 
     // Step 3: Verify that sender ID was different from server ID
@@ -127,7 +127,7 @@ async fn test_protocol_message_flow() {
 
     // Step 4: Create REG3 confirmation
     let reg3_packet = vec![(SRTLA_TYPE_REG3 >> 8) as u8, (SRTLA_TYPE_REG3 & 0xff) as u8];
-    assert!(is_srtla_reg3(&reg3_packet));
+    assert!(RegPacket::is_reg3(&reg3_packet));
     assert_eq!(reg3_packet.len(), SRTLA_TYPE_REG3_LEN);
 }
 
@@ -145,8 +145,8 @@ async fn test_keepalive_timing() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let packet = create_keepalive_packet(srtla_core::utils::now_ms());
-        let timestamp = extract_keepalive_timestamp(&packet).unwrap();
+        let packet = Keepalive::encode(srtla_core::utils::now_ms());
+        let timestamp = Keepalive::timestamp(&packet).unwrap();
         timestamps.push(timestamp);
     }
 
@@ -175,8 +175,8 @@ async fn test_ack_nak_sequence_handling() {
     let sequences: SmallVec<u32, 4> = SmallVec::from_vec(vec![100u32, 101, 102, 103, 104, 105]);
 
     // Create SRTLA ACK packet
-    let ack_packet = create_ack_packet(&sequences);
-    let parsed_acks = parse_srtla_ack(&ack_packet);
+    let ack_packet = SrtlaAck::encode(&sequences);
+    let parsed_acks = SrtlaAck::parse(&ack_packet);
     assert_eq!(parsed_acks, sequences);
 
     // Create SRT NAK packet with mixed single and range NAKs. The loss list is
@@ -195,7 +195,7 @@ async fn test_ack_nak_sequence_handling() {
     // Another single NAK
     nak_packet.extend_from_slice(&400u32.to_be_bytes());
 
-    let parsed_naks = parse_srt_nak(&nak_packet);
+    let parsed_naks = ControlPacket::parse_srt_nak(&nak_packet);
     let expected_naks: SmallVec<u32, 4> = SmallVec::from_vec(vec![200, 300, 301, 302, 303, 400]);
     assert_eq!(parsed_naks, expected_naks);
 }
@@ -208,7 +208,7 @@ async fn test_packet_size_limits() {
     let max_acks = (MTU - 2) / 4; // Maximum ACKs that fit in MTU
     let large_ack_list: SmallVec<u32, 4> = (0..max_acks as u32).collect();
 
-    let packet = create_ack_packet(&large_ack_list);
+    let packet = SrtlaAck::encode(&large_ack_list);
     assert!(packet.len() <= MTU, "ACK packet should not exceed MTU");
     assert_eq!(
         packet.len(),
@@ -217,7 +217,7 @@ async fn test_packet_size_limits() {
     );
 
     // Test that parsing works correctly for large packets
-    let parsed = parse_srtla_ack(&packet);
+    let parsed = SrtlaAck::parse(&packet);
     assert_eq!(parsed.len(), large_ack_list.len());
     assert_eq!(parsed, large_ack_list);
 }
@@ -236,17 +236,17 @@ async fn test_error_resilience() {
 
     for case in test_cases {
         // These should not panic
-        let _ = get_packet_type(&case);
-        let _ = get_srt_sequence_number(&case);
-        let _ = parse_srt_ack(&case);
-        let _ = parse_srt_nak(&case);
-        let _ = parse_srtla_ack(&case);
-        let _ = extract_keepalive_timestamp(&case);
-        let _ = is_srtla_reg1(&case);
-        let _ = is_srtla_reg2(&case);
-        let _ = is_srtla_reg3(&case);
-        let _ = is_srtla_keepalive(&case);
-        let _ = is_srt_ack(&case);
+        let _ = ControlPacket::packet_type(&case);
+        let _ = SrtData::sequence_number(&case);
+        let _ = ControlPacket::parse_srt_ack(&case);
+        let _ = ControlPacket::parse_srt_nak(&case);
+        let _ = SrtlaAck::parse(&case);
+        let _ = Keepalive::timestamp(&case);
+        let _ = RegPacket::is_reg1(&case);
+        let _ = RegPacket::is_reg2(&case);
+        let _ = RegPacket::is_reg3(&case);
+        let _ = Keepalive::is_keepalive(&case);
+        let _ = ControlPacket::is_srt_ack(&case);
     }
 }
 
@@ -265,12 +265,12 @@ async fn test_concurrent_packet_processing() {
         let results_clone = results.clone();
         let handle = tokio::spawn(async move {
             // Create different types of packets
-            let keepalive = create_keepalive_packet(srtla_core::utils::now_ms());
-            let timestamp = extract_keepalive_timestamp(&keepalive).unwrap();
+            let keepalive = Keepalive::encode(srtla_core::utils::now_ms());
+            let timestamp = Keepalive::timestamp(&keepalive).unwrap();
 
             let acks = vec![i * 100u32, i * 100 + 1, i * 100 + 2];
-            let ack_packet = create_ack_packet(&acks);
-            let parsed_acks = parse_srtla_ack(&ack_packet);
+            let ack_packet = SrtlaAck::encode(&acks);
+            let parsed_acks = SrtlaAck::parse(&ack_packet);
 
             let mut results_guard = results_clone.lock().await;
             results_guard.push((i, timestamp, parsed_acks));
@@ -309,7 +309,7 @@ fn test_memory_usage_bounds() {
     large_nak.extend_from_slice(&range_start.to_be_bytes());
     large_nak.extend_from_slice(&10001u32.to_be_bytes());
 
-    let naks = parse_srt_nak(&large_nak);
+    let naks = ControlPacket::parse_srt_nak(&large_nak);
 
     // Should be limited to 1000 items max
     assert!(naks.len() <= 1000);

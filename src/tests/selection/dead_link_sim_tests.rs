@@ -309,7 +309,7 @@ mod tests {
             let mut pkt = [0u8; 16];
             pkt[..4].copy_from_slice(&seq.to_be_bytes());
             if retransmit {
-                srtla_protocol::set_srt_data_retransmit(&mut pkt);
+                srtla_protocol::SrtData::set_retransmit(&mut pkt);
             }
             pkt
         }
@@ -320,9 +320,8 @@ mod tests {
             if batch.is_empty() {
                 return;
             }
-            self.conns[link].note_sent(now);
             for (data, _, _) in batch.iter() {
-                let Some(seq) = srtla_protocol::get_srt_sequence_number(data) else {
+                let Some(seq) = srtla_protocol::SrtData::sequence_number(data) else {
                     continue;
                 };
                 if let Some(at) = self.forward_arrival(link, now) {

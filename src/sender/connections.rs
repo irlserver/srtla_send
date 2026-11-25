@@ -10,11 +10,10 @@ use srtla_core::registration::SrtlaRegistrationManager;
 use srtla_core::utils::now_ms;
 use tracing::{debug, info, warn};
 
-use super::rehome::ReceiverResolver;
 use super::sequence::SequenceTracker;
 use super::uplink::{ConnIo, ConnIoMap};
 use crate::net::{
-    BatchUdpSocket, UplinkBinder, create_uplink_socket, resolve_remote_all,
+    BatchUdpSocket, ReceiverResolver, UplinkBinder, create_uplink_socket, resolve_remote_all,
     select_remote_for_source,
 };
 
@@ -173,12 +172,11 @@ pub fn weight_for(ips: &[IpAddr], weights: &[u8], ip: IpAddr) -> u8 {
 pub fn apply_link_weights(connections: &mut [SrtlaConnection], ips: &[IpAddr], weights: &[u8]) {
     for conn in connections.iter_mut() {
         let weight = weight_for(ips, weights, conn.local_ip);
-        if conn.link_weight != weight {
+        if let Some(prev) = conn.set_link_weight(weight) {
             info!(
                 "uplink {} weight {} -> {}",
-                conn.label, conn.link_weight, weight
+                conn.label, prev, conn.link_weight
             );
-            conn.link_weight = weight;
         }
     }
 }
@@ -200,7 +198,7 @@ pub async fn create_connections_from_ips(
         };
         match dialed {
             Ok((mut conn, io)) => {
-                conn.link_weight = weight_for(ips, weights, *ip);
+                conn.set_link_weight(weight_for(ips, weights, *ip));
                 info!("added uplink {} (weight {})", conn.label, conn.link_weight);
                 conn_io.insert(conn.conn_id, io);
                 connections.push(conn);
@@ -299,7 +297,6 @@ pub(super) fn rebuild_uplink_socket(
     // problem `recover_connection` exists for, and a full socket reconnection is
     // the harder reset of the two.
     seq_tracker.remove_connection(conn.conn_id);
-    conn.reconnection.reset_startup_grace(now);
     Ok(())
 }
 
@@ -552,9 +549,8 @@ mod tests {
         let (mut connections, mut conn_io) = pinned_bond().await;
         let added: IpAddr = "127.0.0.1".parse().unwrap();
         let new_ips = [connections[0].local_ip, connections[1].local_ip, added];
-        let resolver = super::super::rehome::StubResolver::new(vec![Some(vec![
-            "127.0.0.1:9999".parse().unwrap(),
-        ])]);
+        let resolver =
+            crate::net::StubResolver::new(vec![Some(vec!["127.0.0.1:9999".parse().unwrap()])]);
 
         reload(&mut connections, &mut conn_io, &new_ips, &*resolver).await;
 
@@ -570,9 +566,8 @@ mod tests {
     async fn reload_pin_replacing_every_ip_stays_on_the_bond_receiver() {
         let (mut connections, mut conn_io) = pinned_bond().await;
         let added: IpAddr = "127.0.0.1".parse().unwrap();
-        let resolver = super::super::rehome::StubResolver::new(vec![Some(vec![
-            "127.0.0.1:9999".parse().unwrap(),
-        ])]);
+        let resolver =
+            crate::net::StubResolver::new(vec![Some(vec!["127.0.0.1:9999".parse().unwrap()])]);
 
         reload(&mut connections, &mut conn_io, &[added], &*resolver).await;
 
@@ -587,7 +582,7 @@ mod tests {
         let (mut connections, mut conn_io) = pinned_bond().await;
         let kept = [connections[0].local_ip, connections[1].local_ip];
         let added: IpAddr = "::1".parse().unwrap();
-        let resolver = super::super::rehome::StubResolver::new(vec![Some(vec![
+        let resolver = crate::net::StubResolver::new(vec![Some(vec![
             "127.0.0.1:9999".parse().unwrap(),
             "[::1]:9999".parse().unwrap(),
         ])]);
@@ -621,7 +616,7 @@ mod tests {
         let kept_ids: Vec<u64> = connections.iter().map(|c| c.conn_id).collect();
         let kept = [connections[0].local_ip, connections[1].local_ip];
         let added: IpAddr = "::1".parse().unwrap();
-        let resolver = super::super::rehome::StubResolver::new(vec![None]);
+        let resolver = crate::net::StubResolver::new(vec![None]);
 
         reload(
             &mut connections,
@@ -749,7 +744,7 @@ mod tests {
         let (mut connections, mut conn_io) = pinned_bond().await;
         let added: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
         let new_ips = [connections[0].local_ip, connections[1].local_ip, added];
-        let resolver = super::super::rehome::StubResolver::new(vec![]);
+        let resolver = crate::net::StubResolver::new(vec![]);
 
         reload(&mut connections, &mut conn_io, &new_ips, &*resolver).await;
 
@@ -775,7 +770,7 @@ mod tests {
         conn_io.retain(|k, _| *k == id);
         conn_io.get_mut(&id).unwrap().remote = v6_remote;
         let added: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
-        let resolver = super::super::rehome::StubResolver::new(vec![Some(vec![
+        let resolver = crate::net::StubResolver::new(vec![Some(vec![
             "[::1]:9999".parse().unwrap(),
             "127.0.0.1:9999".parse().unwrap(),
         ])]);

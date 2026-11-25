@@ -33,7 +33,7 @@ mod tests {
 
         let pkt = caller_induction(0x0abc_def0);
         assert_eq!(
-            srtla_protocol::parse_srt_session_start(&pkt),
+            srtla_protocol::ControlPacket::parse_session_start(&pkt),
             Some(0x0abc_def0)
         );
 

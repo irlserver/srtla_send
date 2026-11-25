@@ -1,4 +1,4 @@
-use srtla_protocol::extract_keepalive_timestamp;
+use srtla_protocol::Keepalive;
 use tracing::debug;
 
 use crate::ewma::Ewma;
@@ -52,7 +52,7 @@ fn plausible_round_trip(sent_ms: u64, now_ms: u64) -> Option<u64> {
 /// left a stall-latched link on a sub-millisecond path unable to hold fresh
 /// proof between its sparse probe ACKs, so it could never finish its dwell.
 pub fn keepalive_echo_proves_delivery(data: &[u8], now_ms: u64) -> bool {
-    extract_keepalive_timestamp(data)
+    Keepalive::timestamp(data)
         .is_some_and(|sent_ms| sent_ms <= now_ms && now_ms - sent_ms <= MAX_PLAUSIBLE_RTT_MS)
 }
 
@@ -232,6 +232,47 @@ impl RttTracker {
         self.rtt_gradient_ms() > trip
     }
 
+    pub fn smooth_rtt_ms(&self) -> f64 {
+        // The 2-state Kalman filter can overshoot negative on a sharp high->low
+        // RTT transition; a negative RTT is meaningless and would leak into the
+        // selection/CC math, so clamp it. Callers that need to tell a never-measured
+        // link from a genuine ~0 already test `smooth_rtt <= 0.0`.
+        self.kalman_rtt.value().max(0.0)
+    }
+
+    pub fn raw_kalman_rtt_ms(&self) -> f64 {
+        self.kalman_rtt.value()
+    }
+
+    pub fn velocity(&self) -> f64 {
+        self.kalman_rtt.velocity()
+    }
+
+    pub fn rejoin_rtt_ms(&self) -> f64 {
+        let smooth = self.smooth_rtt_ms();
+        if self.kalman_rtt.is_initialized() && self.rtt_min_fast_ms > 0.0 {
+            smooth.min(self.rtt_min_fast_ms)
+        } else {
+            smooth
+        }
+    }
+
+    pub fn clear_pending_keepalive(&mut self) {
+        self.last_keepalive_sent_ms = 0;
+        self.waiting_for_keepalive_response = false;
+    }
+
+    /// Arm an RTT keepalive measurement when one is not already in flight and
+    /// the last measurement is stale (> 3 s) or absent.
+    pub fn maybe_record_keepalive_sent(&mut self, now_ms: u64) {
+        if !self.waiting_for_keepalive_response
+            && (self.last_rtt_measurement_ms == 0
+                || now_ms.saturating_sub(self.last_rtt_measurement_ms) > 3000)
+        {
+            self.record_keepalive_sent(now_ms);
+        }
+    }
+
     pub fn record_keepalive_sent(&mut self, now_ms: u64) {
         self.last_keepalive_sent_ms = now_ms;
         self.waiting_for_keepalive_response = true;
@@ -246,7 +287,7 @@ impl RttTracker {
         if !self.waiting_for_keepalive_response {
             return None;
         }
-        if let Some(ts) = extract_keepalive_timestamp(data) {
+        if let Some(ts) = Keepalive::timestamp(data) {
             let now = now_ms;
             if let Some(rtt) = self.record_round_trip(ts, now) {
                 self.waiting_for_keepalive_response = false;

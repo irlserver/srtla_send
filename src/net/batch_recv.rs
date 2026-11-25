@@ -36,9 +36,11 @@ mod unix_impl {
     use std::io::ErrorKind;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
     use std::os::unix::io::{AsRawFd, RawFd};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, ready};
 
     use socket2::{SockAddr, SockRef, Socket};
+    use srtla_core::utils::now_ms;
     use tokio::io::Interest;
     use tokio::net::UdpSocket;
 
@@ -80,6 +82,10 @@ mod unix_impl {
         inner: UdpSocket,
         peer: SockAddr,
         generation: u64,
+        /// Monotonic `now_ms()` of the last confirmed kernel send on this
+        /// socket (`0` = nothing sent yet). Owned by the socket so callers
+        /// never have to stamp send-telemetry by hand into the sans-IO core.
+        last_sent_ms: AtomicU64,
     }
 
     impl BatchUdpSocket {
@@ -99,6 +105,7 @@ mod unix_impl {
                 inner: UdpSocket::from_std(socket.into())?,
                 peer: peer.into(),
                 generation: super::next_socket_generation(),
+                last_sent_ms: AtomicU64::new(0),
             })
         }
 
@@ -107,6 +114,20 @@ mod unix_impl {
         /// datagrams its old socket queued before the rebuild.
         pub fn generation(&self) -> u64 {
             self.generation
+        }
+
+        /// Monotonic `now_ms()` timestamp of the last confirmed send on this
+        /// socket, or `None` if nothing has left the socket yet.
+        pub fn last_sent_ms(&self) -> Option<u64> {
+            match self.last_sent_ms.load(Ordering::Relaxed) {
+                0 => None,
+                ts => Some(ts),
+            }
+        }
+
+        #[inline]
+        fn record_sent(&self) {
+            self.last_sent_ms.store(now_ms().max(1), Ordering::Relaxed);
         }
 
         /// Get the raw file descriptor.
@@ -154,11 +175,14 @@ mod unix_impl {
 
         /// Send data to the peer asynchronously.
         pub async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
-            self.inner
+            let n = self
+                .inner
                 .async_io(Interest::WRITABLE, || {
                     SockRef::from(&self.inner).send_to(buf, &self.peer)
                 })
-                .await
+                .await?;
+            self.record_sent();
+            Ok(n)
         }
 
         /// Try to send data without blocking.
@@ -192,7 +216,13 @@ mod unix_impl {
                     // queued; that is not a send failure, so retry rather than
                     // tearing the link down.
                     Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                    result => return result,
+                    Ok(n) => {
+                        if n > 0 {
+                            self.record_sent();
+                        }
+                        return Ok(n);
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -804,8 +834,10 @@ mod unix_impl {
 #[cfg(not(target_os = "linux"))]
 mod fallback_impl {
     use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use socket2::Socket;
+    use srtla_core::utils::now_ms;
     use tokio::net::UdpSocket;
 
     use super::MTU;
@@ -820,6 +852,7 @@ mod fallback_impl {
         inner: UdpSocket,
         peer: SocketAddr,
         generation: u64,
+        last_sent_ms: AtomicU64,
     }
 
     impl BatchUdpSocket {
@@ -834,12 +867,27 @@ mod fallback_impl {
                 inner: UdpSocket::from_std(std_socket)?,
                 peer,
                 generation: super::next_socket_generation(),
+                last_sent_ms: AtomicU64::new(0),
             })
         }
 
         /// Process-unique id of this socket; see the Linux variant.
         pub fn generation(&self) -> u64 {
             self.generation
+        }
+
+        /// Monotonic `now_ms()` timestamp of the last confirmed send on this
+        /// socket, or `None` if nothing has left the socket yet.
+        pub fn last_sent_ms(&self) -> Option<u64> {
+            match self.last_sent_ms.load(Ordering::Relaxed) {
+                0 => None,
+                ts => Some(ts),
+            }
+        }
+
+        #[inline]
+        fn record_sent(&self) {
+            self.last_sent_ms.store(now_ms().max(1), Ordering::Relaxed);
         }
 
         /// Receive packets (single packet at a time on non-Linux).
@@ -858,7 +906,9 @@ mod fallback_impl {
 
         /// Send data to the peer.
         pub async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
-            self.inner.send_to(buf, self.peer).await
+            let n = self.inner.send_to(buf, self.peer).await?;
+            self.record_sent();
+            Ok(n)
         }
 
         /// Send several datagrams to the peer.
@@ -879,6 +929,9 @@ mod fallback_impl {
                     Err(_) if sent > 0 => break,
                     Err(e) => return Err(e),
                 }
+            }
+            if sent > 0 {
+                self.record_sent();
             }
             Ok(sent)
         }

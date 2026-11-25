@@ -1,14 +1,19 @@
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 // The raw-fd binder below is a unix concept: it exists for Android, where the
 // host steers a socket onto a radio via `Network.bindSocket` on its fd. Windows
 // has no fd, and no such host integration, so the whole binder is unix-only.
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
+use std::pin::Pin;
+#[cfg(any(test, feature = "test-internals"))]
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, Socket, Type};
-use tracing::warn;
+use tokio::time::Duration;
+use tracing::{debug, warn};
 
 /// Strategy for steering a freshly created uplink socket onto a specific egress
 /// path.
@@ -133,4 +138,91 @@ pub fn select_remote_for_source(addrs: &[SocketAddr], source: IpAddr) -> Result<
             let family = if source_is_ipv4 { "IPv4" } else { "IPv6" };
             anyhow::anyhow!("receiver has no {family} address for source {source}")
         })
+}
+
+/// Ceiling on a receiver lookup made from housekeeping or SIGHUP reload.
+/// Housekeeping is the main event loop's tick, so a resolver that hangs must
+/// not hang the sender with it.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Addresses a receiver hostname currently answers with.
+pub type ResolvedAddrs = SmallVec<SocketAddr, 4>;
+
+type ResolveFuture = Pin<Box<dyn Future<Output = Option<ResolvedAddrs>> + Send>>;
+
+/// Re-resolution of the receiver hostname, behind a seam so the reload and
+/// re-home trigger policies are testable without a live resolver.
+pub trait ReceiverResolver: Send + Sync {
+    /// `None` means the lookup failed, timed out, or answered with nothing.
+    fn resolve(&self, host: String, port: u16) -> ResolveFuture;
+}
+
+/// The production resolver: a plain `getaddrinfo` under a timeout.
+pub struct DnsResolver;
+
+impl ReceiverResolver for DnsResolver {
+    fn resolve(&self, host: String, port: u16) -> ResolveFuture {
+        Box::pin(async move {
+            match tokio::time::timeout(RESOLVE_TIMEOUT, resolve_remote_all(&host, port)).await {
+                Ok(Ok(addrs)) if !addrs.is_empty() => Some(addrs),
+                Ok(Ok(_)) => {
+                    debug!("receiver lookup of {host} returned no addresses; staying put");
+                    None
+                }
+                Ok(Err(e)) => {
+                    debug!("receiver lookup of {host} failed ({e}); staying put");
+                    None
+                }
+                Err(_) => {
+                    warn!(
+                        "receiver lookup of {host} timed out after {:?}; staying put",
+                        RESOLVE_TIMEOUT
+                    );
+                    None
+                }
+            }
+        })
+    }
+}
+
+/// Test seam: answers a scripted queue of lookups and counts how many it was
+/// asked for, so a test can assert not just the outcome but whether the trigger
+/// policy even reached DNS.
+#[cfg(any(test, feature = "test-internals"))]
+pub struct StubResolver {
+    answers: std::sync::Mutex<Vec<Option<ResolvedAddrs>>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl StubResolver {
+    /// `answers` are consumed in order; `None` models a failed or empty lookup.
+    /// Once exhausted, every further lookup fails.
+    pub fn new(answers: Vec<Option<Vec<SocketAddr>>>) -> Arc<Self> {
+        Arc::new(Self {
+            answers: std::sync::Mutex::new(
+                answers
+                    .into_iter()
+                    .rev()
+                    .map(|a| a.map(SmallVec::from_vec))
+                    .collect(),
+            ),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl ReceiverResolver for StubResolver {
+    fn resolve(&self, _host: String, _port: u16) -> ResolveFuture {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // `pop` off a reversed vec = FIFO.
+        let answer = self.answers.lock().unwrap().pop().flatten();
+        Box::pin(async move { answer })
+    }
 }

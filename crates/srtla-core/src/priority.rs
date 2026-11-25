@@ -164,11 +164,7 @@ pub fn select_best_quality_idx(
     let mut eligible = 0usize;
 
     for (i, conn) in conns.iter().enumerate() {
-        if !conn.connected
-            || !conn.is_schedulable()
-            || conn.is_timed_out(now_ms)
-            || conn.is_stall_gated()
-            || conn.is_quality_excluded()
+        if !conn.is_eligible_for_priority_override(now_ms)
             || crate::selection::enhanced::in_flight_cap_exceeded(conn)
         {
             continue;

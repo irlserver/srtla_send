@@ -40,6 +40,42 @@ fn elapsed_reaches(now: u64, since: u64, delay_ms: u64) -> bool {
 }
 
 impl ReconnectionState {
+    pub fn new_with_grace(now: u64) -> Self {
+        Self {
+            startup_grace_deadline_ms: now + STARTUP_GRACE_MS,
+            ..Default::default()
+        }
+    }
+
+    pub fn established_ms(&self) -> u64 {
+        self.connection_established_ms
+    }
+
+    pub fn is_established(&self) -> bool {
+        self.connection_established_ms != 0
+    }
+
+    pub fn in_startup_grace(&self, now: u64) -> bool {
+        self.connection_established_ms == 0 && now < self.startup_grace_deadline_ms
+    }
+
+    pub fn mark_established(&mut self, label: &str, now: u64) {
+        if self.connection_established_ms == 0 {
+            self.connection_established_ms = now;
+        }
+        self.mark_success(label);
+    }
+
+    pub fn expire_startup_grace(&mut self) {
+        self.startup_grace_deadline_ms = 0;
+    }
+
+    pub fn on_socket_rebuilt(&mut self, now: u64) {
+        // The attempt count survives: only REG3 proves the link is back.
+        self.last_reconnect_attempt_ms = now;
+        self.reset_startup_grace(now);
+    }
+
     fn retry_delay(&self) -> u64 {
         if self.reconnect_failure_count < FAST_RETRY_ATTEMPTS {
             FAST_RETRY_DELAY_MS

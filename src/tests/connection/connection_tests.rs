@@ -1028,17 +1028,20 @@ mod tests {
         let nak_pkt = make_srt_control(SRT_TYPE_NAK);
         let data_pkt = make_srt_control(SRT_TYPE_DATA);
         assert!(
-            is_srt_ack(&ack_pkt),
+            ControlPacket::is_srt_ack(&ack_pkt),
             "an ACK packet must be ACK-classified (broadcast-eligible)"
         );
-        assert!(!is_srt_ack(&nak_pkt), "a NAK packet is not an ACK");
+        assert!(
+            !ControlPacket::is_srt_ack(&nak_pkt),
+            "a NAK packet is not an ACK"
+        );
         assert_eq!(
-            get_packet_type(&nak_pkt),
+            ControlPacket::packet_type(&nak_pkt),
             Some(SRT_TYPE_NAK),
             "the NAK packet must classify as NAK"
         );
         assert!(
-            !is_srt_ack(&data_pkt),
+            !ControlPacket::is_srt_ack(&data_pkt),
             "an SRT data packet is never ACK-broadcast-eligible"
         );
 

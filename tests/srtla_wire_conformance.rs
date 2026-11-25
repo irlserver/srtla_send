@@ -15,10 +15,9 @@
 //! that is a deliberate, versioned protocol change, never an accident.
 
 use srtla_protocol::{
-    SRTLA_ID_LEN, SRTLA_TYPE_ACK, SRTLA_TYPE_KEEPALIVE, SRTLA_TYPE_REG_ERR, SRTLA_TYPE_REG_NAK,
-    SRTLA_TYPE_REG_NGP, SRTLA_TYPE_REG1, SRTLA_TYPE_REG1_LEN, SRTLA_TYPE_REG2, SRTLA_TYPE_REG2_LEN,
-    SRTLA_TYPE_REG3, SRTLA_TYPE_REG3_LEN, create_ack_packet, create_reg1_packet,
-    create_reg2_packet, parse_srtla_ack,
+    RegPacket, SRTLA_ID_LEN, SRTLA_TYPE_ACK, SRTLA_TYPE_KEEPALIVE, SRTLA_TYPE_REG_ERR,
+    SRTLA_TYPE_REG_NAK, SRTLA_TYPE_REG_NGP, SRTLA_TYPE_REG1, SRTLA_TYPE_REG1_LEN, SRTLA_TYPE_REG2,
+    SRTLA_TYPE_REG2_LEN, SRTLA_TYPE_REG3, SRTLA_TYPE_REG3_LEN, SrtlaAck,
 };
 
 /// `RECV_ACK_INT` in the receiver (`srtla_rec.c`): the fixed number of
@@ -104,7 +103,7 @@ fn reg1_builder_matches_wire_layout() {
     for (i, b) in id.iter_mut().enumerate() {
         *b = (i & 0xff) as u8;
     }
-    let pkt = create_reg1_packet(&id);
+    let pkt = RegPacket::reg1(&id);
 
     assert_eq!(pkt.len(), 258, "REG1 frame must be 258 bytes");
     // Header: htobe16(SRTLA_TYPE_REG1) at bytes 0-1.
@@ -119,7 +118,7 @@ fn reg2_builder_matches_wire_layout() {
     for (i, b) in id.iter_mut().enumerate() {
         *b = (255 - (i & 0xff)) as u8;
     }
-    let pkt = create_reg2_packet(&id);
+    let pkt = RegPacket::reg2(&id);
 
     assert_eq!(pkt.len(), 258, "REG2 frame must be 258 bytes");
     // Header: htobe16(SRTLA_TYPE_REG2) at bytes 0-1.
@@ -143,7 +142,7 @@ fn ack_builder_matches_wire_layout() {
         0x00ff_ff00,
         0xcafe_babe,
     ];
-    let pkt = create_ack_packet(&acks);
+    let pkt = SrtlaAck::encode(&acks);
 
     assert_eq!(
         pkt.len(),
@@ -188,7 +187,7 @@ fn parser_reads_wire_shaped_ack() {
         frame[off..off + 4].copy_from_slice(&sn.to_be_bytes());
     }
 
-    let parsed = parse_srtla_ack(&frame);
+    let parsed = SrtlaAck::parse(&frame);
     assert_eq!(
         parsed.as_slice(),
         &seqs[..],
@@ -201,7 +200,7 @@ fn ack_builder_parser_roundtrip() {
     // Our own builder -> our own parser must round-trip the full 10-ack vector,
     // confirming both ends agree on the 44-byte layout.
     let acks: [u32; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0xffff_fffe];
-    let pkt = create_ack_packet(&acks);
-    let parsed = parse_srtla_ack(&pkt);
+    let pkt = SrtlaAck::encode(&acks);
+    let parsed = SrtlaAck::parse(&pkt);
     assert_eq!(parsed.as_slice(), &acks[..], "ACK build->parse round-trip");
 }

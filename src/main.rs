@@ -10,7 +10,7 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use srtla_core::mode::SchedulingMode;
 use srtla_send::{
-    config, control_socket, metrics, net, priority_listener, sender, stats, subscriptions,
+    config, control, control_socket, metrics, net, priority_listener, sender, stats, subscriptions,
     toml_config, version,
 };
 use tracing_subscriber::EnvFilter;
@@ -246,7 +246,7 @@ async fn main() -> Result<()> {
 
     // Stdin reader stays blocking; Unix socket goes async to support
     // subscription pushes.
-    config::spawn_stdin_listener(
+    control::spawn_stdin_listener(
         config.clone(),
         shared_stats.clone(),
         critical_window.clone(),

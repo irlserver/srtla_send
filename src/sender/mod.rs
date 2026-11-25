@@ -41,10 +41,7 @@ pub(crate) use packet_handler::{
 use packet_handler::{
     drain_packet_queue, flush_all_batches_at, handle_srt_datagram, handle_uplink_packet_at,
 };
-// Scripted resolver seam for tests that drive the re-home trigger policy.
-#[cfg(any(test, feature = "test-internals"))]
-pub use rehome::StubResolver;
-pub use rehome::{REHOME_MIN_INTERVAL_MS, ReceiverResolver, RehomeGate};
+pub use rehome::{REHOME_MIN_INTERVAL_MS, RehomeGate};
 pub use sequence::{SEQ_TRACKING_SIZE, SEQUENCE_TRACKING_MAX_AGE_MS, SequenceTracker};
 use smallvec::SmallVec;
 use srtla_core::registration::SrtlaRegistrationManager;
@@ -67,6 +64,10 @@ use uplink::{ConnectionId, ReaderHandle, create_uplink_channel, sync_readers};
 pub(crate) use uplink_recv::process_uplink_packet;
 
 use crate::config::DynamicConfig;
+pub use crate::net::ReceiverResolver;
+// Scripted resolver seam for tests that drive the re-home trigger policy.
+#[cfg(any(test, feature = "test-internals"))]
+pub use crate::net::StubResolver;
 use crate::net::resolve_remote_all;
 use crate::stats::SharedStats;
 
@@ -204,7 +205,7 @@ pub async fn run_sender_with_config(
     // past the all-failed window, and only then to follow the receiver hostname
     // to a genuinely new address. `--no-rehome` turns it off entirely.
     let mut rehome = RehomeGate::new(config.rehome_on_failure());
-    let receiver_resolver = rehome::DnsResolver;
+    let receiver_resolver = crate::net::DnsResolver;
     let mut pending_changes: Option<PendingConnectionChanges> = None;
     // Weak-link classifier. Its per-link `weak` verdict is consumed by
     // Enhanced selection as an admission gate.
@@ -251,9 +252,7 @@ pub async fn run_sender_with_config(
     macro_rules! event_loop {
         ($($sighup_branch:tt)*) => {
             loop {
-                let needs_batch_timer = connections
-                    .iter()
-                    .any(|c| c.has_queued_packets() || c.has_pending_naks());
+                let needs_batch_timer = connections.iter().any(|c| c.needs_flush_timer());
                 if needs_batch_timer && !batch_flush_armed {
                     batch_flush_sleep
                         .as_mut()
@@ -376,20 +375,15 @@ pub async fn run_sender_with_config(
                                 .per_link
                                 .iter()
                                 .find(|e| e.conn_id == conn.conn_id);
-                            conn.weak = entry.map(|e| e.weak).unwrap_or(false);
-                            // Selection needs the reason, not just the verdict:
-                            // a late link is kept off unique payload entirely,
-                            // an under-used one keeps a trickle of it.
-                            conn.weak_reason = entry
-                                .map(|e| e.reason)
-                                .unwrap_or(srtla_core::selection::classifier::WeakReason::Healthy);
                             let cc_snap = link_cc_snapshots.get(&conn.conn_id);
-                            conn.cc_backing_off = cc_snap
-                                .map(|s| s.state == srtla_core::selection::link_cc::CcState::BackingOff)
-                                .unwrap_or(false);
-                            conn.cc_target_bps = cc_snap.map(|s| s.target_bps).unwrap_or(0);
-                            conn.loss_degraded =
-                                cc_snap.map(|s| s.loss_degraded).unwrap_or(false);
+                            conn.apply_tick_signals(srtla_core::connection::TickSignals {
+                                weak: entry.map(|e| e.weak).unwrap_or(false),
+                                weak_for_delay: entry.is_some_and(|e| e.reason.is_delay()),
+                                cc_backing_off: cc_snap
+                                    .is_some_and(|s| s.state == srtla_core::selection::link_cc::CcState::BackingOff),
+                                cc_target_bps: cc_snap.map(|s| s.target_bps).unwrap_or(0),
+                                loss_degraded: cc_snap.map(|s| s.loss_degraded).unwrap_or(false),
+                            });
                         }
                         shared_stats.update(
                             &connections,
@@ -429,7 +423,7 @@ pub async fn run_sender_with_config(
 
                         status_elapsed_ms = status_elapsed_ms.saturating_add(HOUSEKEEPING_INTERVAL_MS);
                         if status_elapsed_ms >= STATUS_LOG_INTERVAL_MS {
-                            log_connection_status(&connections, last_selected_idx, &config);
+                            log_connection_status(&connections, &conn_io, last_selected_idx, &config);
                             status_elapsed_ms = status_elapsed_ms.saturating_sub(STATUS_LOG_INTERVAL_MS);
                         }
 

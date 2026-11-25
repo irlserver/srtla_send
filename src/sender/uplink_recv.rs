@@ -63,7 +63,7 @@ pub(crate) async fn process_uplink_packet_at(
         read_any: true,
         ..Default::default()
     };
-    let pt = get_packet_type(data);
+    let pt = ControlPacket::packet_type(data);
     if let Some(pt) = pt {
         if let Some(event) = reg.process_registration_packet(conn.conn_id, data, now) {
             match event {
@@ -76,38 +76,20 @@ pub(crate) async fn process_uplink_packet_at(
                     }
                 }
                 RegistrationEvent::Reg3 => {
-                    // Clear any phantom in-flight packets and NAK state
-                    // accumulated during pre-registration data forwarding
-                    conn.clear_pre_registration_state(now);
-                    conn.connected = true;
-                    conn.last_received = Some(now);
-                    if conn.reconnection.connection_established_ms == 0 {
-                        conn.reconnection.connection_established_ms = now;
-                    }
-                    conn.mark_reconnect_success();
+                    conn.on_registered(now);
                 }
                 RegistrationEvent::RegErr => {
-                    conn.connected = false;
-                    conn.last_received = None;
+                    conn.on_registration_error();
                 }
                 RegistrationEvent::Reg2 => {}
             }
             return Ok(incoming);
         }
 
-        // Liveness only counts for a link that is registered, or has never been
-        // (initial registration keeps its own grace/timeout handling). A link
-        // that WAS established and is in recovery (`connected == false` until
-        // REG3) must stay timed out so housekeeping rebuilds its socket and
-        // re-sends REG2: letting the receiver's ACKs/NAKs and keepalive replies
-        // refresh it here parks it in limbo — alive to the timeout check,
-        // excluded from scheduling, never re-registered.
-        if conn.connected || conn.reconnection.connection_established_ms == 0 {
-            conn.last_received = Some(now);
-        }
+        conn.note_packet_received(now);
 
         if pt == SRT_TYPE_ACK {
-            if let Some(ack) = parse_srt_ack(data) {
+            if let Some(ack) = ControlPacket::parse_srt_ack(data) {
                 incoming.ack_numbers.push(ack);
             }
             // The ACK goes to the client here only, never through
@@ -127,7 +109,7 @@ pub(crate) async fn process_uplink_packet_at(
                 }
             }
         } else if pt == SRT_TYPE_NAK {
-            let nak_list = parse_srt_nak(data);
+            let nak_list = ControlPacket::parse_srt_nak(data);
             if !nak_list.is_empty() {
                 debug!(
                     "📦 NAK received from {}: {} sequences",
@@ -142,7 +124,7 @@ pub(crate) async fn process_uplink_packet_at(
                     .push(SmallVec::from_slice_copy(data));
             }
         } else if pt == SRTLA_TYPE_ACK {
-            let ack_list = parse_srtla_ack(data);
+            let ack_list = SrtlaAck::parse(data);
             if !ack_list.is_empty() {
                 debug!(
                     "🎯 SRTLA ACK received from {}: {} sequences",
@@ -158,7 +140,7 @@ pub(crate) async fn process_uplink_packet_at(
             // response is worth reading — an HSREQ crossing the other way is
             // the local caller's *proposal*, whereas the responder has already
             // resolved both sides to max(own, proposed) by the time it answers.
-            if let Some(hs) = parse_srt_handshake_latency(data)
+            if let Some(hs) = ControlPacket::parse_handshake_latency(data)
                 && hs.is_response
                 && let Some(rcv_ms) = hs.rcv_ms
             {

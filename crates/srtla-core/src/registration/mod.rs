@@ -176,7 +176,7 @@ impl SrtlaRegistrationManager {
     /// state. Pure: the caller transmits the returned bytes on the uplink and
     /// stamps [`SrtlaConnection::note_sent`].
     pub fn build_reg1_for(&mut self, conn_id: u64, now: u64) -> [u8; SRTLA_TYPE_REG1_LEN] {
-        let pkt = create_reg1_packet(&self.srtla_id);
+        let pkt = RegPacket::reg1(&self.srtla_id);
         debug!("queueing REG1 for uplink {:x}", conn_id);
         info!("REG1 → uplink {:x} ({} bytes)", conn_id, pkt.len());
 
@@ -196,7 +196,7 @@ impl SrtlaRegistrationManager {
     /// must be able to complete a fresh handshake. Only the broadcast in
     /// [`Self::reg_driver_pending_sends`] skips established links.
     pub fn build_reg2(&mut self, conn_id: u64) -> [u8; SRTLA_TYPE_REG2_LEN] {
-        let pkt = create_reg2_packet(&self.srtla_id);
+        let pkt = RegPacket::reg2(&self.srtla_id);
         debug!("queueing REG2 for uplink {:x}", conn_id);
         info!("REG2 → uplink {:x} ({} bytes)", conn_id, pkt.len());
         self.arm_reg3_grant(conn_id);
@@ -209,7 +209,7 @@ impl SrtlaRegistrationManager {
         buf: &[u8],
         now_ms: u64,
     ) -> Option<RegistrationEvent> {
-        match get_packet_type(buf) {
+        match ControlPacket::packet_type(buf) {
             Some(SRTLA_TYPE_REG_NGP) => {
                 debug!("REG_NGP from uplink {:x}", conn_id);
                 self.handle_reg_ngp(conn_id, now_ms);
@@ -257,7 +257,7 @@ impl SrtlaRegistrationManager {
         if self.active_connections == 0 {
             if let Some(conn_id) = self.reg1_target_conn {
                 if self.pending_reg2_conn.is_none() && now >= self.reg1_next_send_at_ms {
-                    let pkt = create_reg1_packet(&self.srtla_id);
+                    let pkt = RegPacket::reg1(&self.srtla_id);
                     info!("REG1 → uplink {:x} ({} bytes)", conn_id, pkt.len());
                     self.pending_reg2_conn = Some(conn_id);
                     self.pending_timeout_at_ms = now + REG2_TIMEOUT * 1000;
@@ -277,7 +277,7 @@ impl SrtlaRegistrationManager {
 
         // If flagged by REG2 reception, broadcast REG2 once to all uplinks
         if self.broadcast_reg2_pending {
-            let pkt = create_reg2_packet(&self.srtla_id);
+            let pkt = RegPacket::reg2(&self.srtla_id);
             info!(
                 "broadcast REG2 to {} uplinks ({} bytes)",
                 connections.len(),

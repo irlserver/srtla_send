@@ -3,31 +3,17 @@
 //! No clock, no state, no I/O — just byte layout for the SRTLA registration
 //! handshake, SRT ACK/NAK, and keepalives.
 
-mod builders;
 mod constants;
-mod parsers;
-mod types;
+mod keepalive;
+mod registration;
+mod srt;
+mod srtla_ack;
 
-// Re-export the full public surface at the crate root.
-
-// Constants
-// Builders
-pub use builders::{
-    create_ack_packet, create_keepalive_packet, create_keepalive_packet_ext, create_reg1_packet,
-    create_reg2_packet,
-};
 pub use constants::*;
-// Parsers
-pub use parsers::{
-    extract_keepalive_conn_info, extract_keepalive_timestamp, parse_srt_ack,
-    parse_srt_handshake_latency, parse_srt_nak, parse_srt_session_start, parse_srtla_ack,
-};
-// Types and helpers
-pub use types::{
-    ConnectionInfo, SrtHandshakeLatency, get_packet_type, get_srt_sequence_number, is_srt_ack,
-    is_srt_data_retransmit, is_srtla_keepalive, is_srtla_reg1, is_srtla_reg2, is_srtla_reg3,
-    set_srt_data_retransmit,
-};
+pub use keepalive::{ConnectionInfo, Keepalive};
+pub use registration::RegPacket;
+pub use srt::{ControlPacket, SrtData, SrtHandshakeLatency};
+pub use srtla_ack::SrtlaAck;
 
 #[cfg(test)]
 mod tests {
@@ -44,30 +30,30 @@ mod tests {
             bitrate_bytes_per_sec: 2_500_000,
         };
 
-        let pkt = create_keepalive_packet_ext(info, 123_456);
+        let pkt = Keepalive::encode_ext(info, 123_456);
 
         // Verify packet length
         assert_eq!(pkt.len(), SRTLA_KEEPALIVE_EXT_LEN);
 
         // Verify packet type
-        assert_eq!(get_packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
+        assert_eq!(ControlPacket::packet_type(&pkt), Some(SRTLA_TYPE_KEEPALIVE));
 
         // Verify timestamp extraction works (backwards compatible)
-        assert!(extract_keepalive_timestamp(&pkt).is_some());
+        assert!(Keepalive::timestamp(&pkt).is_some());
 
         // Verify connection info extraction
-        let extracted = extract_keepalive_conn_info(&pkt).unwrap();
+        let extracted = Keepalive::conn_info(&pkt).unwrap();
         assert_eq!(extracted, info);
     }
 
     #[test]
     fn test_standard_keepalive_no_conn_info() {
-        let pkt = create_keepalive_packet(123_456);
+        let pkt = Keepalive::encode(123_456);
 
         // Standard keepalive should not have connection info
         assert_eq!(pkt.len(), 10);
-        assert!(extract_keepalive_timestamp(&pkt).is_some());
-        assert!(extract_keepalive_conn_info(&pkt).is_none());
+        assert!(Keepalive::timestamp(&pkt).is_some());
+        assert!(Keepalive::conn_info(&pkt).is_none());
     }
 
     #[test]
@@ -83,15 +69,15 @@ mod tests {
 
         // Same injected timestamp on both so the ext/std comparison below is
         // exact (this crate no longer reads a clock).
-        let ext_pkt = create_keepalive_packet_ext(info, 123_456);
+        let ext_pkt = Keepalive::encode_ext(info, 123_456);
 
         // Old receiver behavior: only reads first 10 bytes
-        let timestamp_from_ext = extract_keepalive_timestamp(&ext_pkt);
+        let timestamp_from_ext = Keepalive::timestamp(&ext_pkt);
         assert!(timestamp_from_ext.is_some());
 
         // Compare with standard keepalive timestamp
-        let std_pkt = create_keepalive_packet(123_456);
-        let timestamp_from_std = extract_keepalive_timestamp(&std_pkt);
+        let std_pkt = Keepalive::encode(123_456);
+        let timestamp_from_std = Keepalive::timestamp(&std_pkt);
         assert!(timestamp_from_std.is_some());
 
         // Both should be valid timestamps (within 1 second of each other)
@@ -108,16 +94,16 @@ mod tests {
         // byte 4.
         let mut pkt = [0u8; 16];
         pkt[0..4].copy_from_slice(&100u32.to_be_bytes());
-        assert!(!is_srt_data_retransmit(&pkt), "original send has R clear");
+        assert!(!SrtData::is_retransmit(&pkt), "original send has R clear");
 
         pkt[4] |= 0x04;
-        assert!(is_srt_data_retransmit(&pkt), "R bit marks a retransmission");
+        assert!(SrtData::is_retransmit(&pkt), "R bit marks a retransmission");
 
         // PP/O/KK bits alone must not read as a retransmit.
         let mut flags = [0u8; 16];
         flags[0..4].copy_from_slice(&100u32.to_be_bytes());
         flags[4] = 0xf8; // PP=11 O=1 KK=11, R=0
-        assert!(!is_srt_data_retransmit(&flags));
+        assert!(!SrtData::is_retransmit(&flags));
 
         // Setting the bit is the inverse of reading it, and touches nothing
         // else in the header — the sequence number in particular, which is
@@ -126,8 +112,8 @@ mod tests {
         probe[0..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
         probe[4..8].copy_from_slice(&0x0abc_defau32.to_be_bytes());
         let before = probe;
-        set_srt_data_retransmit(&mut probe);
-        assert!(is_srt_data_retransmit(&probe), "R bit must be set");
+        SrtData::set_retransmit(&mut probe);
+        assert!(SrtData::is_retransmit(&probe), "R bit must be set");
         assert_eq!(probe[0..4], before[0..4], "sequence number must not move");
         assert_eq!(
             probe[4] & !0x04,
@@ -136,27 +122,27 @@ mod tests {
         );
         assert_eq!(probe[5..], before[5..], "message number must not move");
         // Idempotent: a copy of an already-retransmitted packet stays valid.
-        set_srt_data_retransmit(&mut probe);
-        assert!(is_srt_data_retransmit(&probe));
+        SrtData::set_retransmit(&mut probe);
+        assert!(SrtData::is_retransmit(&probe));
 
         // Control packets and runt buffers are left alone.
         let mut ctrl = [0u8; 16];
         ctrl[0] = 0x80;
         let ctrl_before = ctrl;
-        set_srt_data_retransmit(&mut ctrl);
+        SrtData::set_retransmit(&mut ctrl);
         assert_eq!(ctrl, ctrl_before, "control packets must not be touched");
         let mut runt = [0u8; 4];
-        set_srt_data_retransmit(&mut runt);
+        SrtData::set_retransmit(&mut runt);
         assert_eq!(runt, [0u8; 4], "a runt buffer must not be indexed into");
 
         // Control packets (MSB set) are never retransmits.
         let mut ctrl = [0u8; 16];
         ctrl[0] = 0x80;
         ctrl[4] = 0x04;
-        assert!(!is_srt_data_retransmit(&ctrl));
+        assert!(!SrtData::is_retransmit(&ctrl));
 
         // Truncated buffers are rejected.
-        assert!(!is_srt_data_retransmit(&pkt[..7]));
+        assert!(!SrtData::is_retransmit(&pkt[..7]));
     }
 
     #[test]
@@ -165,7 +151,7 @@ mod tests {
         pkt[0..2].copy_from_slice(&SRTLA_TYPE_KEEPALIVE.to_be_bytes());
         pkt[10..12].copy_from_slice(&0xdeadu16.to_be_bytes()); // Wrong magic
 
-        assert!(extract_keepalive_conn_info(&pkt).is_none());
+        assert!(Keepalive::conn_info(&pkt).is_none());
     }
 
     #[test]
@@ -175,7 +161,7 @@ mod tests {
         pkt[10..12].copy_from_slice(&SRTLA_KEEPALIVE_MAGIC.to_be_bytes());
         pkt[12..14].copy_from_slice(&0x9999u16.to_be_bytes()); // Wrong version
 
-        assert!(extract_keepalive_conn_info(&pkt).is_none());
+        assert!(Keepalive::conn_info(&pkt).is_none());
     }
 
     /// `SRT_CMD_SID`, a variable-length block libsrt writes before HSREQ when a
@@ -234,10 +220,9 @@ mod tests {
 
     #[test]
     fn hsrsp_yields_the_far_ends_receive_latency() {
-        // The responder answers with its own (already negotiated) receive delay
-        // in the high half. That 4000 ms is the deadline our packets must beat.
         let pkt = conclusion(&[(SRT_HS_EXT_CMD_HSRSP, hs_body(BOTH_TSBPD, 4000, 120))]);
-        let hs = parse_srt_handshake_latency(&pkt).expect("a conclusion HSRSP must parse");
+        let hs =
+            ControlPacket::parse_handshake_latency(&pkt).expect("a conclusion HSRSP must parse");
         assert!(hs.is_response);
         assert_eq!(hs.rcv_ms, Some(4000));
         assert_eq!(hs.snd_ms, Some(120));
@@ -245,19 +230,16 @@ mod tests {
 
     #[test]
     fn hsreq_is_marked_as_a_proposal_not_a_response() {
-        // Same bytes, HSREQ command: the initiator's ask, before negotiation.
         let pkt = conclusion(&[(SRT_HS_EXT_CMD_HSREQ, hs_body(BOTH_TSBPD, 4000, 120))]);
-        let hs = parse_srt_handshake_latency(&pkt).unwrap();
+        let hs = ControlPacket::parse_handshake_latency(&pkt).unwrap();
         assert!(!hs.is_response, "HSREQ is not the negotiated answer");
         assert_eq!(hs.rcv_ms, Some(4000));
     }
 
     #[test]
     fn each_latency_half_is_gated_on_its_own_tsbpd_flag() {
-        // With TSBPD off the 16 bits are undefined, not zero — reporting 0 ms
-        // would look like an impossibly tight budget rather than "unknown".
         let none = conclusion(&[(SRT_HS_EXT_CMD_HSRSP, hs_body(0, 4000, 120))]);
-        let hs = parse_srt_handshake_latency(&none).unwrap();
+        let hs = ControlPacket::parse_handshake_latency(&none).unwrap();
         assert_eq!(hs.rcv_ms, None);
         assert_eq!(hs.snd_ms, None);
 
@@ -265,22 +247,19 @@ mod tests {
             SRT_HS_EXT_CMD_HSRSP,
             hs_body(SRT_HS_OPT_TSBPDRCV, 4000, 120),
         )]);
-        let hs = parse_srt_handshake_latency(&rcv_only).unwrap();
+        let hs = ControlPacket::parse_handshake_latency(&rcv_only).unwrap();
         assert_eq!(hs.rcv_ms, Some(4000));
         assert_eq!(hs.snd_ms, None);
     }
 
     #[test]
     fn hsrsp_is_found_behind_earlier_blocks() {
-        // libsrt writes SID, key material and others around HSREQ/HSRSP, so the
-        // walk cannot assume it comes first. The zero-length block also proves
-        // the walk still advances when a body is empty.
         let pkt = conclusion(&[
             (SRT_HS_EXT_CMD_SID, vec![0x7465_7374, 0x0000_0000]),
             (99, vec![]),
             (SRT_HS_EXT_CMD_HSRSP, hs_body(BOTH_TSBPD, 2500, 80)),
         ]);
-        let hs = parse_srt_handshake_latency(&pkt).unwrap();
+        let hs = ControlPacket::parse_handshake_latency(&pkt).unwrap();
         assert_eq!(hs.rcv_ms, Some(2500));
     }
 
@@ -288,57 +267,48 @@ mod tests {
     fn only_an_hsv5_conclusion_is_read() {
         let body = [(SRT_HS_EXT_CMD_HSRSP, hs_body(BOTH_TSBPD, 4000, 120))];
 
-        // Induction: word 1 holds a magic cookie, not extension flags.
         let induction = handshake(SRT_HS_VERSION_5, 1, SRT_HS_EXT_FLAG_HSREQ, &body);
-        assert!(parse_srt_handshake_latency(&induction).is_none());
+        assert!(ControlPacket::parse_handshake_latency(&induction).is_none());
 
-        // HSv4 keeps its SRT handshake in a separate control packet.
         let v4 = handshake(4, SRT_HS_REQTYPE_CONCLUSION, SRT_HS_EXT_FLAG_HSREQ, &body);
-        assert!(parse_srt_handshake_latency(&v4).is_none());
+        assert!(ControlPacket::parse_handshake_latency(&v4).is_none());
 
-        // Rejection codes are >= 1000.
         let rejected = handshake(SRT_HS_VERSION_5, 1002, SRT_HS_EXT_FLAG_HSREQ, &body);
-        assert!(parse_srt_handshake_latency(&rejected).is_none());
+        assert!(ControlPacket::parse_handshake_latency(&rejected).is_none());
 
-        // Extension field says there is no HSREQ block to look for.
         let no_ext = handshake(SRT_HS_VERSION_5, SRT_HS_REQTYPE_CONCLUSION, 0, &body);
-        assert!(parse_srt_handshake_latency(&no_ext).is_none());
+        assert!(ControlPacket::parse_handshake_latency(&no_ext).is_none());
 
-        // Not a handshake at all.
         let mut ack = vec![0u8; 64];
         ack[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
-        assert!(parse_srt_handshake_latency(&ack).is_none());
+        assert!(ControlPacket::parse_handshake_latency(&ack).is_none());
     }
 
     #[test]
     fn a_block_length_running_past_the_packet_is_rejected() {
         let mut pkt = conclusion(&[(SRT_HS_EXT_CMD_HSRSP, hs_body(BOTH_TSBPD, 4000, 120))]);
-        // Claim 0xFFFF words of body where only 3 follow.
         let spec = SRT_CONTROL_HEADER_LEN + SRT_HANDSHAKE_CIF_LEN;
         pkt[spec + 2..spec + 4].copy_from_slice(&0xffffu16.to_be_bytes());
-        assert!(parse_srt_handshake_latency(&pkt).is_none());
+        assert!(ControlPacket::parse_handshake_latency(&pkt).is_none());
     }
 
     #[test]
     fn a_short_hsrsp_block_is_rejected() {
-        // Two words where three are required: the latency word is absent.
         let pkt = conclusion(&[(SRT_HS_EXT_CMD_HSRSP, vec![0x0001_0500, BOTH_TSBPD])]);
-        assert!(parse_srt_handshake_latency(&pkt).is_none());
+        assert!(ControlPacket::parse_handshake_latency(&pkt).is_none());
     }
 
     #[test]
     fn no_prefix_of_a_handshake_panics() {
-        // Every one of these bytes comes off the network from the far end, so
-        // the walk has to be total: no indexing panic, no runaway loop.
         let pkt = conclusion(&[
             (SRT_HS_EXT_CMD_SID, vec![0x7465_7374]),
             (SRT_HS_EXT_CMD_HSRSP, hs_body(BOTH_TSBPD, 4000, 120)),
         ]);
         for len in 0..=pkt.len() {
-            let _ = parse_srt_handshake_latency(&pkt[..len]);
+            let _ = ControlPacket::parse_handshake_latency(&pkt[..len]);
         }
         assert_eq!(
-            parse_srt_handshake_latency(&pkt).unwrap().rcv_ms,
+            ControlPacket::parse_handshake_latency(&pkt).unwrap().rcv_ms,
             Some(4000),
             "the intact packet must still parse"
         );
@@ -346,24 +316,19 @@ mod tests {
 
     #[test]
     fn a_garbage_extension_area_terminates() {
-        // Spec words drawn to look nothing like real blocks. Each step consumes
-        // at least the 4-byte spec word, so the walk must end either way.
         let mut pkt = conclusion(&[]);
         for i in 0..64u32 {
             pkt.extend_from_slice(&(0xdead_0000u32.wrapping_add(i)).to_be_bytes());
         }
-        let _ = parse_srt_handshake_latency(&pkt);
+        let _ = ControlPacket::parse_handshake_latency(&pkt);
     }
 
-    /// Write `isn` into the handshake body's ISN word.
     fn with_isn(mut pkt: Vec<u8>, isn: u32) -> Vec<u8> {
         pkt[SRT_CONTROL_HEADER_LEN + 8..SRT_CONTROL_HEADER_LEN + 12]
             .copy_from_slice(&isn.to_be_bytes());
         pkt
     }
 
-    /// A caller induction as libsrt sends it: version 4 even for an HSv5
-    /// caller, `UDT_DGRAM` type word, no extension blocks.
     fn caller_induction(isn: u32) -> Vec<u8> {
         with_isn(handshake(4, SRT_HS_REQTYPE_INDUCTION, 2, &[]), isn)
     }
@@ -371,7 +336,7 @@ mod tests {
     #[test]
     fn session_start_reads_the_isn_of_a_caller_induction() {
         assert_eq!(
-            parse_srt_session_start(&caller_induction(0x1234_5678)),
+            ControlPacket::parse_session_start(&caller_induction(0x1234_5678)),
             Some(0x1234_5678)
         );
     }
@@ -387,29 +352,29 @@ mod tests {
             ),
             0x1234_5678,
         );
-        assert!(parse_srt_session_start(&pkt).is_none());
+        assert!(ControlPacket::parse_session_start(&pkt).is_none());
     }
 
     #[test]
     fn session_start_rejects_a_truncated_handshake() {
         let pkt = caller_induction(0x1234_5678);
-        assert!(parse_srt_session_start(&pkt[..SRT_CONTROL_HEADER_LEN + 20]).is_none());
+        assert!(ControlPacket::parse_session_start(&pkt[..SRT_CONTROL_HEADER_LEN + 20]).is_none());
     }
 
     #[test]
     fn session_start_ignores_data_and_acks() {
         let data = vec![0u8; 64];
-        assert!(parse_srt_session_start(&data).is_none());
+        assert!(ControlPacket::parse_session_start(&data).is_none());
 
         let mut ack = vec![0u8; 64];
         ack[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
-        assert!(parse_srt_session_start(&ack).is_none());
+        assert!(ControlPacket::parse_session_start(&ack).is_none());
     }
 
     #[test]
     fn session_start_masks_the_isn_to_31_bits() {
         assert_eq!(
-            parse_srt_session_start(&caller_induction(0x8000_0042)),
+            ControlPacket::parse_session_start(&caller_induction(0x8000_0042)),
             Some(0x42)
         );
     }

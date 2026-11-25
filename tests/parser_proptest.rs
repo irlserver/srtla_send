@@ -17,11 +17,8 @@
 
 use proptest::prelude::*;
 use srtla_protocol::{
-    ConnectionInfo, SRT_TYPE_ACK, SRT_TYPE_NAK, SRTLA_ID_LEN, create_ack_packet,
-    create_keepalive_packet, create_keepalive_packet_ext, create_reg1_packet, create_reg2_packet,
-    extract_keepalive_conn_info, extract_keepalive_timestamp, get_packet_type,
-    get_srt_sequence_number, is_srt_ack, is_srtla_keepalive, is_srtla_reg1, is_srtla_reg2,
-    parse_srt_ack, parse_srt_nak, parse_srtla_ack,
+    ConnectionInfo, ControlPacket, Keepalive, RegPacket, SRT_TYPE_ACK, SRT_TYPE_NAK, SRTLA_ID_LEN,
+    SrtData, SrtlaAck,
 };
 
 /// Cap arbitrary inputs at 256 bytes: enough to reach every length branch and
@@ -60,7 +57,7 @@ proptest! {
     /// at most `buf.len()/4 + 1000`.
     #[test]
     fn parse_srt_nak_never_panics_and_is_bounded(buf in prop::collection::vec(any::<u8>(), 0..MAX_INPUT)) {
-        let out = parse_srt_nak(&buf);
+        let out = ControlPacket::parse_srt_nak(&buf);
         prop_assert!(out.len() <= buf.len() / 4 + 1000);
     }
 
@@ -70,15 +67,15 @@ proptest! {
     fn parse_srt_nak_typed_never_panics_and_is_bounded(payload in prop::collection::vec(any::<u8>(), 0..MAX_INPUT)) {
         let mut buf = nak_header();
         buf.extend_from_slice(&payload);
-        let out = parse_srt_nak(&buf);
+        let out = ControlPacket::parse_srt_nak(&buf);
         prop_assert!(out.len() <= buf.len() / 4 + 1000);
     }
 
-    /// `parse_srtla_ack` on arbitrary bytes never panics / never indexes OOB,
+    /// `SrtlaAck::parse` on arbitrary bytes never panics / never indexes OOB,
     /// and emits at most one u32 per 4 bytes consumed.
     #[test]
     fn parse_srtla_ack_never_panics_and_is_bounded(buf in prop::collection::vec(any::<u8>(), 0..MAX_INPUT)) {
-        let out = parse_srtla_ack(&buf);
+        let out = SrtlaAck::parse(&buf);
         prop_assert!(out.len() <= buf.len() / 4);
     }
 
@@ -86,39 +83,39 @@ proptest! {
     /// bytes regardless of length or content.
     #[test]
     fn type_detection_never_panics(buf in prop::collection::vec(any::<u8>(), 0..MAX_INPUT)) {
-        let _ = get_packet_type(&buf);
-        let _ = get_srt_sequence_number(&buf);
-        let _ = parse_srt_ack(&buf);
-        let _ = extract_keepalive_timestamp(&buf);
-        let _ = extract_keepalive_conn_info(&buf);
-        let _ = is_srt_ack(&buf);
-        let _ = is_srtla_keepalive(&buf);
-        let _ = is_srtla_reg1(&buf);
-        let _ = is_srtla_reg2(&buf);
-        // get_packet_type agrees with the leading 2 bytes whenever present.
+        let _ = ControlPacket::packet_type(&buf);
+        let _ = SrtData::sequence_number(&buf);
+        let _ = ControlPacket::parse_srt_ack(&buf);
+        let _ = Keepalive::timestamp(&buf);
+        let _ = Keepalive::conn_info(&buf);
+        let _ = ControlPacket::is_srt_ack(&buf);
+        let _ = Keepalive::is_keepalive(&buf);
+        let _ = RegPacket::is_reg1(&buf);
+        let _ = RegPacket::is_reg2(&buf);
+        // packet_type agrees with the leading 2 bytes whenever present.
         if buf.len() >= 2 {
-            prop_assert_eq!(get_packet_type(&buf), Some(u16::from_be_bytes([buf[0], buf[1]])));
+            prop_assert_eq!(ControlPacket::packet_type(&buf), Some(u16::from_be_bytes([buf[0], buf[1]])));
         } else {
-            prop_assert_eq!(get_packet_type(&buf), None);
+            prop_assert_eq!(ControlPacket::packet_type(&buf), None);
         }
     }
 
     // ---- ROUND-TRIP: parse(build(x)) == x for well-formed packets ----
 
-    /// Extended keepalive: `extract_keepalive_conn_info(build(info)) == info`.
+    /// Extended keepalive: `Keepalive::conn_info(Keepalive::encode_ext(info, ..)) == info`.
     #[test]
     fn keepalive_ext_roundtrips(info in arb_conn_info()) {
-        let pkt = create_keepalive_packet_ext(info, 1_000_000);
-        prop_assert_eq!(get_packet_type(&pkt), Some(srtla_protocol::SRTLA_TYPE_KEEPALIVE));
-        prop_assert!(extract_keepalive_timestamp(&pkt).is_some());
-        prop_assert_eq!(extract_keepalive_conn_info(&pkt), Some(info));
+        let pkt = Keepalive::encode_ext(info, 1_000_000);
+        prop_assert_eq!(ControlPacket::packet_type(&pkt), Some(srtla_protocol::SRTLA_TYPE_KEEPALIVE));
+        prop_assert!(Keepalive::timestamp(&pkt).is_some());
+        prop_assert_eq!(Keepalive::conn_info(&pkt), Some(info));
     }
 
-    /// SRTLA ACK: `parse_srtla_ack(create_ack_packet(acks)) == acks`.
+    /// SRTLA ACK: `SrtlaAck::parse(SrtlaAck::encode(acks)) == acks`.
     #[test]
     fn srtla_ack_roundtrips(acks in prop::collection::vec(any::<u32>(), 0..64)) {
-        let pkt = create_ack_packet(&acks);
-        let parsed = parse_srtla_ack(&pkt);
+        let pkt = SrtlaAck::encode(&acks);
+        let parsed = SrtlaAck::parse(&pkt);
         prop_assert_eq!(parsed.as_slice(), acks.as_slice());
     }
 
@@ -130,7 +127,7 @@ proptest! {
         for &s in &seqs {
             buf.extend_from_slice(&s.to_be_bytes());
         }
-        let parsed = parse_srt_nak(&buf);
+        let parsed = ControlPacket::parse_srt_nak(&buf);
         prop_assert_eq!(parsed.as_slice(), seqs.as_slice());
     }
 
@@ -143,7 +140,7 @@ proptest! {
         let mut buf = nak_header();
         buf.extend_from_slice(&(start | 0x8000_0000).to_be_bytes());
         buf.extend_from_slice(&end.to_be_bytes());
-        let parsed = parse_srt_nak(&buf);
+        let parsed = ControlPacket::parse_srt_nak(&buf);
         let expected: Vec<u32> = (start..=end).collect();
         prop_assert_eq!(parsed.as_slice(), expected.as_slice());
     }
@@ -154,8 +151,8 @@ proptest! {
         let mut buf = vec![0u8; 20];
         buf[0..2].copy_from_slice(&SRT_TYPE_ACK.to_be_bytes());
         buf[16..20].copy_from_slice(&ack.to_be_bytes());
-        prop_assert!(is_srt_ack(&buf));
-        prop_assert_eq!(parse_srt_ack(&buf), Some(ack));
+        prop_assert!(ControlPacket::is_srt_ack(&buf));
+        prop_assert_eq!(ControlPacket::parse_srt_ack(&buf), Some(ack));
     }
 
     /// REG1 / REG2: the builders produce frames the type validators accept and
@@ -164,12 +161,12 @@ proptest! {
     fn reg1_reg2_roundtrip(id in prop::collection::vec(any::<u8>(), SRTLA_ID_LEN..=SRTLA_ID_LEN)) {
         let id: [u8; SRTLA_ID_LEN] = id.try_into().expect("length pinned to SRTLA_ID_LEN");
 
-        let r1 = create_reg1_packet(&id);
-        prop_assert!(is_srtla_reg1(&r1));
+        let r1 = RegPacket::reg1(&id);
+        prop_assert!(RegPacket::is_reg1(&r1));
         prop_assert_eq!(&r1[2..], &id[..]);
 
-        let r2 = create_reg2_packet(&id);
-        prop_assert!(is_srtla_reg2(&r2));
+        let r2 = RegPacket::reg2(&id);
+        prop_assert!(RegPacket::is_reg2(&r2));
         prop_assert_eq!(&r2[2..], &id[..]);
     }
 
@@ -177,9 +174,9 @@ proptest! {
     /// is detected as a keepalive, but is NOT an extended-info frame.
     #[test]
     fn standard_keepalive_has_timestamp_no_conn_info(_ in 0u8..1) {
-        let pkt = create_keepalive_packet(1_000_000);
-        prop_assert!(is_srtla_keepalive(&pkt));
-        prop_assert!(extract_keepalive_timestamp(&pkt).is_some());
-        prop_assert!(extract_keepalive_conn_info(&pkt).is_none());
+        let pkt = Keepalive::encode(1_000_000);
+        prop_assert!(Keepalive::is_keepalive(&pkt));
+        prop_assert!(Keepalive::timestamp(&pkt).is_some());
+        prop_assert!(Keepalive::conn_info(&pkt).is_none());
     }
 }

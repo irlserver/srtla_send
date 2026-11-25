@@ -80,7 +80,7 @@ fn log_attributed_nak(
         link = %conn.label,
         seq = nak,
         age_ms = ?logged.flatten().map(|sent| current_time_ms.saturating_sub(sent)),
-        rtt_ms = conn.get_smooth_rtt_ms() as u64,
+        rtt_ms = conn.telemetry(current_time_ms).rtt_ms as u64,
         resend = logged == Some(None),
         via = if from_tracker { "tracker" } else { "scan" },
         "nak attributed"
@@ -123,26 +123,9 @@ pub(crate) fn apply_link_feedback(
     }
 
     // The receiver lists a sequence in an SRTLA ACK only on the link the packet
-    // arrived on, so these entries are arrival reports for the arrival link,
-    // whatever the sender's packet logs still hold.
+    // arrived on, so these entries are arrival reports and delivery proof for
+    // the arrival link, whatever the sender's packet logs still hold.
     connections[idx].note_srtla_ack_arrival(incoming.srtla_ack_numbers.len(), current_time_ms);
-
-    // `srtla_rec` sends an SRTLA ACK on a link only after packets arrived on
-    // that link, so its arrival is that link's delivery proof whatever the
-    // sequences now map to. Matching sequences is not enough: a cumulative SRT
-    // ACK over a faster sibling can prune the slower link's packets before its
-    // own SRTLA ACK arrives, and NAKs can clear and re-route them.
-    //
-    // Only on a link the sender has seen REG3 for: before that the socket may
-    // not be part of the group yet (the receiver can accept it before its REG3
-    // reaches us), and REG3 clears the unproven count but not the proof stamp.
-    // A matched entry still proves its packet in the per-sequence loop below. Datagrams from a retired socket never get here
-    // (`handle_uplink_packet` drops them by generation). The per-sequence
-    // matching below, with its RTT samples and window accounting, does not
-    // depend on this.
-    if connections[idx].connected && !incoming.srtla_ack_numbers.is_empty() {
-        connections[idx].note_srtla_ack_proof(current_time_ms);
-    }
 
     for srtla_ack in incoming.srtla_ack_numbers.iter() {
         // Match the arrival link's packet log FIRST. The receiver sends an
@@ -322,16 +305,12 @@ pub(crate) async fn handle_uplink_packet_at(
                 // Flush the deferred immediate-REG1 effect on this link's socket.
                 if let Some(pkt) = incoming.reg1_send.take()
                     && let Some(io) = conn_io.get(&connections[idx].conn_id)
+                    && let Err(e) = io.socket.send(&*pkt).await
                 {
-                    match io.socket.send(&*pkt).await {
-                        Ok(_) => connections[idx].note_sent(now_ms),
-                        Err(e) => {
-                            warn!(
-                                "{}: failed to send immediate REG1: {e}",
-                                connections[idx].label
-                            )
-                        }
-                    }
+                    warn!(
+                        "{}: failed to send immediate REG1: {e}",
+                        connections[idx].label
+                    );
                 }
                 // The SRT peer told us how deep its receive buffer is. That is
                 // the deadline every link is judged against, so it belongs on
@@ -542,7 +521,7 @@ pub async fn handle_srt_datagram(
         return;
     }
 
-    let session_isn = srtla_protocol::parse_srt_session_start(pkt);
+    let session_isn = srtla_protocol::ControlPacket::parse_session_start(pkt);
     let previous = client_pin.addr();
     match client_pin.admit(src, session_isn.is_some(), packet_time_ms) {
         ClientVerdict::Drop => {
@@ -568,7 +547,7 @@ pub async fn handle_srt_datagram(
     if let Some(isn) = session_isn {
         note_srt_session_start(isn, connections, last_session_isn);
     }
-    let seq = srtla_protocol::get_srt_sequence_number(pkt);
+    let seq = srtla_protocol::SrtData::sequence_number(pkt);
     if !registration_complete {
         let sel_idx =
             select_pre_registration_connection(connections, *last_selected_idx, packet_time_ms);
@@ -595,7 +574,7 @@ pub async fn handle_srt_datagram(
         config_snap,
         seq.is_some()
             && (critical_window.is_critical_now(packet_time_ms)
-                || srtla_protocol::is_srt_data_retransmit(pkt)),
+                || srtla_protocol::SrtData::is_retransmit(pkt)),
     );
 
     if let Some(sel_idx) = sel_idx {
@@ -697,7 +676,7 @@ pub async fn forward_via_connection(
         // the size threshold, so it does not bring back the one-packet batches
         // a flush on every link switch would emit.
         for (i, conn) in connections.iter_mut().enumerate() {
-            if i == sel_idx || !conn.has_queued_packets() {
+            if i == sel_idx || !conn.has_batch_work(packet_time_ms) {
                 continue;
             }
             if let Some(io) = conn_io.get(&conn.conn_id) {
@@ -760,28 +739,14 @@ async fn send_stall_probes(
         if i == sel_idx {
             continue;
         }
-        if !(conn.is_stall_gated() || conn.is_quality_excluded()) || !conn.connected {
+        let Some(needs_flush) = conn.maybe_queue_probe_packet(pkt, probe_seq, packet_time_ms)
+        else {
             continue;
-        }
-        if !conn.stall_probe_due() {
-            continue;
-        }
+        };
         trace!(
             "{}: sending duplicate probe (seq {})",
             conn.label, probe_seq
         );
-        // Flag the copy as a retransmission. The receiver dedups it by sequence
-        // either way, but an SRTLA-patched receiver feeds every *non*-retransmit
-        // into its reorder-hold estimator — the inter-link transit spread that
-        // delays its loss reports. A probe from a link running a second behind
-        // would pin that hold near its ceiling and slow recovery of real losses
-        // on the healthy links, to no purpose: the probed link carries no unique
-        // payload, so no gap is ever filled by waiting for it. See
-        // `set_srt_data_retransmit` for why flipping the bit is safe on traffic
-        // this proxy never decrypts.
-        let mut probe: SmallVec<u8, 1500> = SmallVec::from_slice_copy(pkt);
-        srtla_protocol::set_srt_data_retransmit(&mut probe);
-        let needs_flush = conn.queue_probe_packet(&probe, probe_seq, packet_time_ms);
         if needs_flush && let Some(io) = conn_io.get(&conn.conn_id) {
             flush_connection(
                 conn,
@@ -798,8 +763,8 @@ async fn send_stall_probes(
 /// Drain a connection's batch queue and transmit it on the link's socket.
 ///
 /// The pure `take_batch` half (queue drain + in-flight registration) lives on
-/// `SrtlaConnection`; this is the I/O half. `last_sent` is stamped here rather
-/// than in `take_batch` so it only ever records I/O the socket confirmed.
+/// `SrtlaConnection`; this is the I/O half. `BatchUdpSocket` stamps its own
+/// `last_sent_ms` once the kernel accepts datagrams.
 ///
 /// Errors are not handled here — every caller goes through [`flush_connection`],
 /// which owns the recovery arm.
@@ -818,7 +783,6 @@ async fn send_connection_batch(
     };
     conn.recycle_batch(batch);
     result?;
-    conn.note_sent(srtla_core::utils::now_ms());
     Ok(())
 }
 
@@ -876,9 +840,7 @@ pub(crate) async fn flush_all_batches_at(
     now: u64,
 ) {
     // Quick scan to check if any connection has work to do
-    let has_work = connections
-        .iter()
-        .any(|c| c.has_queued_packets() || c.needs_batch_flush(now));
+    let has_work = connections.iter().any(|c| c.has_batch_work(now));
 
     if !has_work {
         return;
@@ -887,7 +849,7 @@ pub(crate) async fn flush_all_batches_at(
     // Now do the actual flush for connections that need it
     for conn in connections.iter_mut() {
         let conn_now = srtla_core::utils::now_ms();
-        if (conn.needs_batch_flush(conn_now) || conn.has_queued_packets())
+        if conn.has_batch_work(conn_now)
             && let Some(io) = conn_io.get(&conn.conn_id)
         {
             flush_connection(
@@ -963,7 +925,7 @@ mod tests {
             "a failed flush must put the link into recovery"
         );
         assert!(
-            connections[0].last_sent.is_none(),
+            conn_io[&conn_id].socket.last_sent_ms().is_none(),
             "nothing reached the socket, so the link must not claim a send"
         );
         assert!(
@@ -989,7 +951,7 @@ mod tests {
 
         assert_eq!(connections[0].in_flight_packets, 1);
         assert!(connections[0].connected);
-        assert!(connections[0].last_sent.is_some());
+        assert!(conn_io[&conn_id].socket.last_sent_ms().is_some());
         assert_eq!(seq_tracker.get(7, now), Some(conn_id));
     }
 
@@ -1012,8 +974,8 @@ mod tests {
         original[16..].copy_from_slice(b"payload!");
         let mut retransmit = original;
         retransmit[4] |= 0x04;
-        assert!(!srtla_protocol::is_srt_data_retransmit(&original));
-        assert!(srtla_protocol::is_srt_data_retransmit(&retransmit));
+        assert!(!srtla_protocol::SrtData::is_retransmit(&original));
+        assert!(srtla_protocol::SrtData::is_retransmit(&retransmit));
 
         forward_via_connection(
             0,

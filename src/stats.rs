@@ -376,7 +376,8 @@ impl SharedStats {
                 ),
             };
 
-            let cap = in_flight_cap_packets(cc_target_bps, conn.get_rtt_min_ms());
+            let t = conn.telemetry(current_time_ms);
+            let cap = in_flight_cap_packets(cc_target_bps, t.rtt_min_ms);
             let in_flight_cap_pkts = cap.unwrap_or(0).max(0) as u32;
             let in_flight_cap_active = cap.map(|c| conn.in_flight_packets > c).unwrap_or(false);
 
@@ -387,12 +388,12 @@ impl SharedStats {
                 timed_out,
                 window: conn.window,
                 in_flight: conn.in_flight_packets,
-                rtt_ms: conn.get_smooth_rtt_ms() as u32,
-                nak_count: conn.total_nak_count(),
-                bitrate_bytes_per_sec: (conn.current_bitrate_mbps() * 1_000_000.0 / 8.0) as u32,
-                rtt_min_ms: conn.get_rtt_min_ms(),
-                rtt_velocity: conn.get_rtt_velocity(),
-                base_score: conn.get_score(),
+                rtt_ms: t.rtt_ms as u32,
+                nak_count: t.nak_count,
+                bitrate_bytes_per_sec: (t.bitrate_mbps * 1_000_000.0 / 8.0) as u32,
+                rtt_min_ms: t.rtt_min_ms,
+                rtt_velocity: t.rtt_velocity,
+                base_score: t.base_score,
                 quality_multiplier,
                 weak,
                 weak_reason,
@@ -407,20 +408,20 @@ impl SharedStats {
                 cc_loss_permille: cc_loss_pm,
                 cc_loss_ewma,
                 cc_loss_degraded,
-                batch_regime: conn.batch_sender.regime().as_str().to_string(),
-                stall_gated: conn.stall_latched(),
-                stall_gate_events: conn.stall_gate_events(),
-                silence_pulls: conn.silence_pulls(),
+                batch_regime: t.batch_regime.to_string(),
+                stall_gated: t.stall_latched,
+                stall_gate_events: t.stall_gate_events,
+                silence_pulls: t.silence_pulls,
                 weight: conn.link_weight,
-                sole_carrier: conn.is_sole_carrier(),
-                sole_carrier_excluded: conn.is_sole_carrier_excluded(),
-                sole_carrier_elections: conn.sole_carrier_elections(),
+                sole_carrier: t.sole_carrier,
+                sole_carrier_excluded: t.sole_carrier_excluded,
+                sole_carrier_elections: t.sole_carrier_elections,
                 in_flight_cap_packets: in_flight_cap_pkts,
                 in_flight_cap_active,
-                data_packets_queued_total: conn.data_packets_queued_total(),
-                srtla_ack_entries_total: conn.srtla_ack_entries_total(),
-                last_srtla_ack_age_ms: conn.last_srtla_ack_age_ms(current_time_ms),
-                srtla_ack_epoch: conn.srtla_ack_epoch(),
+                data_packets_queued_total: t.data_packets_queued_total,
+                srtla_ack_entries_total: t.srtla_ack_entries_total,
+                last_srtla_ack_age_ms: t.last_srtla_ack_age_ms,
+                srtla_ack_epoch: t.srtla_ack_epoch,
             };
 
             if is_active {

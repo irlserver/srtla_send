@@ -5,6 +5,7 @@ mod congestion;
 mod incoming;
 mod reconnection;
 mod rtt;
+mod stall_gate;
 
 use std::net::IpAddr;
 
@@ -15,10 +16,11 @@ pub use incoming::SrtlaIncoming;
 pub use reconnection::ReconnectionState;
 pub use rtt::RttTracker;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use srtla_protocol::*;
+pub use stall_gate::{delivery_proof_is_timely, rejoin_ramp_multiplier, stall_rejoin_backoff_next};
 use tracing::debug;
 
-use crate::selection::classifier::WeakReason;
 use crate::seq::NO_ACK_YET;
 
 pub const STARTUP_GRACE_MS: u64 = 5_000;
@@ -179,114 +181,6 @@ pub fn normalise_link_weights(weights: &mut [u8]) {
     }
 }
 
-/// Share of its natural score a link should compete with while ramping back
-/// in after a stall gate, rising linearly from
-/// [`crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR`] to `1.0` over `ramp_ms`.
-///
-/// A gated link is the best-looking link in the pool, and that is an artefact.
-/// It carries nothing but 1-in-N duplicate probes, so its in-flight count
-/// drains to zero, while time-based window recovery keeps growing its window
-/// because no traffic means no NAKs — and the score is `window / (in_flight +
-/// 1)`. The instant the latch releases it therefore outranks every working
-/// link by a wide margin, clears the switch hysteresis without effort, and
-/// takes the whole stream. On a marginal link that refills the queue it just
-/// drained, so it re-stalls and re-gates, which is a stable oscillation rather
-/// than a recovery: librist measured the same loop on bonded cellular at a
-/// ~15 s period, for as long as the link stayed marginal.
-///
-/// Ramping makes the link earn its share back under a growing load, so it
-/// reveals congestion on the way up and settles at what it can actually carry.
-/// `ramp_start == 0` (never gated) or an elapsed ramp both mean full score.
-#[inline]
-pub fn rejoin_ramp_multiplier(ramp_start_ms: u64, ramp_ms: u64, now_ms: u64) -> f64 {
-    use crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR;
-    if ramp_start_ms == 0 || ramp_ms == 0 {
-        return 1.0;
-    }
-    let elapsed = now_ms.saturating_sub(ramp_start_ms);
-    if elapsed >= ramp_ms {
-        return 1.0;
-    }
-    let progress = elapsed as f64 / ramp_ms as f64;
-    (STALL_REJOIN_RAMP_FLOOR + (1.0 - STALL_REJOIN_RAMP_FLOOR) * progress)
-        .clamp(STALL_REJOIN_RAMP_FLOOR, 1.0)
-}
-
-/// Rejoin-dwell multiplier to serve after the stall latch engages again, given
-/// the one it was serving, how long the last rejoin lasted, and how long it had
-/// to last to count as recovered.
-///
-/// The ramp above prices a rejoining link's share correctly but cannot stop it
-/// rejoining in the first place, and that is the half of the oscillation it
-/// does not reach: the dwell only asks for sustained delivery proof, which a
-/// drained link supplies trivially. A link carrying nothing but probes keeps a
-/// fresh `last_ack_or_rtt_sample_ms` from those probes alone, so the rejoin
-/// condition is met on schedule no matter what the path can carry under load.
-/// A link that genuinely cannot hold its share therefore rejoins, refloods,
-/// re-stalls and re-gates on a fixed period, forever.
-///
-/// Waiting longer is the only lever left, so the dwell doubles every time a
-/// rejoin fails to outlast `probation_ms`, capped at
-/// [`crate::config_snapshot::STALL_REJOIN_BACKOFF_MAX`]. A rejoin that does
-/// hold resets it immediately, so a link recovering from a transient spike is
-/// never penalised. `released_at_ms == 0` (never rejoined) is the first
-/// engagement and is always free. `0` and `1` both mean 1x.
-#[inline]
-pub fn stall_rejoin_backoff_next(
-    backoff: u32,
-    released_at_ms: u64,
-    held_for_ms: u64,
-    probation_ms: u64,
-) -> u32 {
-    if released_at_ms == 0 || held_for_ms >= probation_ms {
-        return 1;
-    }
-    let doubled = if backoff <= 1 {
-        2
-    } else {
-        backoff.saturating_mul(2)
-    };
-    doubled.min(crate::config_snapshot::STALL_REJOIN_BACKOFF_MAX)
-}
-
-/// Whether delivery proof measured at this round trip is worth anything,
-/// against a one-way delivery deadline of `budget_ms`.
-///
-/// The rejoin dwell asks a gated link to hold fresh delivery proof, and treats
-/// holding it as evidence the link can carry the stream again. On a gated link
-/// that evidence is close to free: a completed keepalive round trip stamps
-/// proof once a second, and a 38-byte control frame echoes fine on a path that
-/// could not deliver a frame of video in time. The backoff in
-/// [`stall_rejoin_backoff_next`] slows how often such a link is let back in but
-/// cannot tell that it should not be let back in at all.
-///
-/// So require the round trip to fit the deadline as well as be recent. Half of
-/// it is the one-way delay — the symmetric-path assumption used throughout this
-/// module — and it has to land inside the receiver's buffer, because a packet
-/// arriving after that is dropped rather than played whatever else is true
-/// about the link. librist reached the same rule from the receiving end: a leg
-/// queued deeper than the buffer keeps delivering packets that can never be
-/// output, so those arrivals stopped counting as evidence of anything.
-///
-/// This gates only the *release*. Engaging the latch stays a question of
-/// silence and backlog, so lateness does not become a second, redundant way to
-/// gate a link — that verdict already belongs to the weak-link classifier.
-/// Nothing here stops RTT being measured, so a link that genuinely recovers
-/// crosses back over this bar on its own; one that never recovers simply stops
-/// asking to.
-///
-/// A `budget_ms` of 0 means the peer never told us its buffer depth (see
-/// [`crate::config_snapshot::ConfigSnapshot::negotiated_latency_ms`]), and a
-/// non-positive RTT means the link has no baseline yet. Neither is grounds to
-/// withhold proof, so both pass.
-#[inline]
-pub fn delivery_proof_is_timely(smooth_rtt_ms: f64, budget_ms: u32) -> bool {
-    if budget_ms == 0 || smooth_rtt_ms <= 0.0 {
-        return true;
-    }
-    (smooth_rtt_ms / 2.0) <= budget_ms as f64
-}
-
 /// One outstanding duplicate probe.
 #[derive(Debug, Clone, Copy)]
 pub struct ProbeRecord {
@@ -309,6 +203,57 @@ static SRTLA_ACK_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 
 pub(crate) fn next_srtla_ack_epoch() -> u64 {
     SRTLA_ACK_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Read-only snapshot of a connection's metrics and telemetry at a point in time.
+///
+/// Returned by [`SrtlaConnection::telemetry`] so stats, status logging,
+/// classifiers, quality scoring, and per-link CC all read one cohesive view
+/// without reaching into internal trackers.
+#[derive(Debug, Clone, Copy)]
+pub struct ConnectionTelemetry {
+    pub rtt_ms: f64,
+    pub rtt_min_ms: f64,
+    pub rtt_velocity: f64,
+    pub rtt_jitter_ms: f64,
+    pub rtt_stable: bool,
+    pub estimated_rtt_ms: f64,
+    pub last_rtt_measurement_ms: u64,
+    pub queue_building_suspected: bool,
+    pub nak_count: i32,
+    pub nak_burst_count: i32,
+    pub time_since_last_nak_ms: Option<u64>,
+    pub connection_established_ms: u64,
+    pub bitrate_bps: f64,
+    pub bitrate_mbps: f64,
+    pub bytes_sent_total: u64,
+    pub base_score: i32,
+    pub batch_regime: &'static str,
+    pub stall_latched: bool,
+    pub stall_gate_events: u64,
+    pub silence_pulls: u64,
+    pub sole_carrier: bool,
+    pub sole_carrier_excluded: bool,
+    pub sole_carrier_elections: u64,
+    pub data_packets_queued_total: u64,
+    pub srtla_ack_entries_total: u64,
+    pub last_srtla_ack_age_ms: Option<u64>,
+    pub srtla_ack_epoch: u64,
+    pub last_received_ms: Option<u64>,
+}
+
+/// Per-tick classifier and CC verdicts stamped onto a connection for Enhanced
+/// selection to consume.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TickSignals {
+    pub weak: bool,
+    /// True when the weak verdict is due to latency/queueing rather than low
+    /// throughput share. A late link is held off unique payload; a share-weak
+    /// link keeps a crushed-score trickle to earn its share back.
+    pub weak_for_delay: bool,
+    pub cc_backing_off: bool,
+    pub cc_target_bps: u64,
+    pub loss_degraded: bool,
 }
 
 /// A NAK left unresolved this long is charged as a loss. This covers a link
@@ -378,7 +323,6 @@ pub struct SrtlaConnection {
     #[cfg(not(feature = "test-internals"))]
     pub(crate) highest_acked_seq: i32,
     pub last_received: Option<u64>,
-    pub last_sent: Option<u64>,
     /// Timestamp of the last keepalive sent (for periodic telemetry)
     // Test-only exposure: production shell never touches this, but cross-crate
     // liveness tests stamp it directly.
@@ -547,11 +491,11 @@ pub struct SrtlaConnection {
     /// tick from `WeakLinkFilter::classify`. Consumed by Enhanced
     /// selection as an admission gate.
     pub weak: bool,
-    /// Why the classifier called this link weak. Selection needs the reason,
-    /// not just the verdict: a *late* link must be kept off unique payload
-    /// entirely, while an under-used one has to keep carrying a little real
-    /// traffic to earn back the share that clears the verdict.
-    pub weak_reason: WeakReason,
+    /// Whether the weak verdict is due to latency/queueing rather than low
+    /// throughput share. Selection needs the distinction: a *late* link must
+    /// be kept off unique payload entirely, while an under-used one has to
+    /// keep carrying a little real traffic to earn back its share.
+    pub weak_for_delay: bool,
     /// Transient per-select flag: this link is held out of the payload
     /// rotation on quality grounds — it is late (or loss-degraded) while a
     /// healthy link can carry, or it lost the sole-carrier election.
@@ -607,7 +551,6 @@ impl SrtlaConnection {
             pending_naks: FxHashMap::default(),
             highest_acked_seq: NO_ACK_YET,
             last_received: None,
-            last_sent: None,
             last_keepalive_sent: None,
             last_ack_or_rtt_sample_ms: 0,
             unproven_sends: 0,
@@ -638,20 +581,91 @@ impl SrtlaConnection {
             rtt: RttTracker::default(),
             congestion: CongestionControl::default(),
             bitrate: BitrateTracker::new(now),
-            reconnection: ReconnectionState {
-                startup_grace_deadline_ms: now + STARTUP_GRACE_MS,
-                ..Default::default()
-            },
+            reconnection: ReconnectionState::new_with_grace(now),
             quality_cache: CachedQuality::default(),
             batch_sender: BatchSender::new(),
             phase: LinkPhase::Registering,
             weak: false,
-            weak_reason: crate::selection::classifier::WeakReason::Healthy,
+            weak_for_delay: false,
             quality_excluded: false,
             cc_backing_off: false,
             cc_target_bps: 0,
             loss_degraded: false,
             link_weight: LINK_WEIGHT_MIN,
+        }
+    }
+
+    /// Set this link's operator weight (clamped to
+    /// `LINK_WEIGHT_MIN..=LINK_WEIGHT_MAX`). Returns the previous weight if it
+    /// changed.
+    pub fn set_link_weight(&mut self, weight: u8) -> Option<u8> {
+        let clamped = weight.clamp(LINK_WEIGHT_MIN, LINK_WEIGHT_MAX);
+        if self.link_weight == clamped {
+            return None;
+        }
+        let prev = self.link_weight;
+        self.link_weight = clamped;
+        Some(prev)
+    }
+
+    /// Classic-mode score scaled by this link's operator weight (see
+    /// [`link_weight_multiplier`]).
+    #[inline(always)]
+    pub(crate) fn classic_weighted_score(&self) -> i32 {
+        let score = self.get_score();
+        if self.link_weight <= 1 || score <= 0 {
+            return score;
+        }
+        (score as f32 * self.weight_multiplier()) as i32
+    }
+
+    /// Enhanced-mode base score: capacity score weighted by lifecycle phase
+    /// and any active post-rejoin share ramp.
+    #[inline(always)]
+    pub(crate) fn effective_base_score(&self, now_ms: u64) -> f64 {
+        self.get_score() as f64 * self.phase.weight() * self.rejoin_ramp_multiplier(now_ms)
+    }
+
+    /// Apply per-tick classifier and CC verdicts from housekeeping.
+    pub fn apply_tick_signals(&mut self, signals: TickSignals) {
+        self.weak = signals.weak;
+        self.weak_for_delay = signals.weak_for_delay;
+        self.cc_backing_off = signals.cc_backing_off;
+        self.cc_target_bps = signals.cc_target_bps;
+        self.loss_degraded = signals.loss_degraded;
+    }
+
+    /// Read-only snapshot of this connection's telemetry and metrics at `now_ms`.
+    pub fn telemetry(&self, now_ms: u64) -> ConnectionTelemetry {
+        ConnectionTelemetry {
+            rtt_ms: self.rtt.smooth_rtt_ms(),
+            rtt_min_ms: self.rtt.rtt_min_ms,
+            rtt_velocity: self.rtt.velocity(),
+            rtt_jitter_ms: self.rtt.rtt_jitter_ms,
+            rtt_stable: self.rtt.is_stable(),
+            estimated_rtt_ms: self.rtt.estimated_rtt_ms,
+            last_rtt_measurement_ms: self.rtt.last_rtt_measurement_ms,
+            queue_building_suspected: self.rtt.queue_building_suspected(),
+            nak_count: self.congestion.nak_count,
+            nak_burst_count: self.congestion.nak_burst_count,
+            time_since_last_nak_ms: self.congestion.time_since_last_nak_ms(now_ms),
+            connection_established_ms: self.reconnection.established_ms(),
+            bitrate_bps: self.bitrate.current_bitrate_bps,
+            bitrate_mbps: self.bitrate.mbps(),
+            bytes_sent_total: self.bitrate.bytes_sent_total,
+            base_score: self.get_score(),
+            batch_regime: self.batch_sender.regime().as_str(),
+            stall_latched: self.stall_latched(),
+            stall_gate_events: self.stall_gate_events,
+            silence_pulls: self.silence_pulls,
+            sole_carrier: self.sole_carrier,
+            sole_carrier_excluded: self.sole_carrier_excluded,
+            sole_carrier_elections: self.sole_carrier_elections,
+            data_packets_queued_total: self.data_packets_queued_total,
+            srtla_ack_entries_total: self.srtla_ack_entries_total,
+            last_srtla_ack_age_ms: self.last_srtla_ack_age_ms(now_ms),
+            srtla_ack_epoch: self.srtla_ack_epoch,
+            last_received_ms: self.last_received,
         }
     }
 
@@ -742,6 +756,41 @@ impl SrtlaConnection {
             });
     }
 
+    /// Queue a duplicate probe on this link if it is currently held out of the
+    /// payload rotation and its 1-in-N probe cadence is due.
+    ///
+    /// Returns `Some(needs_flush)` when a probe was queued, or `None` when
+    /// skipped. Marks the copy with the SRT retransmit flag (`R` bit) so an
+    /// SRTLA-patched receiver excludes it from its reorder-hold estimator.
+    pub fn maybe_queue_probe_packet(
+        &mut self,
+        pkt: &[u8],
+        seq: u32,
+        send_time_ms: u64,
+    ) -> Option<bool> {
+        if !(self.stall_gated || self.quality_excluded) || !self.connected {
+            return None;
+        }
+        if !self.stall_probe_due() {
+            return None;
+        }
+        let mut probe: SmallVec<u8, 1500> = SmallVec::from_slice_copy(pkt);
+        SrtData::set_retransmit(&mut probe);
+        Some(self.queue_probe_packet(&probe, seq, send_time_ms))
+    }
+
+    /// Whether this connection has queued packets or needs a time-based batch flush.
+    #[inline]
+    pub fn has_batch_work(&self, now_ms: u64) -> bool {
+        self.batch_sender.has_queued_packets() || self.batch_sender.needs_time_flush(now_ms)
+    }
+
+    /// Whether the event loop should keep the 15 ms batch/NAK flush timer armed.
+    #[inline]
+    pub fn needs_flush_timer(&self) -> bool {
+        self.batch_sender.has_queued_packets() || !self.pending_naks.is_empty()
+    }
+
     /// Check if the batch queue needs time-based flushing (15ms interval)
     #[inline]
     pub fn needs_batch_flush(&self, now_ms: u64) -> bool {
@@ -795,7 +844,7 @@ impl SrtlaConnection {
                 // A NAK usually clears the original from the log before SRT
                 // resends it, so the repeat check in `register_packet` cannot
                 // see this copy is a resend. The retransmit flag can.
-                if is_srt_data_retransmit(data) {
+                if SrtData::is_retransmit(data) {
                     self.packet_log.insert(seq, None);
                 }
             }
@@ -813,38 +862,91 @@ impl SrtlaConnection {
     /// Build an extended keepalive packet and record that it was sent.
     ///
     /// Pure builder: the shell transmits the returned bytes on this link's
-    /// socket. State (`last_sent`, `last_keepalive_sent`, RTT-probe arming) is
-    /// updated optimistically against the injected clock — a dropped keepalive
-    /// is just a lost UDP datagram the next tick re-sends, so there is nothing
-    /// to roll back on a failed send.
+    /// socket. State (`last_keepalive_sent`, RTT-probe arming) is updated
+    /// optimistically against the injected clock — a dropped keepalive is just
+    /// a lost UDP datagram the next tick re-sends, so there is nothing to roll
+    /// back on a failed send.
     pub fn keepalive_packet(&mut self, now: u64) -> [u8; SRTLA_KEEPALIVE_EXT_LEN] {
         // Create extended keepalive with connection info (telemetry for receiver)
         let info = ConnectionInfo {
             conn_id: self.conn_id as u32,
             window: self.window,
             in_flight: self.in_flight_packets,
-            rtt_ms: self.rtt.kalman_rtt.value() as u32,
+            rtt_ms: self.rtt.raw_kalman_rtt_ms() as u32,
             nak_count: self.congestion.nak_count as u32,
             bitrate_bytes_per_sec: (self.bitrate.current_bitrate_bps / 8.0) as u32,
         };
-        let pkt = create_keepalive_packet_ext(info, now);
-        self.last_sent = Some(now);
+        let pkt = Keepalive::encode_ext(info, now);
         self.last_keepalive_sent = Some(now);
         // Only set waiting flag and timestamp when we intend to measure RTT
-        if !self.rtt.waiting_for_keepalive_response
-            && (self.rtt.last_rtt_measurement_ms == 0
-                || now.saturating_sub(self.rtt.last_rtt_measurement_ms) > 3000)
-        {
-            self.rtt.record_keepalive_sent(now);
-        }
+        self.rtt.maybe_record_keepalive_sent(now);
         pkt
     }
 
-    /// Stamp `last_sent` after the shell transmits an out-of-band packet
-    /// (registration REG1/REG2) on this link's socket.
-    #[inline]
-    pub fn note_sent(&mut self, now: u64) {
-        self.last_sent = Some(now);
+    /// Run one housekeeping tick for a non-timed-out connection: build a
+    /// keepalive if periodic keepalive or RTT probing is due, recover the
+    /// congestion window (enhanced mode), recalculate bitrate, advance the
+    /// link lifecycle phase, and adapt the batch-send regime.
+    pub fn housekeeping_tick(
+        &mut self,
+        classic: bool,
+        now_ms: u64,
+    ) -> Option<[u8; SRTLA_KEEPALIVE_EXT_LEN]> {
+        let keepalive = if self.needs_keepalive(now_ms) || self.needs_rtt_measurement(now_ms) {
+            Some(self.keepalive_packet(now_ms))
+        } else {
+            None
+        };
+        if !classic {
+            self.perform_window_recovery(now_ms);
+        }
+        self.calculate_bitrate(now_ms);
+        self.update_phase(now_ms);
+        self.recompute_batch_regime();
+        keepalive
+    }
+
+    /// Decide whether a timed-out connection should attempt a reconnect on
+    /// this tick and, if so, record the attempt. Returns `true` when the
+    /// caller should rebuild the socket.
+    pub fn try_begin_reconnect(&mut self, now_ms: u64) -> bool {
+        if !self.reconnection.should_attempt_reconnect(now_ms) {
+            return false;
+        }
+        self.reconnection.record_attempt(&self.label, now_ms);
+        true
+    }
+
+    /// Reset the initial-registration startup grace window from `now_ms`.
+    pub fn reset_startup_grace(&mut self, now_ms: u64) {
+        self.reconnection.reset_startup_grace(now_ms);
+    }
+
+    /// Transition this link into the registered state after REG3 arrives.
+    pub fn on_registered(&mut self, now_ms: u64) {
+        self.clear_pre_registration_state(now_ms);
+        self.connected = true;
+        self.last_received = Some(now_ms);
+        self.reconnection.mark_established(&self.label, now_ms);
+    }
+
+    /// Mark this link unregistered after REG_ERR arrives.
+    pub fn on_registration_error(&mut self) {
+        self.connected = false;
+        self.last_received = None;
+    }
+
+    /// Record inbound liveness from any non-registration packet on this link.
+    ///
+    /// Liveness only counts for a link that is registered, or has never been
+    /// (initial registration keeps its own grace/timeout handling). A link
+    /// that WAS established and is in recovery (`connected == false` until
+    /// REG3) stays timed out so housekeeping rebuilds its socket and re-sends
+    /// REG2 instead of parking it in limbo.
+    pub fn note_packet_received(&mut self, now_ms: u64) {
+        if self.connected || !self.reconnection.is_established() {
+            self.last_received = Some(now_ms);
+        }
     }
 
     /// Build a REG2 probe packet and arm the startup grace window.
@@ -856,8 +958,8 @@ impl SrtlaConnection {
         probe_id: &[u8; SRTLA_ID_LEN],
         now: u64,
     ) -> [u8; SRTLA_TYPE_REG2_LEN] {
-        let pkt = create_reg2_packet(probe_id);
-        self.reconnection.startup_grace_deadline_ms = now + STARTUP_GRACE_MS;
+        let pkt = RegPacket::reg2(probe_id);
+        self.reconnection.reset_startup_grace(now);
         pkt
     }
 
@@ -866,17 +968,13 @@ impl SrtlaConnection {
     }
 
     pub fn get_smooth_rtt_ms(&self) -> f64 {
-        // The 2-state Kalman filter can overshoot negative on a sharp high->low
-        // RTT transition; a negative RTT is meaningless and would leak into the
-        // selection/CC math, so clamp it. Callers that need to tell a never-measured
-        // link from a genuine ~0 already test `smooth_rtt <= 0.0`.
-        self.rtt.kalman_rtt.value().max(0.0)
+        self.rtt.smooth_rtt_ms()
     }
 
     /// RTT velocity (trend) in ms/sample from the Kalman filter.
     /// Positive = rising RTT (congestion building), negative = falling.
     pub fn get_rtt_velocity(&self) -> f64 {
-        self.rtt.kalman_rtt.velocity()
+        self.rtt.velocity()
     }
 
     pub fn get_rtt_min_ms(&self) -> f64 {
@@ -897,11 +995,8 @@ impl SrtlaConnection {
     }
 
     pub fn needs_rtt_measurement(&self, now_ms: u64) -> bool {
-        self.rtt.needs_measurement(
-            self.connected,
-            self.reconnection.connection_established_ms,
-            now_ms,
-        )
+        self.rtt
+            .needs_measurement(self.connected, self.reconnection.established_ms(), now_ms)
     }
 
     pub fn needs_keepalive(&self, now_ms: u64) -> bool {
@@ -923,7 +1018,7 @@ impl SrtlaConnection {
     }
 
     pub fn perform_window_recovery(&mut self, now_ms: u64) {
-        let velocity = self.rtt.kalman_rtt.velocity();
+        let velocity = self.rtt.velocity();
         self.congestion.perform_window_recovery(
             &mut self.window,
             self.connected,
@@ -985,42 +1080,6 @@ impl SrtlaConnection {
     #[inline]
     pub fn note_srtla_ack_proof(&mut self, now_ms: u64) {
         self.note_delivery_proof(now_ms);
-    }
-
-    /// Whether this link carries enough unanswered payload for silence or
-    /// stale proof to mean a stall: an in-flight backlog of at least
-    /// `min_in_flight`, or unproven sends that are due (see
-    /// [`Self::unproven_sends_due`]). The second arm is what sees a dead path
-    /// at moderate rates, where NAKs and cumulative ACKs arriving over the
-    /// healthy links keep draining the first. An idle link meets neither, so
-    /// its keepalive cadence alone never gates it.
-    #[inline]
-    pub fn has_stall_load(&self, min_in_flight: i32, now_ms: u64) -> bool {
-        self.in_flight_packets >= min_in_flight || self.unproven_sends_due(now_ms)
-    }
-
-    /// Whether this link owes proof for
-    /// [`crate::config_snapshot::STALL_MIN_UNPROVEN_SENDS`] payload packets,
-    /// the oldest of which has had a feedback round trip to be answered.
-    ///
-    /// The second condition keeps a burst handed to a quiet link (a keyframe
-    /// after a lost keepalive echo, say) from counting before any ACK for it
-    /// could have come back. On a link that carries traffic steadily the
-    /// oldest unproven packet is about as old as its last proof, so this costs
-    /// a dead link no detection time.
-    #[inline]
-    pub fn unproven_sends_due(&self, now_ms: u64) -> bool {
-        use crate::config_snapshot::{
-            STALL_MIN_UNPROVEN_SENDS, STALL_UNPROVEN_FEEDBACK_FLOOR_MS,
-            STALL_UNPROVEN_FEEDBACK_RTT_MULT,
-        };
-        if self.unproven_sends < STALL_MIN_UNPROVEN_SENDS {
-            return false;
-        }
-        let feedback_ms = ((self.get_smooth_rtt_ms().max(0.0) as u64)
-            .saturating_mul(STALL_UNPROVEN_FEEDBACK_RTT_MULT))
-        .max(STALL_UNPROVEN_FEEDBACK_FLOOR_MS);
-        now_ms.saturating_sub(self.first_unproven_send_ms) >= feedback_ms
     }
 
     /// Record an RTT probe and advance warming → live if enough probes collected.
@@ -1105,446 +1164,9 @@ impl SrtlaConnection {
         self.phase.weight()
     }
 
-    /// Effective delivery-proof staleness window in ms: RTT-adaptive between
-    /// [`crate::config_snapshot::STALL_STALE_FLOOR_MS`] and the configured
-    /// ceiling. Proof on a loaded link arrives every RTT (earned SRTLA ACKs),
-    /// so the window scales with the path instead of always waiting a fixed
-    /// 3 s — on a 50 ms link that fixed wait was ~3 s of payload committed to
-    /// a black hole. No RTT baseline yet falls back to the ceiling; a ceiling
-    /// configured below the floor wins (operator override).
-    #[inline]
-    pub fn effective_stall_stale_ms(&self, ceiling_ms: u64) -> u64 {
-        use crate::config_snapshot::{STALL_STALE_FLOOR_MS, STALL_STALE_RTT_MULT};
-        let srtt = self.get_smooth_rtt_ms();
-        if srtt <= 0.0 {
-            return ceiling_ms;
-        }
-        ((srtt as u64).saturating_mul(STALL_STALE_RTT_MULT))
-            .max(STALL_STALE_FLOOR_MS)
-            .min(ceiling_ms)
-    }
-
-    /// `stall_deselect` signal (pure read; never mutates). True for a connected
-    /// link that carries stall load ([`Self::has_stall_load`]: an in-flight
-    /// backlog of at least `min_in_flight`, or enough payload sent since its
-    /// last proof) AND whose last delivery proof (earned-ACK or keepalive-RTT
-    /// sample) is older than
-    /// the effective staleness window ([`Self::effective_stall_stale_ms`] of
-    /// `stale_ceiling_ms`). `now_ms` is the selection clock.
-    ///
-    /// A link that has produced no proof yet (`last_ack_or_rtt_sample_ms == 0`)
-    /// is never stalled: a fresh burst before its first ACK must not be
-    /// mistaken for a black hole. A genuinely dead-from-birth link is pruned by
-    /// `is_timed_out`/`CONN_TIMEOUT`, not here. This is a selection penalty
-    /// input ONLY — it never affects `is_timed_out`/re-registration/CONN_TIMEOUT.
-    #[inline]
-    pub fn is_stalled(&self, now_ms: u64, min_in_flight: i32, stale_ceiling_ms: u64) -> bool {
-        self.stall_arm(now_ms, min_in_flight, stale_ceiling_ms)
-            .is_some()
-    }
-
-    /// Which arm of [`Self::is_stalled`] fires, if any: the in-flight backlog
-    /// (judged on the RTT-scaled window) or the unproven-send count (judged on
-    /// at least [`crate::config_snapshot::STALL_UNPROVEN_STALE_FLOOR_MS`]).
-    pub fn stall_arm(
-        &self,
-        now_ms: u64,
-        min_in_flight: i32,
-        stale_ceiling_ms: u64,
-    ) -> Option<&'static str> {
-        if !self.connected || self.last_ack_or_rtt_sample_ms == 0 {
-            return None;
-        }
-        let proof_age_ms = now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms);
-        let stale_ms = self.effective_stall_stale_ms(stale_ceiling_ms);
-        if self.in_flight_packets >= min_in_flight && proof_age_ms >= stale_ms {
-            return Some("in-flight backlog");
-        }
-        // The unproven-send arm also fires on links whose only steady proof
-        // is the keepalive echo, so its window must clear the keepalive
-        // period with room for echo jitter (see
-        // `STALL_UNPROVEN_STALE_FLOOR_MS`).
-        (self.unproven_sends_due(now_ms)
-            && proof_age_ms >= stale_ms.max(crate::config_snapshot::STALL_UNPROVEN_STALE_FLOOR_MS))
-        .then_some("unproven sends")
-    }
-
-    /// Drive the asymmetric stall latch: quick to drop, conservative to
-    /// rejoin. Called by `apply_stall_gate` on every selection pass.
-    ///
-    /// Engaging is immediate once [`Self::is_stalled`] fires. Rejoining
-    /// requires an *uninterrupted* run of fresh delivery proof spanning
-    /// [`crate::config_snapshot::STALL_REJOIN_DWELL_MULT`] x the effective
-    /// staleness window: a single keepalive echo (or the backlog draining via
-    /// cumulative ACKs carried by the healthy links) is not evidence the path
-    /// can deliver again, and un-gating on it flaps payload back onto a
-    /// still-marginal link. Proof going stale mid-run resets the run.
-    pub fn update_stall_latch(&mut self, now_ms: u64, min_in_flight: i32, stale_ceiling_ms: u64) {
-        // Escalation from the fast tier: a silence-pulled link receives no
-        // payload, so cumulative ACKs drain the backlog and the raw
-        // `is_stalled` in-flight precondition can never fire again. If the
-        // pull is still held when the delivery proof goes fully stale, the
-        // stall is sustained, not a micro-pause — latch it so recovery goes
-        // through the dwell and probes instead of a cold readmit.
-        //
-        // A pull that engaged on unproven sends alone escalates on the same
-        // floor as the unproven-send arm: before it, a correlated gap in the
-        // link's return traffic (or one late echo) is not yet evidence that
-        // the path is dead, and the pull is released as soon as the link
-        // speaks again. A pull that engaged on a full backlog keeps the
-        // RTT-scaled window even after the backlog drains.
-        let mut escalate_after_ms = self.effective_stall_stale_ms(stale_ceiling_ms);
-        if !self.silence_pull_on_backlog {
-            escalate_after_ms =
-                escalate_after_ms.max(crate::config_snapshot::STALL_UNPROVEN_STALE_FLOOR_MS);
-        }
-        let proof_age_ms = now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms);
-        let escalates = self.silence_pulled
-            && self.last_ack_or_rtt_sample_ms != 0
-            && proof_age_ms >= escalate_after_ms;
-        let arm = self
-            .stall_arm(now_ms, min_in_flight, stale_ceiling_ms)
-            .or(escalates.then_some("silence pull"));
-        if let Some(arm) = arm {
-            if self.stall_latched_since_ms == 0 {
-                // Judge the rejoin that just ended before starting a new gate:
-                // one that could not outlast its probation earns a longer wait
-                // for the next retry, one that did clears the penalty outright.
-                let probation_ms = self
-                    .effective_stall_stale_ms(stale_ceiling_ms)
-                    .saturating_mul(crate::config_snapshot::STALL_REJOIN_PROBATION_MULT);
-                self.stall_rejoin_backoff = stall_rejoin_backoff_next(
-                    self.stall_rejoin_backoff,
-                    self.stall_released_at_ms,
-                    now_ms.saturating_sub(self.stall_released_at_ms),
-                    probation_ms,
-                );
-                debug!(
-                    "{}: stall latch engaged ({arm}: {} in flight, {} unproven sends, proof {} ms \
-                     old), rejoin dwell now {}x",
-                    self.label,
-                    self.in_flight_packets,
-                    self.unproven_sends,
-                    proof_age_ms,
-                    self.stall_rejoin_backoff
-                );
-                self.stall_latched_since_ms = now_ms;
-                self.stall_gate_events += 1;
-            }
-            self.stall_recovery_since_ms = 0;
-            return;
-        }
-        if self.stall_latched_since_ms == 0 {
-            return;
-        }
-
-        let stale_ms = self.effective_stall_stale_ms(stale_ceiling_ms);
-        // A gated link carries no payload, so its steady proof is the keepalive
-        // echo and freshness is judged on a window that outlasts one keepalive
-        // period (see `STALL_REJOIN_PROOF_FLOOR_MS`).
-        let proof_window_ms = stale_ms.max(crate::config_snapshot::STALL_REJOIN_PROOF_FLOOR_MS);
-        // Recent *and* fast enough to matter: see `delivery_proof_is_timely`.
-        // Timeliness is judged on the recent RTT floor (`rejoin_rtt_ms`), not
-        // the smoothed RTT. Both conditions restart the dwell, so a link only
-        // rejoins on a run of proof that a packet of real payload could have
-        // ridden.
-        let proof_fresh = self.last_ack_or_rtt_sample_ms != 0
-            && now_ms.saturating_sub(self.last_ack_or_rtt_sample_ms) < proof_window_ms
-            && delivery_proof_is_timely(self.rejoin_rtt_ms(), self.delay_budget_ms);
-        if !proof_fresh {
-            self.stall_recovery_since_ms = 0;
-            return;
-        }
-        if self.stall_recovery_since_ms == 0 {
-            self.stall_recovery_since_ms = now_ms;
-        }
-        let base_dwell_ms =
-            stale_ms.saturating_mul(crate::config_snapshot::STALL_REJOIN_DWELL_MULT);
-        // The wait stretches while rejoins keep failing to hold, so a link that
-        // cannot carry its share is still retried — just far enough apart that
-        // the stream stops paying a transition for every attempt. Only the
-        // *wait* scales: the ramp below stays at the base dwell, since how
-        // gently a link should be reloaded does not depend on how long it sat
-        // out, and scaling it too would leave a link at the ramp floor for
-        // minutes after it finally recovered.
-        let dwell_ms = base_dwell_ms.saturating_mul(self.stall_rejoin_backoff.max(1) as u64);
-        if now_ms.saturating_sub(self.stall_recovery_since_ms) >= dwell_ms {
-            debug!(
-                "{}: stall latch released after sustained proof ({}ms dwell), ramping share back \
-                 over {}ms",
-                self.label, dwell_ms, base_dwell_ms
-            );
-            self.stall_latched_since_ms = 0;
-            self.stall_recovery_since_ms = 0;
-            self.stall_released_at_ms = now_ms;
-            // Arm the share ramp: the link has proven it can deliver probes,
-            // not that it can carry the stream (see `rejoin_ramp_multiplier`).
-            self.arm_rejoin_ramp(now_ms, base_dwell_ms, true);
-        }
-    }
-
-    /// Start the post-rejoin share ramp, unless one is already running.
-    ///
-    /// Called wherever a link stops being held out of the payload rotation:
-    /// the stall latch releasing, a sole-carrier election ending, or a quality
-    /// exclusion lifting. All three leave the link with a drained backlog and
-    /// an inflated score it did not earn, which is what the ramp prices out
-    /// (see [`rejoin_ramp_multiplier`]).
-    ///
-    /// An in-progress ramp is never restarted. The gates above can re-arm at
-    /// classifier cadence when a verdict flaps, and restarting each time would
-    /// pin a link at the ramp floor for as long as the flapping lasts — the
-    /// link would never finish earning its share back, which is its own kind
-    /// of starvation. `from_stall_gate` records who armed it, so disabling the
-    /// stall guard at runtime can drop the ramps that guard created without
-    /// touching anyone else's.
-    #[inline]
-    pub(crate) fn arm_rejoin_ramp(&mut self, now_ms: u64, ramp_ms: u64, from_stall_gate: bool) {
-        if self.rejoin_ramp_multiplier(now_ms) < 1.0 {
-            return;
-        }
-        self.stall_rejoin_ramp_start_ms = now_ms;
-        self.stall_rejoin_ramp_ms = ramp_ms;
-        self.stall_rejoin_ramp_from_stall_gate = from_stall_gate;
-    }
-
-    /// Whether this link is currently held out of the payload rotation on
-    /// quality grounds. The shell reads this to decide which links get
-    /// duplicate probes; stats and selection read the underlying flags.
-    #[inline(always)]
-    pub fn is_quality_excluded(&self) -> bool {
-        self.quality_excluded
-    }
-
-    /// Drop every flag owned by the Enhanced quality gates.
-    ///
-    /// Only Enhanced selection maintains these, and the scheduling mode is
-    /// switchable at runtime, so Classic has to clear them rather than leave
-    /// them frozen at whatever they held when the mode changed. The rejoin
-    /// ramp is *not* cleared here: it is a scoring de-rate that Classic
-    /// ignores anyway, and it should still be running if the mode switches
-    /// back before it elapses.
-    pub(crate) fn clear_quality_gate_state(&mut self) {
-        self.quality_excluded = false;
-        self.sole_carrier = false;
-        self.sole_carrier_excluded = false;
-        self.sole_carrier_since_ms = 0;
-    }
-
-    /// Whether this link currently holds the sole-carrier role (stats export).
-    #[inline(always)]
-    pub fn is_sole_carrier(&self) -> bool {
-        self.sole_carrier
-    }
-
-    /// Whether this link is currently held out of the rotation because a
-    /// sibling holds the sole-carrier role (stats export).
-    #[inline(always)]
-    pub fn is_sole_carrier_excluded(&self) -> bool {
-        self.sole_carrier_excluded
-    }
-
-    /// Cumulative sole-carrier handovers *from another link* over its life.
-    #[inline(always)]
-    pub fn sole_carrier_elections(&self) -> u64 {
-        self.sole_carrier_elections
-    }
-
-    /// Fraction of its natural score this link should compete with right now,
-    /// in `[STALL_REJOIN_RAMP_FLOOR, 1.0]`. `1.0` whenever no ramp is running.
-    #[inline]
-    pub fn rejoin_ramp_multiplier(&self, now_ms: u64) -> f64 {
-        rejoin_ramp_multiplier(
-            self.stall_rejoin_ramp_start_ms,
-            self.stall_rejoin_ramp_ms,
-            now_ms,
-        )
-    }
-
-    /// Rejoin-dwell multiplier this link is currently serving (stats/tests).
-    /// `1` whenever no backoff has been earned.
-    #[inline(always)]
-    pub fn stall_rejoin_backoff(&self) -> u32 {
-        self.stall_rejoin_backoff.max(1)
-    }
-
-    /// Whether a post-rejoin share ramp is currently running (stats/telemetry).
-    #[inline(always)]
-    pub fn is_rejoin_ramping(&self, now_ms: u64) -> bool {
-        self.rejoin_ramp_multiplier(now_ms) < 1.0
-    }
-
-    /// Whether the stall latch is currently engaged (independent of whether a
-    /// healthy alternative exists to make it an active routing gate).
-    #[inline(always)]
-    pub fn stall_latched(&self) -> bool {
-        self.stall_latched_since_ms != 0
-    }
-
-    /// Clear the stall latch without touching the event counter. Used when the
-    /// guard is disabled at runtime so selection returns to baseline instantly.
-    pub(crate) fn clear_stall_latch(&mut self) {
-        self.stall_latched_since_ms = 0;
-        self.stall_recovery_since_ms = 0;
-        // With the guard off there are no rejoins to judge, so the escalation
-        // must not survive to lengthen the first dwell if it is turned back on.
-        self.stall_released_at_ms = 0;
-        self.stall_rejoin_backoff = 0;
-        // Including any ramp this guard armed: with it off, its contribution
-        // to scoring must be gone. Ramps armed by the sole-carrier election or
-        // the quality exclusion survive — those gates are independent of this
-        // one and still running, and wiping their ramps here would silently
-        // undo them on every selection pass.
-        if self.stall_rejoin_ramp_from_stall_gate {
-            self.stall_rejoin_ramp_start_ms = 0;
-            self.stall_rejoin_ramp_ms = 0;
-            self.stall_rejoin_ramp_from_stall_gate = false;
-        }
-    }
-
-    /// Whether this link is currently stall-gated (routing view; stats export).
-    #[inline(always)]
-    pub fn is_stall_gated(&self) -> bool {
-        self.stall_gated
-    }
-
-    /// Cumulative stall-latch engagements over this connection's life.
-    #[inline(always)]
-    pub fn stall_gate_events(&self) -> u64 {
-        self.stall_gate_events
-    }
-
-    /// Duplicate-probe cadence on a gated link: true once per
-    /// [`crate::config_snapshot::STALL_PROBE_ONE_IN_N`] calls. The caller
-    /// invokes this once per routed data packet for each gated link, mirroring
-    /// librist's per-leg trickle counter.
-    #[inline]
-    pub fn stall_probe_due(&mut self) -> bool {
-        self.stall_probe_counter += 1;
-        if self.stall_probe_counter >= crate::config_snapshot::STALL_PROBE_ONE_IN_N {
-            self.stall_probe_counter = 0;
-            return true;
-        }
-        false
-    }
-
-    /// The round trip the rejoin timeliness check judges a latched link by:
-    /// the lower of the smoothed RTT and the 3 s windowed minimum. Receivers
-    /// that batch SRTLA ACKs (BELABOX acknowledges every 10 packets per
-    /// connection) hold the ACK for a packet sent before an outage, or for a
-    /// latched link's sparse probes, until the batch fills. That sample comes
-    /// back as long as the outage or the batch and inflates the smoothed RTT
-    /// for seconds. The sample that completes each batch is answered at once,
-    /// so the floor stays at the path RTT, while a genuinely late link has no
-    /// fast samples and its floor stays high.
-    #[inline]
-    pub fn rejoin_rtt_ms(&self) -> f64 {
-        let smooth = self.get_smooth_rtt_ms();
-        if self.rtt.kalman_rtt.is_initialized() && self.rtt.rtt_min_fast_ms > 0.0 {
-            smooth.min(self.rtt.rtt_min_fast_ms)
-        } else {
-            smooth
-        }
-    }
-
-    /// RTT-scaled window (ms) of total inbound silence after which a loaded
-    /// link is transiently pulled: `max(floor, 2 x smoothed RTT)`, capped at
-    /// the effective staleness window (beyond that the latch owns the
-    /// decision, so the two tiers cannot disagree about who acts).
-    #[inline]
-    pub fn silence_pull_window_ms(&self, stale_ceiling_ms: u64) -> u64 {
-        use crate::config_snapshot::{SILENCE_PULL_FLOOR_MS, SILENCE_PULL_RTT_MULT};
-        let srtt = self.get_smooth_rtt_ms();
-        let base = if srtt <= 0.0 {
-            SILENCE_PULL_FLOOR_MS
-        } else {
-            ((srtt as u64).saturating_mul(SILENCE_PULL_RTT_MULT)).max(SILENCE_PULL_FLOOR_MS)
-        };
-        base.min(self.effective_stall_stale_ms(stale_ceiling_ms))
-    }
-
-    /// Fast silence signal (pure read): a connected link with stall load
-    /// ([`Self::has_stall_load`]) that has received *nothing* — under
-    /// load, SRTLA ACKs arrive continuously, so total silence is abnormal —
-    /// for [`Self::silence_pull_window_ms`]. The routing pull this drives is
-    /// transient and self-clearing (any inbound byte refreshes
-    /// `last_received`), the deliberate opposite of the sticky latch: fast to
-    /// react during a stall the link may ride out (e.g. a HARQ pause), free
-    /// to readmit the moment the link speaks. Never a liveness signal.
-    #[inline]
-    pub fn is_briefly_silent(
-        &self,
-        now_ms: u64,
-        min_in_flight: i32,
-        stale_ceiling_ms: u64,
-    ) -> bool {
-        if !self.connected || !self.has_stall_load(min_in_flight, now_ms) {
-            return false;
-        }
-        let Some(last_received) = self.last_received else {
-            return false;
-        };
-        now_ms.saturating_sub(last_received) >= self.silence_pull_window_ms(stale_ceiling_ms)
-    }
-
-    /// Drive the silence-pull flag and its rising-edge counter. Called by
-    /// `apply_stall_gate` on every selection pass, BEFORE the latch update
-    /// (the latch escalates from this flag).
-    ///
-    /// The pull engages only on the loaded-and-silent signal, but releases
-    /// only when the link actually SPEAKS (a fresh inbound byte) — not when
-    /// its backlog drains. Cumulative SRT ACKs delivered via the healthy
-    /// links clear a pulled link's in-flight within an RTT, so releasing on
-    /// drain would readmit the still-silent link, refill it, and re-pull it
-    /// in a tight duty cycle that both dribbles payload into the hole and
-    /// starves the latch of its in-flight precondition.
-    pub(crate) fn update_silence_pull(
-        &mut self,
-        now_ms: u64,
-        min_in_flight: i32,
-        stale_ceiling_ms: u64,
-    ) {
-        if self.is_briefly_silent(now_ms, min_in_flight, stale_ceiling_ms) {
-            if !self.silence_pulled {
-                self.silence_pulls += 1;
-                self.silence_pull_on_backlog = self.in_flight_packets >= min_in_flight;
-                debug!(
-                    "{}: silence pull engaged ({}: {} in flight, {} unproven sends)",
-                    self.label,
-                    if self.silence_pull_on_backlog {
-                        "in-flight backlog"
-                    } else {
-                        "unproven sends"
-                    },
-                    self.in_flight_packets,
-                    self.unproven_sends
-                );
-            }
-            self.silence_pulled = true;
-            return;
-        }
-        if !self.silence_pulled {
-            return;
-        }
-        let window = self.silence_pull_window_ms(stale_ceiling_ms);
-        let spoke = self
-            .last_received
-            .is_some_and(|lr| now_ms.saturating_sub(lr) < window);
-        if spoke || !self.connected {
-            self.silence_pulled = false;
-        }
-        // Otherwise: drained but still mute — hold the pull until the link
-        // speaks or the latch takes over.
-    }
-
-    /// Cumulative silence-pull engagements over this connection's life.
-    #[inline(always)]
-    pub fn silence_pulls(&self) -> u64 {
-        self.silence_pulls
-    }
-
-    /// Count the sequence entries of one SRTLA ACK that arrived on this link.
-    /// Ignored before registration completes.
+    /// Count the sequence entries of one SRTLA ACK that arrived on this link
+    /// and stamp delivery proof for this path. Ignored before registration
+    /// completes or when `entries == 0`.
     #[inline]
     pub fn note_srtla_ack_arrival(&mut self, entries: usize, now_ms: u64) {
         if !self.connected || entries == 0 {
@@ -1552,6 +1174,7 @@ impl SrtlaConnection {
         }
         self.srtla_ack_entries_total = self.srtla_ack_entries_total.saturating_add(entries as u64);
         self.last_srtla_ack_ms = now_ms;
+        self.note_delivery_proof(now_ms);
     }
 
     /// SRT DATA datagrams queued on this link over this connection's life.
@@ -1596,9 +1219,7 @@ impl SrtlaConnection {
         if !self.connected {
             // If this connection was never established (connection_established_ms == 0),
             // check if we're still within the startup grace period
-            if self.reconnection.connection_established_ms == 0
-                && now < self.reconnection.startup_grace_deadline_ms
-            {
+            if self.reconnection.in_startup_grace(now) {
                 return false;
             }
             // After grace period, or for connections that were previously established,
@@ -1704,12 +1325,11 @@ impl SrtlaConnection {
     pub fn mark_for_recovery(&mut self) {
         self.last_received = None;
         self.last_keepalive_sent = None;
-        self.rtt.last_keepalive_sent_ms = 0;
-        self.rtt.waiting_for_keepalive_response = false;
+        self.rtt.clear_pending_keepalive();
         self.reset_core_state();
         // Set grace deadline to 0 to indicate this connection is immediately timed out
         // (matches C behavior of setting last_rcvd = 1)
-        self.reconnection.startup_grace_deadline_ms = 0;
+        self.reconnection.expire_startup_grace();
     }
 
     pub fn time_since_last_nak_ms(&self, now_ms: u64) -> Option<u64> {
@@ -1725,21 +1345,24 @@ impl SrtlaConnection {
     }
 
     pub fn connection_established_ms(&self) -> u64 {
-        self.reconnection.connection_established_ms
+        self.reconnection.established_ms()
     }
 
-    /// Get the cached quality multiplier, recalculating if stale.
+    /// Get the cached quality multiplier, recomputing it via `compute` when the
+    /// 50ms cache window has elapsed.
     ///
-    /// This is more efficient than calling `calculate_quality_multiplier()` on every packet
-    /// because it only recalculates every 50ms.
+    /// The formula lives in `crate::selection::quality` so `connection` stays
+    /// strictly below `selection` with no circular dependency.
     #[inline(always)]
-    pub fn get_cached_quality_multiplier(&mut self, current_time_ms: u64) -> f64 {
-        use crate::selection::calculate_quality_multiplier;
-
+    pub(crate) fn cached_quality_multiplier(
+        &mut self,
+        current_time_ms: u64,
+        compute: impl FnOnce(&SrtlaConnection, u64) -> f64,
+    ) -> f64 {
         if current_time_ms.saturating_sub(self.quality_cache.last_calculated_ms)
             >= QUALITY_CACHE_INTERVAL_MS
         {
-            self.quality_cache.multiplier = calculate_quality_multiplier(self, current_time_ms);
+            self.quality_cache.multiplier = compute(self, current_time_ms);
             self.quality_cache.last_calculated_ms = current_time_ms;
         }
         self.quality_cache.multiplier
@@ -1768,19 +1391,16 @@ impl SrtlaConnection {
     }
 
     /// Pick the batch regime for this connection from its observed
-    /// bitrate. Called from housekeeping each tick; the underlying
-    /// `BatchSender::set_regime` is a cheap field write — no-op cost
-    /// when the regime is unchanged.
+    /// bitrate. Called from housekeeping each tick.
     pub fn recompute_batch_regime(&mut self) {
-        let regime =
-            crate::connection::batch_send::BatchRegime::from_bps(self.bitrate.current_bitrate_bps);
-        self.batch_sender.set_regime(regime);
+        self.batch_sender
+            .update_regime_for_bps(self.bitrate.current_bitrate_bps);
     }
 
     /// Reset connection state after the shell replaced this link's socket.
     /// Full reset: clears all state including congestion/bitrate stats. `now`
-    /// is the injected clock. Socket creation and the grace-reset bookkeeping
-    /// live in the shell's `reconnect_uplink`.
+    /// is the injected clock. Socket creation lives in the shell's
+    /// `rebuild_uplink_socket`.
     pub fn reset_for_reconnect(&mut self, now: u64) {
         self.last_received = None;
         self.reset_core_state();
@@ -1795,56 +1415,6 @@ impl SrtlaConnection {
         self.bitrate.reset(now);
 
         // The attempt count survives: only REG3 proves the link is back.
-        self.reconnection.last_reconnect_attempt_ms = now;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config_snapshot::STALL_REJOIN_RAMP_FLOOR;
-
-    #[test]
-    fn ramp_is_inert_when_no_ramp_is_running() {
-        // Never gated.
-        assert_eq!(rejoin_ramp_multiplier(0, 1000, 500), 1.0);
-        // Armed with a zero-length dwell (degenerate config).
-        assert_eq!(rejoin_ramp_multiplier(100, 0, 500), 1.0);
-        // Ramp already elapsed.
-        assert_eq!(rejoin_ramp_multiplier(100, 1000, 1100), 1.0);
-        assert_eq!(rejoin_ramp_multiplier(100, 1000, 9999), 1.0);
-    }
-
-    #[test]
-    fn ramp_rises_linearly_from_the_floor_to_full() {
-        assert_eq!(
-            rejoin_ramp_multiplier(100, 1000, 100),
-            STALL_REJOIN_RAMP_FLOOR
-        );
-        let quarter = rejoin_ramp_multiplier(100, 1000, 350);
-        let half = rejoin_ramp_multiplier(100, 1000, 600);
-        let three_quarters = rejoin_ramp_multiplier(100, 1000, 850);
-        assert!((quarter - (STALL_REJOIN_RAMP_FLOOR + 0.95 * 0.25)).abs() < 1e-9);
-        assert!((half - (STALL_REJOIN_RAMP_FLOOR + 0.95 * 0.50)).abs() < 1e-9);
-        assert!((three_quarters - (STALL_REJOIN_RAMP_FLOOR + 0.95 * 0.75)).abs() < 1e-9);
-        assert!(quarter < half && half < three_quarters && three_quarters < 1.0);
-    }
-
-    #[test]
-    fn ramp_never_scores_a_rejoining_link_to_zero() {
-        // The link has to carry something, or it can never reveal how it
-        // behaves under load and the ramp would gate it forever.
-        for elapsed in 0..10 {
-            let m = rejoin_ramp_multiplier(1000, 100_000, 1000 + elapsed);
-            assert!(m >= STALL_REJOIN_RAMP_FLOOR, "ramp dropped to {m}");
-        }
-    }
-
-    #[test]
-    fn ramp_tolerates_a_clock_that_went_backwards() {
-        assert_eq!(
-            rejoin_ramp_multiplier(1000, 500, 900),
-            STALL_REJOIN_RAMP_FLOOR
-        );
+        self.reconnection.on_socket_rebuilt(now);
     }
 }

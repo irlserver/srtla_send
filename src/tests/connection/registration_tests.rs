@@ -50,7 +50,7 @@ mod tests {
         // Create REG2 response packet with modified ID
         let mut modified_id = original_id;
         modified_id[SRTLA_ID_LEN / 2..].fill(0xab); // Server modifies last half
-        let buf = create_reg2_packet(&modified_id);
+        let buf = RegPacket::reg2(&modified_id);
 
         let handled = reg.process_registration_packet(0, &buf, now_ms());
         assert!(handled.is_some());
@@ -301,7 +301,7 @@ mod tests {
         // Process REG2
         let mut modified_id = reg.srtla_id;
         modified_id[SRTLA_ID_LEN / 2..].fill(0xff);
-        let reg2_packet = create_reg2_packet(&modified_id);
+        let reg2_packet = RegPacket::reg2(&modified_id);
         reg.process_registration_packet(id, &reg2_packet, now_ms());
 
         assert!(reg.broadcast_reg2_pending());
@@ -505,7 +505,7 @@ mod tests {
         let sender_prefix = reg.srtla_id;
         let mut full_id = sender_prefix;
         full_id[SRTLA_ID_LEN / 2..].fill(0x5a);
-        reg.process_registration_packet(first, &create_reg2_packet(&full_id), now_ms());
+        reg.process_registration_packet(first, &RegPacket::reg2(&full_id), now_ms());
 
         assert_eq!(reg.srtla_id, full_id, "conn 0 adopts the receiver full_id");
         assert!(reg.broadcast_reg2_pending(), "REG2 broadcast queued");
@@ -515,7 +515,7 @@ mod tests {
             "REG2 received clears pending"
         );
 
-        let broadcast = create_reg2_packet(&reg.srtla_id);
+        let broadcast = RegPacket::reg2(&reg.srtla_id);
         assert_eq!(
             &broadcast[2..],
             &full_id[..],
@@ -552,7 +552,7 @@ mod tests {
         for b in full_id[half..].iter_mut() {
             *b = 0xc3;
         }
-        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
+        reg.process_registration_packet(0, &RegPacket::reg2(&full_id), now_ms());
 
         assert_eq!(
             &reg.srtla_id[..half],
@@ -581,7 +581,7 @@ mod tests {
             *b ^= 0xff;
         }
         forged[half..].fill(0x5a);
-        reg.process_registration_packet(0, &create_reg2_packet(&forged), now_ms());
+        reg.process_registration_packet(0, &RegPacket::reg2(&forged), now_ms());
 
         assert_eq!(reg.srtla_id, original);
         assert_eq!(reg.pending_reg2_conn(), Some(0));
@@ -601,11 +601,11 @@ mod tests {
             *b ^= 0xff;
         }
         forged[half..].fill(0x5a);
-        reg.process_registration_packet(0, &create_reg2_packet(&forged), now_ms());
+        reg.process_registration_packet(0, &RegPacket::reg2(&forged), now_ms());
 
         let mut real = original;
         real[half..].fill(0x5a);
-        reg.process_registration_packet(0, &create_reg2_packet(&real), now_ms());
+        reg.process_registration_packet(0, &RegPacket::reg2(&real), now_ms());
 
         assert_eq!(reg.srtla_id, real);
         assert!(reg.broadcast_reg2_pending());
@@ -619,7 +619,7 @@ mod tests {
         let mut real = reg.srtla_id;
         real[SRTLA_ID_LEN / 2..].fill(0x5a);
 
-        let mut buf = create_reg2_packet(&real).to_vec();
+        let mut buf = RegPacket::reg2(&real).to_vec();
         buf.extend_from_slice(&[0u8; 16]);
         reg.process_registration_packet(0, &buf, now_ms());
 
@@ -636,7 +636,7 @@ mod tests {
 
         let mut reply = before;
         reply[SRTLA_ID_LEN / 2..].fill(0x5a);
-        reg.process_registration_packet(0, &create_reg2_packet(&reply), now_ms());
+        reg.process_registration_packet(0, &RegPacket::reg2(&reply), now_ms());
 
         assert_eq!(reg.srtla_id, reply);
         assert_eq!(reg.out_of_phase_reg2(), 0);
@@ -688,7 +688,7 @@ mod tests {
         full_id[SRTLA_ID_LEN / 2..].fill(0x7e);
 
         let base = now_ms();
-        reg.process_registration_packet(0, &create_reg2_packet(&full_id), now_ms());
+        reg.process_registration_packet(0, &RegPacket::reg2(&full_id), now_ms());
 
         let deadline = reg.pending_timeout_at_ms();
         assert!(
@@ -1101,7 +1101,7 @@ mod tests {
 
         let mut full_id = reg.srtla_id;
         full_id[SRTLA_ID_LEN / 2..].fill(0x5a);
-        reg.process_registration_packet(id0, &create_reg2_packet(&full_id), now_ms());
+        reg.process_registration_packet(id0, &RegPacket::reg2(&full_id), now_ms());
         reg.update_active_connections(&connections);
         let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
@@ -1133,7 +1133,7 @@ mod tests {
 
         let mut full_id = reg.srtla_id;
         full_id[SRTLA_ID_LEN / 2..].fill(0x7e);
-        reg.process_registration_packet(id1, &create_reg2_packet(&full_id), now_ms());
+        reg.process_registration_packet(id1, &RegPacket::reg2(&full_id), now_ms());
         let _ = reg.reg_driver_pending_sends(&connections, now_ms());
 
         for (idx, conn) in connections.iter_mut().enumerate() {
