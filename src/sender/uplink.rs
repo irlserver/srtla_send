@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -61,11 +61,11 @@ pub fn spawn_reader(
         let mut recv_buffer = RecvMmsgBuffer::new();
 
         loop {
-            // Wait for and receive packets (batched on Unix, single on other platforms)
-            match socket.recv_batch(&mut recv_buffer).await {
+            // Wait for and receive packets (batched on Linux, single on other platforms).
+            // Source addresses are unused on uplinks, so skip kernel sockaddr copies.
+            match socket.recv_batch_no_addr(&mut recv_buffer).await {
                 Ok(count) if count > 0 => {
-                    // Process all received packets
-                    for (_addr, data) in recv_buffer.iter() {
+                    for data in recv_buffer.iter_payloads() {
                         if data.is_empty() {
                             continue;
                         }
@@ -115,9 +115,7 @@ pub fn sync_readers(
     readers: &mut HashMap<ConnectionId, ReaderHandle>,
     packet_tx: &UnboundedSender<UplinkPacket>,
 ) {
-    let mut active_ids = HashSet::with_capacity(connections.len());
     for conn in connections {
-        active_ids.insert(conn.conn_id);
         // The socket now lives in the I/O map; a connection with no ConnIo
         // entry (should not happen — they are created together) simply gets no
         // reader until one exists.
@@ -134,7 +132,7 @@ pub fn sync_readers(
     }
 
     readers.retain(|conn_id, reader| {
-        if active_ids.contains(conn_id) {
+        if connections.iter().any(|c| c.conn_id == *conn_id) {
             true
         } else {
             reader.handle.abort();

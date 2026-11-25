@@ -41,7 +41,7 @@
 //!   status, a link must approach fair share. **3x hysteresis ratio**
 //!   between enter and leave keeps marginal links from flapping.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::connection::SrtlaConnection;
 
@@ -192,25 +192,28 @@ pub struct ClassificationResult {
     pub per_link: Vec<LinkClassification>,
 }
 
-/// Stateful filter: tracks `previously_weak` per connection so the
-/// hysteresis pass can use the leaving threshold for those, and the
-/// per-connection consecutive-tick streak of an active delay signal so
-/// `HighRtt`/`QueueBuilding` only mark weak once sustained.
-#[derive(Default)]
-pub struct WeakLinkFilter {
-    prev_weak: HashMap<u64, bool>,
-    delay_weak_streak: HashMap<u64, u32>,
+#[derive(Copy, Clone, Default)]
+struct LinkFilterState {
+    prev_weak: bool,
+    delay_weak_streak: u32,
     /// Consecutive ticks a link has been share-weak (LowShare/NoTraffic),
     /// used to trigger a probation re-test once it exceeds
     /// `PROBATION_INTERVAL_TICKS`.
-    weak_streak: HashMap<u64, u32>,
+    weak_streak: u32,
     /// Remaining forced not-weak ticks for a link currently inside a
     /// probation re-test window.
-    probation_ticks: HashMap<u64, u32>,
+    probation_ticks: u32,
     /// Multiplier applied to `PROBATION_INTERVAL_TICKS` before the next
     /// re-test, doubled per failed window and reset once one holds. 0 and 1
     /// both mean 1x — see [`probation_backoff_next`].
-    probation_backoff: HashMap<u64, u32>,
+    probation_backoff: u32,
+}
+
+/// Stateful filter: tracks per-connection hysteresis, consecutive-tick delay
+/// streaks, and probation state in a single `FxHashMap` updated in-place.
+#[derive(Default)]
+pub struct WeakLinkFilter {
+    state: FxHashMap<u64, LinkFilterState>,
 }
 
 impl WeakLinkFilter {
@@ -260,11 +263,7 @@ impl WeakLinkFilter {
             }
             // Reset hysteresis history so we don't carry stale weak flags
             // across an idle period.
-            self.prev_weak.clear();
-            self.delay_weak_streak.clear();
-            self.weak_streak.clear();
-            self.probation_ticks.clear();
-            self.probation_backoff.clear();
+            self.state.clear();
             return ClassificationResult {
                 selected_delay_ms: 0,
                 estimated_max_delay_ms: 0,
@@ -312,11 +311,6 @@ impl WeakLinkFilter {
         let n_connected = connected_count as u64;
         let enter_threshold_permille = (ENTER_FAIR_SHARE_NUMERATOR / n_connected) as u32;
         let leave_threshold_permille = (LEAVE_FAIR_SHARE_NUMERATOR / n_connected) as u32;
-        let mut next_prev_weak: HashMap<u64, bool> = HashMap::with_capacity(conns.len());
-        let mut next_delay_streak: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
-        let mut next_weak_streak: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
-        let mut next_probation: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
-        let mut next_probation_backoff: HashMap<u64, u32> = HashMap::with_capacity(conns.len());
 
         for conn in conns {
             if !conn.connected {
@@ -338,7 +332,8 @@ impl WeakLinkFilter {
                 0
             };
 
-            let was_weak = self.prev_weak.get(&conn.conn_id).copied().unwrap_or(false);
+            let entry = self.state.entry(conn.conn_id).or_default();
+            let was_weak = entry.prev_weak;
             let threshold = if was_weak {
                 leave_threshold_permille
             } else {
@@ -358,15 +353,11 @@ impl WeakLinkFilter {
                 None
             };
             let delay_streak = if delay_signal.is_some() {
-                self.delay_weak_streak
-                    .get(&conn.conn_id)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(1)
+                entry.delay_weak_streak.saturating_add(1)
             } else {
                 0
             };
-            next_delay_streak.insert(conn.conn_id, delay_streak);
+            entry.delay_weak_streak = delay_streak;
             let delay_weak = delay_streak >= WEAK_SUSTAIN_TICKS;
 
             let (weak, reason) = if delay_weak {
@@ -384,49 +375,11 @@ impl WeakLinkFilter {
                 (false, WeakReason::Healthy)
             };
 
-            // Probation re-test — breaks the share-starvation latch (R1). A
-            // link gated for low share earns a crushed routing score, gets
-            // ~no traffic, so its share stays low and it stays gated: a
-            // self-sustaining lock the GATED_LINK_PENALTY trickle can't escape.
-            // After PROBATION_INTERVAL_TICKS
-            // continuously share-weak, force a PROBATION_WINDOW_TICKS window
-            // treating the link as not-weak, so selection routes it real
-            // traffic and it can re-prove its share. Emitting not-weak clears
-            // prev_weak across the window, so the post-window judgement uses
-            // the (lower) entering threshold and a recovered link can actually
-            // win the re-test.
-            //
-            // A live delay verdict cancels the window outright. Probation is
-            // only ever armed by *share* weakness — a link starved of traffic,
-            // which real traffic is the only way to re-test — but the window
-            // used to override whatever the current tick computed, including a
-            // sustained HighRtt/QueueBuilding verdict that appeared during it.
-            // That handed a link we can see is late a full share of unique
-            // payload for the rest of the window, which is the receiver stall
-            // the delay gate exists to prevent, on a timer. If the re-test is
-            // answered, and answered badly, it is over: the link waits out
-            // another share-weak streak before the next one. `loss_degraded`
-            // never routed through here at all — it gates independently — so
-            // it was, and remains, unaffected.
-            //
-            // The wait before each re-test doubles while they keep failing (see
-            // `probation_backoff_next`). Escalation happens where the window is
-            // armed, so the first re-test is always free and the *next* one is
-            // the one pushed out; the reset lives in the healthy arm below,
-            // which is only reachable once the link is carrying its share again
-            // outside a window — the one state that proves a re-test held.
+            // Probation re-test — breaks the share-starvation latch (R1).
             let share_weak = weak && matches!(reason, WeakReason::LowShare | WeakReason::NoTraffic);
-            let mut probation = self
-                .probation_ticks
-                .get(&conn.conn_id)
-                .copied()
-                .unwrap_or(0);
-            let mut streak = self.weak_streak.get(&conn.conn_id).copied().unwrap_or(0);
-            let mut backoff = self
-                .probation_backoff
-                .get(&conn.conn_id)
-                .copied()
-                .unwrap_or(0);
+            let mut probation = entry.probation_ticks;
+            let mut streak = entry.weak_streak;
+            let mut backoff = entry.probation_backoff;
             let (weak, reason) = if probation > 0 && delay_weak {
                 probation = 0;
                 streak = 0;
@@ -448,21 +401,16 @@ impl WeakLinkFilter {
                 (weak, reason)
             } else {
                 streak = 0;
-                // Only a *healthy* verdict clears the escalation. This arm is
-                // also reached by a link that is weak for a delay reason —
-                // including one whose re-test was just cancelled for being late
-                // — and forgiving the backoff there would hand the worst case a
-                // fixed-interval retry again.
                 if !weak {
                     backoff = 1;
                 }
                 (weak, reason)
             };
-            next_weak_streak.insert(conn.conn_id, streak);
-            next_probation.insert(conn.conn_id, probation);
-            next_probation_backoff.insert(conn.conn_id, backoff);
+            entry.weak_streak = streak;
+            entry.probation_ticks = probation;
+            entry.probation_backoff = backoff;
+            entry.prev_weak = weak;
 
-            next_prev_weak.insert(conn.conn_id, weak);
             per_link.push(LinkClassification {
                 conn_id: conn.conn_id,
                 weak,
@@ -474,11 +422,8 @@ impl WeakLinkFilter {
             let _ = rtt_ms;
         }
 
-        self.prev_weak = next_prev_weak;
-        self.delay_weak_streak = next_delay_streak;
-        self.weak_streak = next_weak_streak;
-        self.probation_ticks = next_probation;
-        self.probation_backoff = next_probation_backoff;
+        self.state
+            .retain(|&id, _| conns.iter().any(|c| c.connected && c.conn_id == id));
         ClassificationResult {
             selected_delay_ms: selected_delay,
             estimated_max_delay_ms,
@@ -840,7 +785,7 @@ mod tests {
             filter.classify(&conns, 0);
         }
         assert_eq!(
-            filter.probation_backoff.get(&id).copied(),
+            filter.state.get(&id).map(|s| s.probation_backoff),
             Some(2),
             "precondition: the failed window escalated"
         );
@@ -850,7 +795,7 @@ mod tests {
         let (weak, _) = verdict(&filter.classify(&conns, 0), id);
         assert!(!weak, "a link at full share is not weak");
         assert_eq!(
-            filter.probation_backoff.get(&id).copied(),
+            filter.state.get(&id).map(|s| s.probation_backoff),
             Some(1),
             "a re-test that held must clear the escalation"
         );
@@ -876,7 +821,7 @@ mod tests {
         assert!(weak, "precondition: the re-test was cancelled");
         assert_eq!(reason, WeakReason::HighRtt);
         assert_eq!(
-            filter.probation_backoff.get(&id).copied(),
+            filter.state.get(&id).map(|s| s.probation_backoff),
             Some(2),
             "a link gated for lateness must keep the escalation it earned"
         );

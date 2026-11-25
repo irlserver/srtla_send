@@ -207,8 +207,7 @@ jobs:
   # (self-referential iovec/mmsghdr setup, msg_len -> MTU clamp, sockaddr_storage
   # decode) and fails the PR on any UB regression there. Hard limit: miri cannot
   # execute the real recvmmsg syscall, so the live-syscall path is not covered.
-  # The `batch_recv` filter scopes the run to that module's pure tests; the
-  # mimalloc test allocator is cfg'd out under miri (C FFI miri cannot run).
+  # The `batch_recv` filter scopes the run to that module's pure tests.
   miri:
     name: Miri (batch_recv unsafe pointer logic)
     runs-on: ubuntu-latest

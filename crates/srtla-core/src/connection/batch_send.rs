@@ -41,10 +41,61 @@ use tracing::debug;
 /// agree on one value without core depending on the socket layer.
 pub const BATCH_SEND_SIZE: usize = 32;
 
-/// One drained datagram awaiting transmission: `(bytes, seq, queue_time_ms)`.
-/// `seq` is `Some` for tracked data packets and `None` for untracked ones; the
-/// shell registers the tracked ones for in-flight accounting after sending.
-pub type DrainedPacket = (SmallVec<u8, 1500>, Option<u32>, u64);
+/// One drained datagram view awaiting transmission: `(bytes, seq, queue_time_ms)`.
+/// `seq` is `Some` for tracked data packets and `None` for untracked ones.
+pub type DrainedPacket<'a> = (&'a [u8], Option<u32>, u64);
+
+#[derive(Copy, Clone, Debug)]
+struct QueuedPacket {
+    offset: u32,
+    len: u32,
+    seq: Option<u32>,
+    queue_time_ms: u64,
+}
+
+/// Contiguous drained batch of datagrams ready for `sendmmsg`.
+///
+/// Holds a single flat byte slab plus per-packet metadata. Return it to
+/// [`BatchSender::recycle`] after sending so steady-state flushes reuse the
+/// backing buffers without allocating.
+#[derive(Debug, Default)]
+pub struct DrainedBatch {
+    buf: Vec<u8>,
+    entries: Vec<QueuedPacket>,
+}
+
+impl DrainedBatch {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = DrainedPacket<'_>> {
+        self.entries.iter().map(|e| {
+            let start = e.offset as usize;
+            let end = start + e.len as usize;
+            (&self.buf[start..end], e.seq, e.queue_time_ms)
+        })
+    }
+
+    #[inline]
+    pub fn datagrams(&self) -> SmallVec<&[u8], BATCH_SEND_SIZE> {
+        self.entries
+            .iter()
+            .map(|e| {
+                let start = e.offset as usize;
+                let end = start + e.len as usize;
+                &self.buf[start..end]
+            })
+            .collect()
+    }
+}
 
 /// Bitrate above which a connection is treated as high-load.
 pub const HIGH_LOAD_THRESHOLD_BPS: f64 = 5_000_000.0;
@@ -115,17 +166,18 @@ impl BatchRegime {
     }
 }
 
-/// Batch sender that queues packets and flushes them efficiently
+/// Batch sender that queues packets and flushes them efficiently.
+///
+/// Stores packet bytes in a single contiguous slab (`buf`) so idle links hold
+/// zero bytes, active batches stay tightly packed in cache, and draining moves
+/// the slab by ownership without copying packet payloads.
 #[derive(Debug)]
 pub struct BatchSender {
-    /// Queue of packets waiting to be sent
-    queue: Vec<SmallVec<u8, 1500>>,
+    /// Contiguous payload bytes for all queued packets.
+    buf: Vec<u8>,
 
-    /// Sequence numbers for queued packets (parallel to queue)
-    sequences: Vec<Option<u32>>,
-
-    /// Timestamps when packets were queued (parallel to queue)
-    queue_times: Vec<u64>,
+    /// Metadata (byte slice bounds, sequence number, queue time) per queued packet.
+    entries: Vec<QueuedPacket>,
 
     /// `now_ms()` of the last drain. Drives the 15ms time-flush window against
     /// the injected monotonic clock — no wall/`Instant` clock lives here so the
@@ -144,12 +196,11 @@ impl Default for BatchSender {
 }
 
 impl BatchSender {
-    /// Create a new batch sender
+    /// Create a new batch sender (allocates lazily on first queued packet).
     pub fn new() -> Self {
         Self {
-            queue: Vec::with_capacity(BATCH_SIZE_HIGH_LOAD),
-            sequences: Vec::with_capacity(BATCH_SIZE_HIGH_LOAD),
-            queue_times: Vec::with_capacity(BATCH_SIZE_HIGH_LOAD),
+            buf: Vec::new(),
+            entries: Vec::new(),
             last_flush_ms: 0,
             regime: BatchRegime::default(),
         }
@@ -160,11 +211,17 @@ impl BatchSender {
     /// Returns true if the queue should be flushed (threshold reached)
     #[inline]
     pub fn queue_packet(&mut self, data: &[u8], seq: Option<u32>, current_time_ms: u64) -> bool {
-        self.queue.push(SmallVec::from_slice_copy(data));
-        self.sequences.push(seq);
-        self.queue_times.push(current_time_ms);
+        let offset = self.buf.len() as u32;
+        let len = data.len() as u32;
+        self.buf.extend_from_slice(data);
+        self.entries.push(QueuedPacket {
+            offset,
+            len,
+            seq,
+            queue_time_ms: current_time_ms,
+        });
 
-        self.queue.len() >= self.regime.batch_size()
+        self.entries.len() >= self.regime.batch_size()
     }
 
     /// Update the batch regime. Called from housekeeping each tick
@@ -187,13 +244,13 @@ impl BatchSender {
     /// has held packets for at least [`FLUSH_INTERVAL_MS`].
     #[inline]
     pub fn needs_time_flush(&self, now_ms: u64) -> bool {
-        !self.queue.is_empty() && now_ms.saturating_sub(self.last_flush_ms) >= FLUSH_INTERVAL_MS
+        !self.entries.is_empty() && now_ms.saturating_sub(self.last_flush_ms) >= FLUSH_INTERVAL_MS
     }
 
     /// Check if there are any packets queued
     #[inline]
     pub fn has_queued_packets(&self) -> bool {
-        !self.queue.is_empty()
+        !self.entries.is_empty()
     }
 
     /// Number of data packets currently queued (not yet flushed).
@@ -201,29 +258,26 @@ impl BatchSender {
     /// matching the C behaviour where `reg_pkt()` increments in_flight per packet.
     #[inline]
     pub fn queued_count(&self) -> i32 {
-        self.queue.len() as i32
+        self.entries.len() as i32
     }
 
     /// Drain the queue, returning every queued datagram with its tracking info.
     ///
     /// Pure: it performs no I/O. The queue is emptied and the flush window is
     /// re-armed at `now_ms`; the shell transmits the returned bytes (see
-    /// [`send_all_datagrams`]) and registers the `Some(seq)` entries for
-    /// in-flight tracking. Returns empty when nothing was queued.
-    pub fn drain(&mut self, now_ms: u64) -> SmallVec<DrainedPacket, BATCH_SEND_SIZE> {
+    /// `send_all_datagrams`) and hands the batch back to [`Self::recycle`] so
+    /// the backing buffer capacity is reused on the next flush.
+    pub fn drain(&mut self, now_ms: u64) -> DrainedBatch {
         self.last_flush_ms = now_ms;
-        if self.queue.is_empty() {
-            return SmallVec::new();
+        if self.entries.is_empty() {
+            return DrainedBatch::default();
         }
 
-        let packet_count = self.queue.len();
-        let out: SmallVec<DrainedPacket, BATCH_SEND_SIZE> = self
-            .queue
-            .drain(..)
-            .zip(self.sequences.drain(..))
-            .zip(self.queue_times.drain(..))
-            .map(|((data, seq), time)| (data, seq, time))
-            .collect();
+        let packet_count = self.entries.len();
+        let out = DrainedBatch {
+            buf: std::mem::take(&mut self.buf),
+            entries: std::mem::take(&mut self.entries),
+        };
 
         if packet_count > 1 {
             debug!("Batch drain: {} packets ready to send", packet_count);
@@ -232,11 +286,23 @@ impl BatchSender {
         out
     }
 
+    /// Return a drained batch's backing allocations for reuse on the next queue cycle.
+    #[inline]
+    pub fn recycle(&mut self, mut batch: DrainedBatch) {
+        if self.buf.capacity() == 0 && batch.buf.capacity() > 0 {
+            batch.buf.clear();
+            self.buf = batch.buf;
+        }
+        if self.entries.capacity() == 0 && batch.entries.capacity() > 0 {
+            batch.entries.clear();
+            self.entries = batch.entries;
+        }
+    }
+
     /// Reset the batch sender state (for reconnection)
     pub fn reset(&mut self) {
-        self.queue.clear();
-        self.sequences.clear();
-        self.queue_times.clear();
+        self.buf.clear();
+        self.entries.clear();
         self.last_flush_ms = 0;
     }
 }
@@ -253,12 +319,12 @@ mod tests {
         // Queue should not trigger flush until threshold
         for i in 0..BATCH_SIZE_THRESHOLD - 1 {
             assert!(!sender.queue_packet(&data, Some(i as u32), 0));
-            assert_eq!(sender.queue.len(), i + 1);
+            assert_eq!(sender.entries.len(), i + 1);
         }
 
         // This one should trigger flush
         assert!(sender.queue_packet(&data, Some(15), 0));
-        assert_eq!(sender.queue.len(), BATCH_SIZE_THRESHOLD);
+        assert_eq!(sender.entries.len(), BATCH_SIZE_THRESHOLD);
     }
 
     #[test]
@@ -285,7 +351,8 @@ mod tests {
 
         sender.reset();
 
-        assert!(sender.queue.is_empty());
+        assert!(sender.entries.is_empty());
+        assert!(sender.buf.is_empty());
     }
 
     #[test]

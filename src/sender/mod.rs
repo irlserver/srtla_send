@@ -29,6 +29,7 @@ pub use housekeeping::GLOBAL_TIMEOUT_MS;
 use housekeeping::handle_housekeeping;
 use no_link_log::NoLinkLog;
 // Re-exported so the ACK/NAK forward dedup tests drive the real receive path.
+#[cfg(test)]
 pub(crate) use packet_handler::handle_uplink_packet;
 // Re-exported for the NAK-attribution conformance tests so they drive the real
 // production path rather than a mirrored copy.
@@ -37,7 +38,9 @@ pub(crate) use packet_handler::{
     apply_link_feedback, attribute_nak, choose_link, note_srt_session_start,
     process_connection_events,
 };
-use packet_handler::{drain_packet_queue, flush_all_batches, handle_srt_packet};
+use packet_handler::{
+    drain_packet_queue, flush_all_batches_at, handle_srt_datagram, handle_uplink_packet_at,
+};
 // Scripted resolver seam for tests that drive the re-home trigger policy.
 #[cfg(any(test, feature = "test-internals"))]
 pub use rehome::StubResolver;
@@ -174,21 +177,19 @@ pub async fn run_sender_with_config(
         });
     }
 
-    let mut recv_buf = vec![0u8; srtla_protocol::MTU];
+    let mut local_recv_buf = crate::net::RecvMmsgBuffer::new();
     let mut housekeeping_timer = time::interval_at(
         Instant::now() + Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
         Duration::from_millis(HOUSEKEEPING_INTERVAL_MS),
     );
     housekeeping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
-    // Batch flush timer (15ms interval like Moblin)
-    // This ensures packets are sent even when traffic is light
+    // Batch flush timer (15ms interval like Moblin), armed only while at least
+    // one connection has queued packets or pending NAKs.
     const BATCH_FLUSH_INTERVAL_MS: u64 = 15;
-    let mut batch_flush_timer = time::interval_at(
-        Instant::now() + Duration::from_millis(BATCH_FLUSH_INTERVAL_MS),
-        Duration::from_millis(BATCH_FLUSH_INTERVAL_MS),
-    );
-    batch_flush_timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let batch_flush_sleep = time::sleep(Duration::from_millis(BATCH_FLUSH_INTERVAL_MS));
+    tokio::pin!(batch_flush_sleep);
+    let mut batch_flush_armed = false;
 
     let mut status_elapsed_ms: u64 = 0;
     let mut client_pin = ClientPin::new();
@@ -250,43 +251,69 @@ pub async fn run_sender_with_config(
     macro_rules! event_loop {
         ($($sighup_branch:tt)*) => {
             loop {
+                let needs_batch_timer = connections
+                    .iter()
+                    .any(|c| c.has_queued_packets() || c.has_pending_naks());
+                if needs_batch_timer && !batch_flush_armed {
+                    batch_flush_sleep
+                        .as_mut()
+                        .reset(Instant::now() + Duration::from_millis(BATCH_FLUSH_INTERVAL_MS));
+                    batch_flush_armed = true;
+                } else if !needs_batch_timer && batch_flush_armed {
+                    batch_flush_armed = false;
+                }
+
                 tokio::select! {
-                    res = local_listener.recv_from(&mut recv_buf) => {
-                        let config_snap = config.snapshot();
-                        handle_srt_packet(
-                            res,
-                            &mut recv_buf,
-                            &mut connections,
-                            &conn_io,
-                            &mut last_selected_idx,
-                            &mut seq_tracker,
-                            &mut client_pin,
-                            &mut no_link_log,
-                            &mut last_session_isn,
-                            reg.has_connected,
-                            &config_snap,
-                            &critical_window,
-                        )
-                        .await;
-                        drain_packet_queue(
-                            &mut packet_rx,
-                            &mut connections,
-                            &conn_io,
-                            &mut reg,
-                            &instant_tx,
-                            &mut client_dedup,
-                            client_pin.addr(),
-                            &local_listener,
-                            &seq_tracker,
-                            &config_snap,
-                            &config,
-                        )
-                        .await;
+                    res = crate::net::recv_udp_batch(&local_listener, &mut local_recv_buf) => {
+                        match res {
+                            Ok(count) if count > 0 => {
+                                let config_snap = config.snapshot();
+                                let batch_time_ms = srtla_core::utils::now_ms();
+                                for (src, pkt) in local_recv_buf.iter() {
+                                    let Some(src) = src else {
+                                        continue;
+                                    };
+                                    handle_srt_datagram(
+                                        pkt,
+                                        src,
+                                        &mut connections,
+                                        &conn_io,
+                                        &mut last_selected_idx,
+                                        &mut seq_tracker,
+                                        &mut client_pin,
+                                        &mut no_link_log,
+                                        &mut last_session_isn,
+                                        reg.has_connected,
+                                        &config_snap,
+                                        &critical_window,
+                                        batch_time_ms,
+                                    )
+                                    .await;
+                                }
+                                drain_packet_queue(
+                                    &mut packet_rx,
+                                    &mut connections,
+                                    &conn_io,
+                                    &mut reg,
+                                    &instant_tx,
+                                    &mut client_dedup,
+                                    client_pin.addr(),
+                                    &local_listener,
+                                    &seq_tracker,
+                                    &config_snap,
+                                    &config,
+                                )
+                                .await;
+                            }
+                            Ok(_) => {}
+                            Err(e) => warn!("error reading local SRT: {}", e),
+                        }
                     }
                     packet = packet_rx.recv() => {
                         let config_snap = config.snapshot();
                         if let Some(packet) = packet {
-                            handle_uplink_packet(
+                            let now_ms = srtla_core::utils::now_ms();
+                            handle_uplink_packet_at(
                                 packet,
                                 &mut connections,
                                 &conn_io,
@@ -298,6 +325,7 @@ pub async fn run_sender_with_config(
                                 &seq_tracker,
                                 &config_snap,
                                 &config,
+                                now_ms,
                             ).await;
                             drain_packet_queue(
                                 &mut packet_rx,
@@ -318,6 +346,7 @@ pub async fn run_sender_with_config(
                     }
                     _ = housekeeping_timer.tick() => {
                         let classic = config.mode().is_classic();
+                        let tick_now_ms = srtla_core::utils::now_ms();
                         if let Err(err) = handle_housekeeping(
                             &mut connections,
                             &mut conn_io,
@@ -325,7 +354,7 @@ pub async fn run_sender_with_config(
                             &mut seq_tracker,
                             receiver_host,
                             classic,
-                            srtla_core::utils::now_ms(),
+                            tick_now_ms,
                             &mut all_failed_at,
                             &mut reader_handles,
                             &packet_tx,
@@ -341,7 +370,7 @@ pub async fn run_sender_with_config(
                         let classification = weak_link_filter
                             .classify(&connections, housekeeping_snap.negotiated_latency_ms);
                         let link_cc_snapshots = link_cc_controller
-                            .tick_all(&connections, srtla_core::utils::now_ms());
+                            .tick_all(&connections, tick_now_ms);
                         for conn in connections.iter_mut() {
                             let entry = classification
                                 .per_link
@@ -370,11 +399,11 @@ pub async fn run_sender_with_config(
                         );
 
                         // Fan the fresh snapshot out to any `stats` subscribers
-                        // on the async control socket. Cheap no-op if no one
-                        // is subscribed.
-                        let snap = shared_stats.get();
-                        if let Ok(value) = serde_json::to_value(&snap) {
-                            subscription_hub.publish("stats", value).await;
+                        // on the async control socket; skip snapshot cloning
+                        // and JSON serialization when nobody is subscribed.
+                        if subscription_hub.has_subscribers() {
+                            let snap = shared_stats.get();
+                            subscription_hub.publish_serialize("stats", &snap).await;
                         }
 
                         if let Some(changes) = pending_changes.take()
@@ -422,9 +451,10 @@ pub async fn run_sender_with_config(
                         .await;
                     }
                     $($sighup_branch)*
-                    _ = batch_flush_timer.tick() => {
-                        flush_all_batches(&mut connections, &conn_io, &mut seq_tracker).await;
+                    _ = &mut batch_flush_sleep, if batch_flush_armed => {
+                        batch_flush_armed = false;
                         let now = srtla_core::utils::now_ms();
+                        flush_all_batches_at(&mut connections, &conn_io, &mut seq_tracker, now).await;
                         for c in connections.iter_mut() {
                             c.expire_pending_naks(now);
                         }

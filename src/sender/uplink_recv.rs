@@ -24,6 +24,7 @@ use super::client_dedup::ClientDedup;
 /// shell now so the connection type owns no receive-side socket. It still takes
 /// the downstream client socket (`local_listener`) and the instant-forward
 /// channel by reference — both are shell-owned, not connection state.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn process_uplink_packet(
     conn: &mut SrtlaConnection,
@@ -34,11 +35,34 @@ pub async fn process_uplink_packet(
     client_dedup: &mut ClientDedup,
     data: &[u8],
 ) -> Result<SrtlaIncoming> {
+    process_uplink_packet_at(
+        conn,
+        reg,
+        local_listener,
+        instant_forwarder,
+        client_addr,
+        client_dedup,
+        data,
+        srtla_core::utils::now_ms(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_uplink_packet_at(
+    conn: &mut SrtlaConnection,
+    reg: &mut SrtlaRegistrationManager,
+    local_listener: &UdpSocket,
+    instant_forwarder: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, SmallVec<u8, 64>)>,
+    client_addr: Option<SocketAddr>,
+    client_dedup: &mut ClientDedup,
+    data: &[u8],
+    now: u64,
+) -> Result<SrtlaIncoming> {
     let mut incoming = SrtlaIncoming {
         read_any: true,
         ..Default::default()
     };
-    let now = srtla_core::utils::now_ms();
     let pt = get_packet_type(data);
     if let Some(pt) = pt {
         if let Some(event) = reg.process_registration_packet(conn.conn_id, data, now) {
@@ -48,7 +72,7 @@ pub async fn process_uplink_packet(
                     // the shell: build the packet here (advancing reg state)
                     // and stash it as an effect so this stays free of uplink I/O.
                     if let Some(pkt) = reg.reg1_if_ngp_immediate(conn.conn_id, now) {
-                        incoming.reg1_send = Some(pkt);
+                        incoming.reg1_send = Some(Box::new(pkt));
                     }
                 }
                 RegistrationEvent::Reg3 => {
@@ -110,9 +134,7 @@ pub async fn process_uplink_packet(
                     conn.label,
                     nak_list.len()
                 );
-                for seq in nak_list {
-                    incoming.nak_numbers.push(seq);
-                }
+                incoming.nak_numbers = nak_list;
             }
             if client_addr.is_some() && client_dedup.should_forward_nak(data, now) {
                 incoming
@@ -127,9 +149,7 @@ pub async fn process_uplink_packet(
                     conn.label,
                     ack_list.len()
                 );
-                for seq in ack_list {
-                    incoming.srtla_ack_numbers.push(seq);
-                }
+                incoming.srtla_ack_numbers = ack_list;
             }
         } else if pt == SRT_TYPE_HANDSHAKE {
             // The far end declares its TSBPD receive delay in the clear here,

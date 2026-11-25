@@ -177,6 +177,7 @@ pub(crate) fn apply_link_feedback(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn process_connection_events(
     idx: usize,
@@ -186,6 +187,30 @@ pub async fn process_connection_events(
     seq_tracker: &SequenceTracker,
     classic: bool,
     incoming: SrtlaIncoming,
+) -> Result<()> {
+    process_connection_events_at(
+        idx,
+        connections,
+        last_client_addr,
+        local_listener,
+        seq_tracker,
+        classic,
+        incoming,
+        srtla_core::utils::now_ms(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_connection_events_at(
+    idx: usize,
+    connections: &mut [SrtlaConnection],
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_tracker: &SequenceTracker,
+    classic: bool,
+    incoming: SrtlaIncoming,
+    current_time_ms: u64,
 ) -> Result<()> {
     if idx >= connections.len() {
         return Ok(());
@@ -200,8 +225,6 @@ pub async fn process_connection_events(
         return Ok(());
     }
 
-    // One monotonic read drives every ACK/NAK handler in this receive batch.
-    let current_time_ms = srtla_core::utils::now_ms();
     apply_link_feedback(
         idx,
         connections,
@@ -220,6 +243,7 @@ pub async fn process_connection_events(
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_uplink_packet(
     packet: UplinkPacket,
@@ -233,6 +257,38 @@ pub async fn handle_uplink_packet(
     seq_tracker: &SequenceTracker,
     config_snap: &ConfigSnapshot,
     config: &DynamicConfig,
+) {
+    handle_uplink_packet_at(
+        packet,
+        connections,
+        conn_io,
+        reg,
+        instant_tx,
+        client_dedup,
+        last_client_addr,
+        local_listener,
+        seq_tracker,
+        config_snap,
+        config,
+        srtla_core::utils::now_ms(),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_uplink_packet_at(
+    packet: UplinkPacket,
+    connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
+    reg: &mut SrtlaRegistrationManager,
+    instant_tx: &InstantForwarder,
+    client_dedup: &mut ClientDedup,
+    last_client_addr: Option<SocketAddr>,
+    local_listener: &UdpSocket,
+    seq_tracker: &SequenceTracker,
+    config_snap: &ConfigSnapshot,
+    config: &DynamicConfig,
+    now_ms: u64,
 ) {
     if packet.bytes.is_empty() {
         return;
@@ -250,7 +306,7 @@ pub async fn handle_uplink_packet(
         return;
     }
     if let Some(idx) = connections.iter().position(|c| c.conn_id == packet.conn_id) {
-        match super::uplink_recv::process_uplink_packet(
+        match super::uplink_recv::process_uplink_packet_at(
             &mut connections[idx],
             reg,
             local_listener,
@@ -258,6 +314,7 @@ pub async fn handle_uplink_packet(
             last_client_addr,
             client_dedup,
             &packet.bytes,
+            now_ms,
         )
         .await
         {
@@ -266,8 +323,8 @@ pub async fn handle_uplink_packet(
                 if let Some(pkt) = incoming.reg1_send.take()
                     && let Some(io) = conn_io.get(&connections[idx].conn_id)
                 {
-                    match io.socket.send(&pkt).await {
-                        Ok(_) => connections[idx].note_sent(srtla_core::utils::now_ms()),
+                    match io.socket.send(&*pkt).await {
+                        Ok(_) => connections[idx].note_sent(now_ms),
                         Err(e) => {
                             warn!(
                                 "{}: failed to send immediate REG1: {e}",
@@ -285,7 +342,7 @@ pub async fn handle_uplink_packet(
                 {
                     info!("SRT delivery budget is now {latency_ms}ms (from the peer's handshake)");
                 }
-                if let Err(err) = process_connection_events(
+                if let Err(err) = process_connection_events_at(
                     idx,
                     connections,
                     last_client_addr,
@@ -293,6 +350,7 @@ pub async fn handle_uplink_packet(
                     seq_tracker,
                     config_snap.mode.is_classic(),
                     incoming,
+                    now_ms,
                 )
                 .await
                 {
@@ -329,10 +387,12 @@ pub async fn drain_packet_queue(
     // Process up to MAX_DRAIN_PACKETS to prevent CPU spikes from large queue bursts.
     // Remaining packets will be processed on the next event loop iteration.
     let mut processed = 0;
+    let mut batch_now_ms: Option<u64> = None;
     while processed < MAX_DRAIN_PACKETS {
         match packet_rx.try_recv() {
             Ok(packet) => {
-                handle_uplink_packet(
+                let now_ms = *batch_now_ms.get_or_insert_with(srtla_core::utils::now_ms);
+                handle_uplink_packet_at(
                     packet,
                     connections,
                     conn_io,
@@ -344,6 +404,7 @@ pub async fn drain_packet_queue(
                     seq_tracker,
                     config_snap,
                     config,
+                    now_ms,
                 )
                 .await;
                 processed += 1;
@@ -460,18 +521,12 @@ pub(crate) fn choose_link(
     sel_idx
 }
 
-/// Handle incoming SRT packet
-///
-/// Uses a pre-cached `ConfigSnapshot` to avoid atomic loads per packet.
-/// The caller should create a snapshot once per select iteration for optimal performance.
-///
-/// While the encoder's priority-sidecar window is open, or when the packet is
-/// an SRT retransmit, the best-path override routes it to the highest-quality
-/// link (see the comment at the override below).
+/// Handle one incoming local SRT datagram using the caller's batch timestamp
+/// and config snapshot.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle_srt_packet(
-    res: Result<(usize, SocketAddr), std::io::Error>,
-    recv_buf: &mut [u8],
+pub async fn handle_srt_datagram(
+    pkt: &[u8],
+    src: SocketAddr,
     connections: &mut [SrtlaConnection],
     conn_io: &ConnIoMap,
     last_selected_idx: &mut Option<usize>,
@@ -482,107 +537,97 @@ pub async fn handle_srt_packet(
     registration_complete: bool,
     config_snap: &ConfigSnapshot,
     critical_window: &srtla_core::priority::CriticalWindow,
+    packet_time_ms: u64,
 ) {
-    match res {
-        Ok((n, src)) => {
-            if n == 0 {
-                return;
-            }
-            // Capture timestamp once at packet entry - reduces syscalls from 3-5 to 1 per packet
-            let packet_time_ms = srtla_core::utils::now_ms();
+    if pkt.is_empty() {
+        return;
+    }
 
-            let pkt = &recv_buf[..n];
-            let session_isn = srtla_protocol::parse_srt_session_start(pkt);
-            let previous = client_pin.addr();
-            match client_pin.admit(src, session_isn.is_some(), packet_time_ms) {
-                ClientVerdict::Drop => {
-                    if let Some(dropped) = client_pin.should_log_drop(packet_time_ms) {
-                        warn!(
-                            pinned = ?previous,
-                            %src,
-                            dropped,
-                            "dropping SRT packets from a source other than the pinned client"
-                        );
-                    }
-                    return;
-                }
-                ClientVerdict::Accept { repinned: true } => {
-                    info!(
-                        previous = ?previous,
-                        new = %src,
-                        "SRT client opened a new session from a new source; following it"
-                    );
-                }
-                ClientVerdict::Accept { repinned: false } => {}
-            }
-            if let Some(isn) = session_isn {
-                note_srt_session_start(isn, connections, last_session_isn);
-            }
-            let seq = srtla_protocol::get_srt_sequence_number(pkt);
-            if !registration_complete {
-                let sel_idx = select_pre_registration_connection(
-                    connections,
-                    *last_selected_idx,
-                    packet_time_ms,
+    let session_isn = srtla_protocol::parse_srt_session_start(pkt);
+    let previous = client_pin.addr();
+    match client_pin.admit(src, session_isn.is_some(), packet_time_ms) {
+        ClientVerdict::Drop => {
+            if let Some(dropped) = client_pin.should_log_drop(packet_time_ms) {
+                warn!(
+                    pinned = ?previous,
+                    %src,
+                    dropped,
+                    "dropping SRT packets from a source other than the pinned client"
                 );
-                if let Some(sel_idx) = sel_idx {
-                    forward_via_connection(
-                        sel_idx,
-                        pkt,
-                        seq,
-                        connections,
-                        conn_io,
-                        last_selected_idx,
-                        seq_tracker,
-                        packet_time_ms,
-                    )
-                    .await;
-                }
-                return;
             }
-
-            let sel_idx = choose_link(
-                connections,
-                *last_selected_idx,
-                packet_time_ms,
-                config_snap,
-                seq.is_some()
-                    && (critical_window.is_critical_now(packet_time_ms)
-                        || srtla_protocol::is_srt_data_retransmit(pkt)),
-            );
-
-            if let Some(sel_idx) = sel_idx {
-                if let Some(event) = no_link_log.on_forwarded(packet_time_ms) {
-                    log_event(event, src);
-                }
-                forward_via_connection(
-                    sel_idx,
-                    pkt,
-                    seq,
-                    connections,
-                    conn_io,
-                    last_selected_idx,
-                    seq_tracker,
-                    packet_time_ms,
-                )
-                .await;
-                if let Some(probe_seq) = seq {
-                    send_stall_probes(
-                        sel_idx,
-                        pkt,
-                        probe_seq,
-                        connections,
-                        conn_io,
-                        seq_tracker,
-                        packet_time_ms,
-                    )
-                    .await;
-                }
-            } else if let Some(event) = no_link_log.on_dropped(packet_time_ms) {
-                log_event(event, src);
-            }
+            return;
         }
-        Err(e) => warn!("error reading local SRT: {}", e),
+        ClientVerdict::Accept { repinned: true } => {
+            info!(
+                previous = ?previous,
+                new = %src,
+                "SRT client opened a new session from a new source; following it"
+            );
+        }
+        ClientVerdict::Accept { repinned: false } => {}
+    }
+    if let Some(isn) = session_isn {
+        note_srt_session_start(isn, connections, last_session_isn);
+    }
+    let seq = srtla_protocol::get_srt_sequence_number(pkt);
+    if !registration_complete {
+        let sel_idx =
+            select_pre_registration_connection(connections, *last_selected_idx, packet_time_ms);
+        if let Some(sel_idx) = sel_idx {
+            forward_via_connection(
+                sel_idx,
+                pkt,
+                seq,
+                connections,
+                conn_io,
+                last_selected_idx,
+                seq_tracker,
+                packet_time_ms,
+            )
+            .await;
+        }
+        return;
+    }
+
+    let sel_idx = choose_link(
+        connections,
+        *last_selected_idx,
+        packet_time_ms,
+        config_snap,
+        seq.is_some()
+            && (critical_window.is_critical_now(packet_time_ms)
+                || srtla_protocol::is_srt_data_retransmit(pkt)),
+    );
+
+    if let Some(sel_idx) = sel_idx {
+        if let Some(event) = no_link_log.on_forwarded(packet_time_ms) {
+            log_event(event, src);
+        }
+        forward_via_connection(
+            sel_idx,
+            pkt,
+            seq,
+            connections,
+            conn_io,
+            last_selected_idx,
+            seq_tracker,
+            packet_time_ms,
+        )
+        .await;
+        if let Some(probe_seq) = seq {
+            send_stall_probes(
+                sel_idx,
+                pkt,
+                probe_seq,
+                connections,
+                conn_io,
+                seq_tracker,
+                packet_time_ms,
+            )
+            .await;
+        }
+    } else if let Some(event) = no_link_log.on_dropped(packet_time_ms) {
+        log_event(event, src);
     }
 }
 
@@ -657,13 +702,20 @@ pub async fn forward_via_connection(
                 continue;
             }
             if let Some(io) = conn_io.get(&conn.conn_id) {
-                flush_connection(conn, &io.socket, seq_tracker, "ordering flush").await;
+                flush_connection(
+                    conn,
+                    &io.socket,
+                    seq_tracker,
+                    "ordering flush",
+                    packet_time_ms,
+                )
+                .await;
             }
         }
 
         if let Some(io) = conn_io.get(&connections[sel_idx].conn_id) {
             let conn = &mut connections[sel_idx];
-            flush_connection(conn, &io.socket, seq_tracker, "batch flush").await;
+            flush_connection(conn, &io.socket, seq_tracker, "batch flush", packet_time_ms).await;
         }
     }
 }
@@ -732,7 +784,14 @@ async fn send_stall_probes(
         srtla_protocol::set_srt_data_retransmit(&mut probe);
         let needs_flush = conn.queue_probe_packet(&probe, probe_seq, packet_time_ms);
         if needs_flush && let Some(io) = conn_io.get(&conn.conn_id) {
-            flush_connection(conn, &io.socket, seq_tracker, "probe batch flush").await;
+            flush_connection(
+                conn,
+                &io.socket,
+                seq_tracker,
+                "probe batch flush",
+                packet_time_ms,
+            )
+            .await;
         }
     }
 }
@@ -748,14 +807,18 @@ async fn send_stall_probes(
 async fn send_connection_batch(
     conn: &mut SrtlaConnection,
     socket: &crate::net::BatchUdpSocket,
+    now: u64,
 ) -> Result<(), crate::net::BatchSendError> {
-    let now = srtla_core::utils::now_ms();
     let batch = conn.take_batch(now);
     if batch.is_empty() {
         return Ok(());
     }
-    let bufs: SmallVec<&[u8], 32> = batch.iter().map(|(data, _, _)| data.as_slice()).collect();
-    crate::net::send_all_datagrams(socket, &bufs).await?;
+    let result = {
+        let bufs = batch.datagrams();
+        crate::net::send_all_datagrams(socket, &bufs).await
+    };
+    conn.recycle_batch(batch);
+    result?;
     conn.note_sent(now);
     Ok(())
 }
@@ -780,8 +843,9 @@ async fn flush_connection(
     socket: &crate::net::BatchUdpSocket,
     seq_tracker: &mut SequenceTracker,
     what: &str,
+    now: u64,
 ) {
-    if let Err(e) = send_connection_batch(conn, socket).await {
+    if let Err(e) = send_connection_batch(conn, socket, now).await {
         warn!("{}: {what} failed, marking for recovery: {}", conn.label, e);
         recover_connection(conn, seq_tracker);
     }
@@ -790,17 +854,29 @@ async fn flush_connection(
 /// Flush all connection batches (called on timer or when needed)
 ///
 /// Optimized with early exit: first check if any connection has queued packets
-/// before iterating. This avoids work on the 15ms timer when traffic is idle.
+/// before iterating.
+#[cfg(test)]
 pub async fn flush_all_batches(
     connections: &mut [SrtlaConnection],
     conn_io: &ConnIoMap,
     seq_tracker: &mut SequenceTracker,
 ) {
-    // One monotonic read drives the flush-window check for every connection.
-    let now = srtla_core::utils::now_ms();
+    flush_all_batches_at(
+        connections,
+        conn_io,
+        seq_tracker,
+        srtla_core::utils::now_ms(),
+    )
+    .await;
+}
 
+pub(crate) async fn flush_all_batches_at(
+    connections: &mut [SrtlaConnection],
+    conn_io: &ConnIoMap,
+    seq_tracker: &mut SequenceTracker,
+    now: u64,
+) {
     // Quick scan to check if any connection has work to do
-    // This is a fast read-only check that avoids the flush logic entirely when idle
     let has_work = connections
         .iter()
         .any(|c| c.has_queued_packets() || c.needs_batch_flush(now));
@@ -814,7 +890,7 @@ pub async fn flush_all_batches(
         if (conn.needs_batch_flush(now) || conn.has_queued_packets())
             && let Some(io) = conn_io.get(&conn.conn_id)
         {
-            flush_connection(conn, &io.socket, seq_tracker, "periodic batch flush").await;
+            flush_connection(conn, &io.socket, seq_tracker, "periodic batch flush", now).await;
         }
     }
 }

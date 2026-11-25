@@ -14,7 +14,7 @@ mod socket;
 
 #[cfg(target_vendor = "apple")]
 pub use apple::AppleInterfaceBinder;
-pub use batch_recv::{BatchUdpSocket, RecvMmsgBuffer};
+pub use batch_recv::{BatchUdpSocket, RecvMmsgBuffer, recv_udp_batch};
 // Host-side binder for platforms that steer egress by network handle (Android).
 // Exported for library consumers; the CLI binary does not construct it. Unix
 // only: it binds by raw fd, which Windows does not have.

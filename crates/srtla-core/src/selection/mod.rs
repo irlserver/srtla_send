@@ -109,13 +109,10 @@ pub fn select_connection_idx(
 /// not carry a config.
 #[inline]
 fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config: &ConfigSnapshot) {
-    for c in conns.iter_mut() {
-        c.conn_timeout_ms = config.conn_timeout_ms;
-        c.delay_budget_ms = config.negotiated_latency_ms;
-    }
-
     if !config.stall_deselect {
         for c in conns.iter_mut() {
+            c.conn_timeout_ms = config.conn_timeout_ms;
+            c.delay_budget_ms = config.negotiated_latency_ms;
             c.stall_gated = false;
             c.silence_pulled = false;
             c.clear_stall_latch();
@@ -125,19 +122,23 @@ fn apply_stall_gate(conns: &mut [SrtlaConnection], current_time_ms: u64, config:
 
     let min_in_flight = config.stall_min_in_flight;
     let stale_ceiling_ms = config.stall_ack_stale_ms;
+    let mut any_healthy = false;
 
     for c in conns.iter_mut() {
+        c.conn_timeout_ms = config.conn_timeout_ms;
+        c.delay_budget_ms = config.negotiated_latency_ms;
         // Pull first: the latch's escalation path reads the fresh pull state.
         c.update_silence_pull(current_time_ms, min_in_flight, stale_ceiling_ms);
         c.update_stall_latch(current_time_ms, min_in_flight, stale_ceiling_ms);
-    }
-
-    let any_healthy = conns.iter().any(|c| {
-        !c.is_timed_out(current_time_ms)
+        if !any_healthy
+            && !c.is_timed_out(current_time_ms)
             && c.is_schedulable()
             && !c.stall_latched()
             && !c.silence_pulled
-    });
+        {
+            any_healthy = true;
+        }
+    }
 
     for c in conns.iter_mut() {
         c.stall_gated = any_healthy && (c.stall_latched() || c.silence_pulled);
