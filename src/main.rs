@@ -187,7 +187,11 @@ fn warn_if_not_loopback(what: &str, addr: std::net::SocketAddr) {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
+// One thread on purpose. The packet loop holds every piece of bonding state
+// and the uplink readers only hand it datagrams, so worker threads add a
+// cross-thread wake per received packet and no parallelism. On loopback that
+// hop cost close to half the process CPU.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())

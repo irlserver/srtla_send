@@ -25,15 +25,6 @@ rand = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
-tokio = { version = "1.49", features = [
-	"rt-multi-thread",
-	"macros",
-	"net",
-	"time",
-	"io-util",
-	"signal",
-	"sync",
-] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 socket2 = { version = "0.6", features = ["all"] }
@@ -42,6 +33,7 @@ mimalloc = { version = "0.1", default-features = false, features = [
 	"secure",
 	"v3",
 ], optional = true }
+tokio = { version = "1.49", features = ["rt", "macros", "net", "time", "io-util", "signal", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -73,6 +65,8 @@ srtla-core = { path = "crates/srtla-core", features = ["test-internals"] }
 tempfile = "3"
 network-sim = { path = "crates/network-sim" }
 proptest = "1.11.0"
+# The binary runs on a current_thread runtime; only tests call `Runtime::new()`.
+tokio = { version = "1.49", features = ["rt-multi-thread"] }
 
 [profile.dev]
 opt-level = 1
