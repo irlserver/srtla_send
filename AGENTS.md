@@ -54,8 +54,8 @@ The root package version is the `version` field in the root `Cargo.toml`, and th
 src/                     root crate srtla_send: the I/O shell and the binary
   main.rs                CLI (clap), config file merge, startup
   lib.rs                 library exports
-  config.rs              DynamicConfig (runtime atomics), stdin command reader
-  control.rs             JSON-RPC 2.0 dispatcher (stdin and Unix socket)
+  config.rs              DynamicConfig (runtime atomics)
+  control.rs             JSON-RPC 2.0 dispatcher (stdin listener and Unix socket)
   control_socket.rs      async Unix control socket
   subscriptions.rs       server-push subscriptions for the control socket
   priority_listener.rs   UDP priority sidecar listener
@@ -89,12 +89,12 @@ tests/                   integration tests: netns_*.rs (need root), parser_propt
 crates/
   srtla-core/            sans-IO core: connection state, selection, registration, congestion
     src/connection/      SrtlaConnection, ack_nak, rtt, bitrate, incoming, congestion/,
-                         reconnection, batch_send
+                         reconnection, batch_send, stall_gate
     src/selection/       classic, enhanced, classifier, link_cc, quality
     src/registration/    REG1/REG2/REG3 state machine, probing
     src/config_snapshot.rs, mode.rs, priority.rs, seq.rs, kalman.rs, ewma.rs, windowed_min.rs,
     utils.rs, test_helpers.rs (test or test-internals)
-  srtla-protocol/        stateless wire format: parsers, builders, constants, types
+  srtla-protocol/        stateless wire format: constants, keepalive, registration, srt, srtla_ack
   network-sim/           dev-only netns + tc netem harness for tests/netns_*.rs
 .github/workflows/       ci.yml (lint, test matrix, MSRV, beta, miri, supply chain),
                          build.yml (release .debs), release.yml (draft release on tag)
@@ -110,8 +110,8 @@ The workspace splits policy from I/O. `srtla-core` holds all scheduling and conn
 
 `srtla_send` (root crate):
 
-- `config`: `DynamicConfig` (runtime atomics read through `ConfigSnapshot`) and the stdin command reader
-- `control`: JSON-RPC 2.0 dispatcher shared by stdin and the Unix socket
+- `config`: `DynamicConfig` (runtime atomics read through `ConfigSnapshot`)
+- `control`: JSON-RPC 2.0 dispatcher shared by the stdin listener and the Unix socket
 - `control_socket`: async Unix control socket
 - `subscriptions`: server-push subscriptions on the control socket
 - `priority_listener`: UDP listener for the encoder priority sidecar
@@ -140,7 +140,7 @@ The workspace splits policy from I/O. `srtla-core` holds all scheduling and conn
 - `utils`: `now_ms()`, the monotonic clock the shell reads and passes in
 - `test_helpers`: socket-free connection builders, built under `test` or the `test-internals` feature
 
-`srtla-protocol`: `builders`, `parsers`, `constants` and `types`, all re-exported from the crate root.
+`srtla-protocol`: `constants`, `keepalive` (`Keepalive`, `ConnectionInfo`), `registration` (`RegPacket`), `srt` (`SrtData`, `ControlPacket`, `SrtHandshakeLatency`), and `srtla_ack` (`SrtlaAck`), all re-exported from the crate root.
 
 ### Test Organization
 
@@ -200,6 +200,11 @@ rustfmt.toml uses unstable options, so formatting runs on nightly (`cargo +night
 
 - Formatting needs nightly: all code must pass `cargo +nightly fmt --all -- --check`. The pinned stable toolchain installs without rustfmt, so a plain `cargo fmt` fails instead of formatting with stable rules
 - All code must pass `cargo xlint` (clippy over the whole workspace with `-D warnings`)
+- Run [`deslop-please`](https://github.com/deterministic-machines/deslop-please) to check for sloppy code structure (requires `rust-analyzer` and `rust-src` components on the active toolchain).
+- Errors flagged by `deslop-please` must be fixed from first principles, don't do mechanical moves to hide them:
+  - `module-cycle` & `tangle`: what is the intended layer of abstraction? Which module should be at which layer?
+  - `field-leak` & `shallow-module`: why do we have these fields/functions at all? What are the patterns of use? Can they be hidden behind a narrow interface? Don't fix each leak one at a time, fix them holistically.
+  - Draw a diagram to help the user understand the before and proposed after structure.
 
 ## Robustness Behaviors
 
@@ -278,7 +283,7 @@ uplink to the new address together and re-register from scratch.
   widened; `rehome_on_failure` is likewise absent from the hot-path
   `ConfigSnapshot`.
 - **Test gap.** The trigger policy and mechanism are unit-tested through a
-  `ReceiverResolver` seam (`sender::rehome::StubResolver`). There is no netns
+  `ReceiverResolver` seam (`net::StubResolver`, re-exported from `sender`). There is no netns
   integration test: `tests/common` starts the sender against `topo.receiver_ip`,
   an IP literal, so "the receiver address moves" would need a hostname plus a
   per-namespace resolver whose answer changes mid-test — new harness
@@ -337,6 +342,9 @@ cargo +nightly fmt --all -- --check
 # Run clippy over the workspace, warnings as errors (what CI runs)
 cargo xlint
 
+# Architectural lint (deep modules, narrow interfaces; needs rust-analyzer + rust-src)
+deslop-please
+
 # Spell check (config in .codespellrc)
 codespell
 ```
@@ -371,13 +379,14 @@ When a coding task is completed, the following steps MUST be performed:
 cargo +nightly fmt --all
 ```
 
-### 2. Run Clippy
+### 2. Run Clippy and Architecture Lint
 
 ```bash
 cargo xlint
+deslop-please
 ```
 
-All clippy warnings must be resolved (treated as errors).
+All clippy warnings (treated as errors) and `deslop-please` findings must be resolved.
 
 ### 3. Run Tests
 
