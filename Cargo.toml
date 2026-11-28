@@ -4,7 +4,7 @@ members = ["crates/network-sim", "crates/srtla-core", "crates/srtla-protocol"]
 [package]
 resolver = "3"
 name = "srtla_send"
-version = "4.1.0"
+version = "4.2.0"
 edition = "2024"
 description = "SRT transport proxy with link aggregation for connection bonding (sender-side)"
 license = "MIT"
@@ -29,7 +29,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 socket2 = { version = "0.6", features = ["all"] }
 smallvec = "=2.0.0-alpha.12"
-tokio = { version = "1.49", features = ["rt", "macros", "net", "time", "io-util", "signal", "sync"] }
+tokio = { version = "1.49", features = [
+	"rt",
+	"macros",
+	"net",
+	"time",
+	"io-util",
+	"signal",
+	"sync",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
